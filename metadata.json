@@ -1,0 +1,1 @@
+{"name":"Remix: Stream Consciousness Agent","description":"An agent that listens to your stream of thoughts, transcribes them, and triggers actions like scheduling, task logging, and organizing summaries into Google Workspace folders.","requestFramePermissions":["microphone"],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}
