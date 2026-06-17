@@ -17,7 +17,6 @@ export default function Header({
   const [showConfig, setShowConfig] = useState(false);
   const [inputToken, setInputToken] = useState(token || "");
   const [inputClientId, setInputClientId] = useState(clientId || "");
-  const [timeStr, setTimeStr] = useState("");
 
   useEffect(() => {
     setInputToken(token || "");
@@ -26,15 +25,6 @@ export default function Header({
   useEffect(() => {
     setInputClientId(clientId || "");
   }, [clientId]);
-
-  useEffect(() => {
-    const updateTime = () => {
-      setTimeStr(new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }));
-    };
-    updateTime();
-    const interval = setInterval(updateTime, 60000);
-    return () => clearInterval(interval);
-  }, []);
 
   const handleSaveConfigs = () => {
     onSetToken(inputToken.trim() || null);
@@ -67,13 +57,6 @@ export default function Header({
         </div>
 
         <div className="flex items-center gap-3 w-full sm:w-auto shrink-0 justify-between sm:justify-end">
-          <div className="text-right">
-            <p className="text-[9px] font-mono font-bold text-stone-400 uppercase tracking-widest">Active Time</p>
-            <p className="text-xs font-semibold text-stone-700">{timeStr}</p>
-          </div>
-          
-          <div className="h-6 w-[1px] bg-stone-200" />
-
           <button
             onClick={() => setShowConfig(!showConfig)}
             className={`flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all ${

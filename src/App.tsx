@@ -11,7 +11,7 @@ import {
   createGoogleTask,
   resetSandboxState
 } from "./utils/google-apis";
-import { Check, Info, Lock, Play, ShieldAlert, Sparkles, FolderSync, RefreshCw, Trash2 } from "lucide-react";
+import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
@@ -52,13 +52,40 @@ export default function App() {
   const isLiveAnalyzingRef = useRef(false);
 
   const lastAnalyzedTextRef = useRef("");
-  const lastAnalyzedTimeRef = useRef(0);
   const liveAnalysisTimerRef = useRef<NodeJS.Timeout | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
+  };
+
+  // Build a normalized AnalysisResult from a raw /api/analyze response.
+  const toAnalysisResult = (rawRes: any, rawText: string): AnalysisResult => ({
+    summary: rawRes.ideasSummary || "",
+    rawText,
+    calendarEvents: (rawRes.calendarEvents || [])
+      .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
+      .map((evt: any) => ({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain })),
+    tasks: (rawRes.tasks || [])
+      .filter((t: any) => t && t.title && t.title.trim() !== "")
+      .map((t: any) => ({ ...t, status: "pending" as const, uncertain: !!t.uncertain })),
+    searchQueries: (rawRes.searchQueries || [])
+      .filter((q: any) => q && q.query && q.query.trim() !== "")
+      .map((q: any) => ({ ...q, status: "pending" as const })),
+    organizedFolder: rawRes.organizedFolderName || "Consciousness Report",
+    driveDocs: []
+  });
+
+  // Apply an updater to whichever analysis is selected (live draft or an archived run).
+  const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) => {
+    if (selectedRunId === "live-draft") {
+      setLiveDraft(prev => (prev ? updater(prev) : prev));
+    } else {
+      setRuns(prev => prev.map(r =>
+        r.id === selectedRunId && r.analysis ? { ...r, analysis: updater(r.analysis) } : r
+      ));
+    }
   };
 
   const handleSetToken = (newToken: string | null) => {
@@ -169,7 +196,6 @@ export default function App() {
       // Snapshot what we're analyzing so we can mark it done
       const capturedText = textToAnalyze;
       lastAnalyzedTextRef.current = capturedText;
-      lastAnalyzedTimeRef.current = Date.now();
 
       try {
         const currentLocalTime = new Date().toISOString();
@@ -182,33 +208,7 @@ export default function App() {
 
         if (res.ok) {
           const rawRes = await res.json();
-          const analysis: AnalysisResult = {
-            summary: rawRes.ideasSummary || "",
-            rawText: capturedText,
-            calendarEvents: (rawRes.calendarEvents || [])
-              .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-              .map((evt: any) => ({
-                ...evt,
-                status: "pending" as const,
-                uncertain: !!evt.uncertain
-              })),
-            tasks: (rawRes.tasks || [])
-              .filter((t: any) => t && t.title && t.title.trim() !== "")
-              .map((t: any) => ({
-                ...t,
-                status: "pending" as const,
-                uncertain: !!t.uncertain
-              })),
-            searchQueries: (rawRes.searchQueries || [])
-              .filter((q: any) => q && q.query && q.query.trim() !== "")
-              .map((q: any) => ({
-                ...q,
-                status: "pending" as const
-              })),
-            organizedFolder: rawRes.organizedFolderName || "Consciousness Report",
-            driveDocs: []
-          };
-          setLiveDraft(analysis);
+          setLiveDraft(toAnalysisResult(rawRes, capturedText));
         }
       } catch (error: any) {
         if (error.name !== "AbortError") {
@@ -220,17 +220,8 @@ export default function App() {
       }
     };
 
-    const timeSinceLastRun = Date.now() - lastAnalyzedTimeRef.current;
-
-    if (timeSinceLastRun >= 3000) {
-      // Enough time has passed — run immediately
-      runAnalysis();
-    } else {
-      // Debounce: wait 2 seconds after the last transcript change
-      liveAnalysisTimerRef.current = setTimeout(() => {
-        runAnalysis();
-      }, 2000);
-    }
+    // Debounce: run 2s after the transcript stops changing.
+    liveAnalysisTimerRef.current = setTimeout(runAnalysis, 2000);
 
     return () => {
       if (liveAnalysisTimerRef.current) {
@@ -299,32 +290,7 @@ export default function App() {
 
       const rawRes = await res.json();
 
-      const analysis: AnalysisResult = {
-        summary: rawRes.ideasSummary || "",
-        rawText: text,
-        calendarEvents: (rawRes.calendarEvents || [])
-          .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-          .map((evt: any) => ({
-            ...evt,
-            status: "pending" as const,
-            uncertain: !!evt.uncertain
-          })),
-        tasks: (rawRes.tasks || [])
-          .filter((t: any) => t && t.title && t.title.trim() !== "")
-          .map((t: any) => ({
-            ...t,
-            status: "pending" as const,
-            uncertain: !!t.uncertain
-          })),
-        searchQueries: (rawRes.searchQueries || [])
-          .filter((q: any) => q && q.query && q.query.trim() !== "")
-          .map((q: any) => ({
-            ...q,
-            status: "pending" as const
-          })),
-        organizedFolder: rawRes.organizedFolderName || "Consciousness Report",
-        driveDocs: []
-      };
+      const analysis = toAnalysisResult(rawRes, text);
 
       analysis.driveDocs = [
         {
@@ -368,175 +334,81 @@ export default function App() {
     }
   };
 
+  // The analysis currently shown (live draft or selected archive run).
+  const activeAnalysis = selectedRunId === "live-draft"
+    ? liveDraft
+    : runs.find(r => r.id === selectedRunId)?.analysis ?? null;
+
   // 1. Google Calendar Integration dispatcher
   const handleExecuteCalendar = async (index: number) => {
-    const isLiveDraft = selectedRunId === "live-draft";
-    const run = isLiveDraft 
-      ? { id: "live-draft", analysis: liveDraft } 
-      : runs.find(r => r.id === selectedRunId);
-
-    if (!run || !run.analysis) return;
-
-    const event = run.analysis.calendarEvents[index];
+    const event = activeAnalysis?.calendarEvents[index];
+    if (!event) return;
     try {
       const eventId = await createCalendarEvent(token, event);
-      
-      // Update local state logging hook
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          const updatedEvents = [...prev.calendarEvents];
-          updatedEvents[index] = { ...event, status: "scheduled", eventId };
-          return { ...prev, calendarEvents: updatedEvents };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            const updatedEvents = [...r.analysis.calendarEvents];
-            updatedEvents[index] = { ...event, status: "scheduled", eventId };
-            return { ...r, analysis: { ...r.analysis, calendarEvents: updatedEvents } };
-          }
-          return r;
-        }));
-      }
-
+      updateActiveAnalysis(a => {
+        const calendarEvents = [...a.calendarEvents];
+        calendarEvents[index] = { ...event, status: "scheduled", eventId };
+        return { ...a, calendarEvents };
+      });
       showToast(`Successfully scheduled "${event.title}" on Google Calendar!`);
     } catch (err: any) {
       console.error(err);
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          const updatedEvents = [...prev.calendarEvents];
-          updatedEvents[index] = { ...event, status: "failed", error: err.message };
-          return { ...prev, calendarEvents: updatedEvents };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            const updatedEvents = [...r.analysis.calendarEvents];
-            updatedEvents[index] = { ...event, status: "failed", error: err.message };
-            return { ...r, analysis: { ...r.analysis, calendarEvents: updatedEvents } };
-          }
-          return r;
-        }));
-      }
+      updateActiveAnalysis(a => {
+        const calendarEvents = [...a.calendarEvents];
+        calendarEvents[index] = { ...event, status: "failed", error: err.message };
+        return { ...a, calendarEvents };
+      });
       showToast(`Calendar Integration Failed: ${err.message}`);
     }
   };
 
   const handleUpdateCalendar = (index: number, updated: CalendarEvent) => {
-    const isLiveDraft = selectedRunId === "live-draft";
-    if (isLiveDraft) {
-      setLiveDraft(prev => {
-        if (!prev) return null;
-        const updatedEvents = [...prev.calendarEvents];
-        updatedEvents[index] = updated;
-        return { ...prev, calendarEvents: updatedEvents };
-      });
-    } else {
-      setRuns(prev => prev.map(r => {
-        if (r.id === selectedRunId && r.analysis) {
-          const updatedEvents = [...r.analysis.calendarEvents];
-          updatedEvents[index] = updated;
-          return { ...r, analysis: { ...r.analysis, calendarEvents: updatedEvents } };
-        }
-        return r;
-      }));
-    }
+    updateActiveAnalysis(a => {
+      const calendarEvents = [...a.calendarEvents];
+      calendarEvents[index] = updated;
+      return { ...a, calendarEvents };
+    });
   };
 
   const handleUpdateTask = (index: number, updated: TaskItem) => {
-    const isLiveDraft = selectedRunId === "live-draft";
-    if (isLiveDraft) {
-      setLiveDraft(prev => {
-        if (!prev) return null;
-        const updatedTasks = [...prev.tasks];
-        updatedTasks[index] = updated;
-        return { ...prev, tasks: updatedTasks };
-      });
-    } else {
-      setRuns(prev => prev.map(r => {
-        if (r.id === selectedRunId && r.analysis) {
-          const updatedTasks = [...r.analysis.tasks];
-          updatedTasks[index] = updated;
-          return { ...r, analysis: { ...r.analysis, tasks: updatedTasks } };
-        }
-        return r;
-      }));
-    }
+    updateActiveAnalysis(a => {
+      const tasks = [...a.tasks];
+      tasks[index] = updated;
+      return { ...a, tasks };
+    });
   };
 
   // 2. Google Tasks Integration dispatcher
   const handleExecuteTask = async (index: number) => {
-    const isLiveDraft = selectedRunId === "live-draft";
-    const run = isLiveDraft 
-      ? { id: "live-draft", analysis: liveDraft } 
-      : runs.find(r => r.id === selectedRunId);
-
-    if (!run || !run.analysis) return;
-
-    const task = run.analysis.tasks[index];
+    const task = activeAnalysis?.tasks[index];
+    if (!task) return;
     try {
       const taskId = await createGoogleTask(token, task);
-
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          const updatedTasks = [...prev.tasks];
-          updatedTasks[index] = { ...task, status: "created", taskId };
-          return { ...prev, tasks: updatedTasks };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            const updatedTasks = [...r.analysis.tasks];
-            updatedTasks[index] = { ...task, status: "created", taskId };
-            return { ...r, analysis: { ...r.analysis, tasks: updatedTasks } };
-          }
-          return r;
-        }));
-      }
-
+      updateActiveAnalysis(a => {
+        const tasks = [...a.tasks];
+        tasks[index] = { ...task, status: "created", taskId };
+        return { ...a, tasks };
+      });
       showToast(`Successfully logged task "${task.title}" to Google Tasks list!`);
     } catch (err: any) {
       console.error(err);
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          const updatedTasks = [...prev.tasks];
-          updatedTasks[index] = { ...task, status: "failed", error: err.message };
-          return { ...prev, tasks: updatedTasks };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            const updatedTasks = [...r.analysis.tasks];
-            updatedTasks[index] = { ...task, status: "failed", error: err.message };
-            return { ...r, analysis: { ...r.analysis, tasks: updatedTasks } };
-          }
-          return r;
-        }));
-      }
+      updateActiveAnalysis(a => {
+        const tasks = [...a.tasks];
+        tasks[index] = { ...task, status: "failed", error: err.message };
+        return { ...a, tasks };
+      });
       showToast(`Tasks Integration Failed: ${err.message}`);
     }
   };
 
   // 3. Grounded Gemini Search query dispatcher
   const handleExecuteSearch = async (index: number) => {
-    const isLiveDraft = selectedRunId === "live-draft";
-    const run = isLiveDraft 
-      ? { id: "live-draft", analysis: liveDraft } 
-      : runs.find(r => r.id === selectedRunId);
-
-    if (!run || !run.analysis) return;
-
-    const queryItem = run.analysis.searchQueries[index];
+    const queryItem = activeAnalysis?.searchQueries[index];
+    if (!queryItem) return;
     try {
       const res = await fetch("/api/search", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: queryItem.query })
       });
 
@@ -545,75 +417,27 @@ export default function App() {
       }
 
       const data = await res.json();
-      
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          const updatedQueries = [...prev.searchQueries];
-          updatedQueries[index] = {
-            query: queryItem.query,
-            status: "completed",
-            answer: data.answer,
-            sources: data.sources
-          };
-          return { ...prev, searchQueries: updatedQueries };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            const updatedQueries = [...r.analysis.searchQueries];
-            updatedQueries[index] = {
-              query: queryItem.query,
-              status: "completed",
-              answer: data.answer,
-              sources: data.sources
-            };
-            return { ...prev, searchQueries: updatedQueries };
-          }
-          return r;
-        }));
-      }
-
+      updateActiveAnalysis(a => {
+        const searchQueries = [...a.searchQueries];
+        searchQueries[index] = { query: queryItem.query, status: "completed", answer: data.answer, sources: data.sources };
+        return { ...a, searchQueries };
+      });
       showToast(`Researced facts retrieved for query: "${queryItem.query}"`);
     } catch (err: any) {
       console.error(err);
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          const updatedQueries = [...prev.searchQueries];
-          updatedQueries[index] = {
-            query: queryItem.query,
-            status: "failed",
-            error: err.message
-          };
-          return { ...prev, searchQueries: updatedQueries };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            const updatedQueries = [...r.analysis.searchQueries];
-            updatedQueries[index] = {
-              query: queryItem.query,
-              status: "failed",
-              error: err.message
-            };
-            return { ...prev, searchQueries: updatedQueries };
-          }
-          return r;
-        }));
-      }
+      updateActiveAnalysis(a => {
+        const searchQueries = [...a.searchQueries];
+        searchQueries[index] = { query: queryItem.query, status: "failed", error: err.message };
+        return { ...a, searchQueries };
+      });
       showToast(`Facts query search failed: ${err.message}`);
     }
   };
 
   // 4. Google Drive folder & files organization dispatcher
   const handleExecuteDrive = async () => {
-    const isLiveDraft = selectedRunId === "live-draft";
-    const run = isLiveDraft 
-      ? { id: "live-draft", analysis: liveDraft } 
-      : runs.find(r => r.id === selectedRunId);
-
-    if (!run || !run.analysis) return;
+    const run = { analysis: activeAnalysis };
+    if (!run.analysis) return;
 
     const folderName = run.analysis.organizedFolder || "Stream Consciousness Report";
 
@@ -646,28 +470,7 @@ export default function App() {
         });
       }
 
-      if (isLiveDraft) {
-        setLiveDraft(prev => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            driveDocs: uploadedDocs
-          };
-        });
-      } else {
-        setRuns(prev => prev.map(r => {
-          if (r.id === selectedRunId && r.analysis) {
-            return {
-              ...r,
-              analysis: {
-                ...r.analysis,
-                driveDocs: uploadedDocs
-              }
-            };
-          }
-          return r;
-        }));
-      }
+      updateActiveAnalysis(a => ({ ...a, driveDocs: uploadedDocs }));
 
       showToast(`Organized all documents successfully inside Drive folder "${folderName}"!`);
     } catch (err: any) {
@@ -834,7 +637,7 @@ export default function App() {
 
       {/* Humble aesthetic footer */}
       <footer className="border-t border-stone-200 bg-stone-50/50 py-4 text-center text-[10px] text-stone-400 uppercase tracking-widest font-mono">
-        Stream Consciousness Agent &bull; Engineered on top-tier Google GenAI models &bull; mlibbeyv@gmail.com
+        Scribant &bull; Engineered on top-tier Google GenAI models
       </footer>
 
     </div>

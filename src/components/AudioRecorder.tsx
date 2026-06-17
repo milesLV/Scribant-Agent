@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText } from "lucide-react";
+import MarkdownBullets from "./MarkdownBullets";
 
 interface AudioRecorderProps {
   onAnalyze: (text: string) => void;
@@ -17,35 +18,6 @@ declare global {
     webkitSpeechRecognition: any;
     SpeechRecognition: any;
   }
-}
-
-function MarkdownBulletRenderer({ text }: { text: string }) {
-  if (!text) return null;
-  const lines = text.split("\n");
-  return (
-    <ul className="list-disc pl-5 space-y-1.5 text-stone-600 font-sans text-xs">
-      {lines.map((line, idx) => {
-        const cleaned = line.replace(/^[\s*\-•+]+/, "").trim();
-        if (!cleaned) return null;
-
-        const parts = cleaned.split(/(\*\*.*?\*\*)/g);
-        return (
-          <li key={idx} className="leading-relaxed">
-            {parts.map((part, pIdx) => {
-              if (part.startsWith("**") && part.endsWith("**")) {
-                return (
-                  <strong key={pIdx} className="font-semibold text-stone-800">
-                    {part.slice(2, -2)}
-                  </strong>
-                );
-              }
-              return part.replace(/\*\*/g, "");
-            })}
-          </li>
-        );
-      })}
-    </ul>
-  );
 }
 
 export default function AudioRecorder({
@@ -254,7 +226,6 @@ export default function AudioRecorder({
       recognitionRef.current?.stop();
       setIsListening(false);
       setIsEditingTranscript(false);
-      setActiveCorrectionId(null);
       onAnalyze(fullContent);
       if (onShowToast) {
         onShowToast(`Auto-submitted your thoughts due to ${silenceDuration} seconds of silence!`);
@@ -308,7 +279,7 @@ export default function AudioRecorder({
       }
 
       if (finalStr) {
-        setTranscript((prev) => {
+        setTranscript((prev: string) => {
           const cleanedPrev = prev.trim();
           const cleanedFinal = finalStr.trim();
           if (!cleanedPrev) return cleanedFinal + " ";
@@ -451,7 +422,7 @@ export default function AudioRecorder({
               min="1"
               max="15"
               value={silenceDuration}
-              onChange={(e) => setSilenceDuration(Number(e.target.value))}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSilenceDuration(Number(e.target.value))}
               className="w-20 h-1 bg-stone-200 rounded-lg appearance-none cursor-pointer accent-amber-600"
               title="Silence timer before autocommit"
             />
@@ -572,7 +543,7 @@ export default function AudioRecorder({
 
           <div className="flex-1 overflow-y-auto pr-1">
             {liveSummary ? (
-              <MarkdownBulletRenderer text={liveSummary} />
+              <MarkdownBullets text={liveSummary} />
             ) : (
               <div className="text-stone-400 italic text-[11px] h-full flex flex-col justify-center items-center text-center px-4 leading-normal">
                 {isSummarizing ? (

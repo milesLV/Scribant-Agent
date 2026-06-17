@@ -351,21 +351,10 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
     const parsed = JSON.parse(cleanedText);
 
     console.log(`[analyze] text=${text.length}ch → events=${parsed.calendarEvents?.length ?? 0} tasks=${parsed.tasks?.length ?? 0} queries=${parsed.searchQueries?.length ?? 0}`);
-    // Fail-safe backend post-processing filters to strip empty placeholder objects
+    // Drop calendar events with a missing/placeholder start time (the client only filters on title).
     if (parsed.calendarEvents) {
       parsed.calendarEvents = parsed.calendarEvents.filter((evt: any) =>
-        evt && typeof evt === "object" && evt.title && evt.title.trim() !== "" &&
-        evt.start && evt.start.trim() !== "" && !evt.start.includes("undefined")
-      );
-    }
-    if (parsed.tasks) {
-      parsed.tasks = parsed.tasks.filter((t: any) =>
-        t && typeof t === "object" && t.title && t.title.trim() !== ""
-      );
-    }
-    if (parsed.searchQueries) {
-      parsed.searchQueries = parsed.searchQueries.filter((q: any) =>
-        q && typeof q === "object" && q.query && q.query.trim() !== ""
+        evt?.start && evt.start.trim() !== "" && !evt.start.includes("undefined")
       );
     }
 

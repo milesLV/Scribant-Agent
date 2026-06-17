@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { StreamRun, CalendarEvent, TaskItem, SearchQueryItem } from "../types";
-import { 
-  Calendar, CheckSquare, Search, FolderPlus, FileText, Check, 
-  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw 
+import {
+  Calendar, CheckSquare, Search, FolderPlus, FileText, Check,
+  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw
 } from "lucide-react";
+import MarkdownBullets from "./MarkdownBullets";
 
 interface ActiveSessionProps {
   run: StreamRun | null;
@@ -15,35 +16,6 @@ interface ActiveSessionProps {
   onUpdateCalendar: (index: number, updated: CalendarEvent) => void;
   onUpdateTask: (index: number, updated: TaskItem) => void;
   isLiveAnalyzing?: boolean;
-}
-
-function BulletinsRenderer({ text }: { text: string }) {
-  if (!text) return null;
-  const lines = text.split("\n");
-  return (
-    <ul className="list-disc pl-5 space-y-1.5 text-stone-600 font-sans text-xs">
-      {lines.map((line, idx) => {
-        const cleaned = line.replace(/^[\s*\-•+]+/, "").trim();
-        if (!cleaned) return null;
-
-        const parts = cleaned.split(/(\*\*.*?\*\*)/g);
-        return (
-          <li key={idx} className="leading-relaxed">
-            {parts.map((part, pIdx) => {
-              if (part.startsWith("**") && part.endsWith("**")) {
-                return (
-                  <strong key={pIdx} className="font-semibold text-stone-800">
-                    {part.slice(2, -2)}
-                  </strong>
-                );
-              }
-              return part.replace(/\*\*/g, "");
-            })}
-          </li>
-        );
-      })}
-    </ul>
-  );
 }
 
 export default function ActiveSession({
@@ -203,7 +175,7 @@ export default function ActiveSession({
           </h3>
           <div className="prose prose-sm text-stone-600 leading-relaxed text-sm font-sans max-h-[300px] overflow-y-auto pr-1">
             {analysis ? (
-              <BulletinsRenderer text={analysis.summary} />
+              <MarkdownBullets text={analysis.summary} />
             ) : (
               <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No bulletin ideas generated yet. Speak or type your thoughts to see summarized ideas.</p>
             )}
