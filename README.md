@@ -21,8 +21,9 @@ when you connect an account, or in a local sandbox otherwise.
    GEMINI_API_KEY2=...
    GEMINI_API_KEY3=...
    ```
-   A local [Ollama](https://ollama.com) `gemma` model is used as a final
-   fallback if all Gemini keys fail.
+   Optionally add `OLLAMA_MODEL=gemma3` (any local [Ollama](https://ollama.com)
+   model) to use it as a final fallback when all Gemini keys fail. Left unset,
+   no local model is attempted.
 3. Start the dev server (Express + Vite):
    ```
    npm run dev
@@ -39,5 +40,18 @@ when you connect an account, or in a local sandbox otherwise.
 ## Google integration
 
 By default the app runs in **Sandbox Mode** (simulated APIs, no real data
-touched). Click **Sign in with Google** to authorize real Calendar, Tasks, and
-Drive access via the OAuth implicit flow.
+touched). To use real Calendar, Tasks, and Drive you sign in against your own
+Google Cloud OAuth client (there is no shared one):
+
+1. In the [Google Cloud Console](https://console.cloud.google.com), create or pick a project.
+2. **APIs & Services → Enable APIs**: enable **Google Calendar API**, **Google Tasks API**, **Google Drive API**.
+3. **OAuth consent screen**: type *External*; add your Google account under **Test users**.
+4. **Credentials → Create credentials → OAuth client ID → Web application**:
+   - **Authorized JavaScript origins**: `http://localhost:3000`
+   - **Authorized redirect URIs**: `http://localhost:3000`
+5. Copy the **Client ID**, open Scribant → **Settings** (top right), paste it into
+   *Custom GCP Client ID*, and **Save**.
+6. Click **Sign in with Google**.
+
+The redirect URI must match the address you run on exactly. Tokens live in
+`localStorage` and expire after ~1 hour (sign in again to refresh).

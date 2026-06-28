@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { markStrangeWords, transcribeAudio } from "./transcriber";
 
 dotenv.config();
 
@@ -108,12 +109,13 @@ function rotateGeminiKey() {
   }
 }
 
-// Ordered list of model fallbacks. Ollama models are prefixed with "ollama:".
+// Gemini models tried in order. A local Ollama model is appended only when OLLAMA_MODEL is set
+// (e.g. OLLAMA_MODEL=gemma3), so it never poisons the chain with ECONNREFUSED when Ollama isn't running.
 const MODEL_FALLBACKS = [
   "gemini-2.5-flash",
   "gemini-2.5-pro",
   "gemini-2.0-flash",
-  "ollama:gemma4",
+  ...(process.env.OLLAMA_MODEL ? [`ollama:${process.env.OLLAMA_MODEL}`] : []),
 ];
 
 /**
@@ -275,12 +277,15 @@ You MUST output strictly a JSON object with the following keys and criteria:
    - "start": (string) Start time as ISO-8601 string (use the current local time to translate relative terms like "tomorrow", "next week", etc.)
    - "end": (string) End time as ISO-8601 string
    - "uncertain": (boolean) Set to true if the commitment, date, or time details are vague or uncertain, else false.
+   - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).
 3. "tasks": (array of objects) ONLY include semi-well-defined tasks or actions (e.g. YES to "I need to prepare for my interview with Google" or "When I get home I want to create a budget to follow"). DO NOT include general mood statements (e.g. NO to "I want my life together" or "I should probably work on my project"). If the task details are vague or uncertain, include the task but set "uncertain": true. Otherwise set "uncertain": false. Each object must have:
    - "title": (string) Compact title of the task
    - "notes": (string) Any descriptions, sub-items, or context
    - "uncertain": (boolean) Set to true if the task itself or its details are vague or uncertain, else false.
+   - "sourceText": (string) The exact words from the transcript that triggered this task, copied verbatim (not paraphrased).
 4. "searchQueries": (array of objects) ONLY include searchable, well-defined questions or queries (e.g. YES to "I wonder what the most efficient gas mileage for my Toyota Sienna is" or "Where is the best place to eat?"). DO NOT include personal, unsearchable thoughts (e.g. NO to "I wonder what I will eat when I get home" or "What do I have in my fridge?"). Each object must have:
    - "query": (string) The search query text
+   - "sourceText": (string) The exact words from the transcript that triggered this query, copied verbatim (not paraphrased).
 5. "organizedFolderName": (string) A clean, professional, descriptive 2-4 word folder name to organize these files under in Google Drive (e.g. "Project Beta Alignment", "Home Gardening Brainstorm").
 
 CRITICAL: If there are no items matching a category's strict criteria, you MUST return an empty array [] for that field. Do not generate empty or placeholder objects. Return ONLY the valid JSON object.`;
@@ -308,9 +313,10 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
                   description: { type: Type.STRING, description: "Event description/context" },
                   start: { type: Type.STRING, description: "Start time as ISO-8601 string" },
                   end: { type: Type.STRING, description: "End time as ISO-8601 string" },
-                  uncertain: { type: Type.BOOLEAN, description: "Whether there is uncertainty about the event commitment or details" }
+                  uncertain: { type: Type.BOOLEAN, description: "Whether there is uncertainty about the event commitment or details" },
+                  sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this event" }
                 },
-                required: ["title", "description", "start", "end", "uncertain"]
+                required: ["title", "description", "start", "end", "uncertain", "sourceText"]
               }
             },
             tasks: {
@@ -321,9 +327,10 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
                 properties: {
                   title: { type: Type.STRING, description: "Compact title of the task" },
                   notes: { type: Type.STRING, description: "Any descriptions, sub-items, or context" },
-                  uncertain: { type: Type.BOOLEAN, description: "Whether the task itself or its details are vague or uncertain" }
+                  uncertain: { type: Type.BOOLEAN, description: "Whether the task itself or its details are vague or uncertain" },
+                  sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this task" }
                 },
-                required: ["title", "notes", "uncertain"]
+                required: ["title", "notes", "uncertain", "sourceText"]
               }
             },
             searchQueries: {
@@ -332,9 +339,10 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  query: { type: Type.STRING }
+                  query: { type: Type.STRING },
+                  sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this query" }
                 },
-                required: ["query"]
+                required: ["query", "sourceText"]
               }
             },
             organizedFolderName: {
@@ -392,6 +400,43 @@ Be extremely concise. Skip any introductory remarks, system summaries, or conver
   } catch (error: any) {
     console.error("Live summarize API failed:", error);
     res.status(500).json({ error: error.message || "Failed to generate quick summary." });
+  }
+});
+
+// Transcriber, mode A: augment Web Speech text with LLM confidence + suggestions.
+app.post("/api/transcribe-check", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "Text is required and must be a string." });
+      return;
+    }
+    const words = await markStrangeWords(text, (p) => generateWithFallback(getGeminiClient(), p));
+    res.json({ words });
+  } catch (error: any) {
+    console.error("Transcribe-check failed:", error);
+    res.status(500).json({ error: error.message || "Failed to evaluate transcript." });
+  }
+});
+
+// Transcriber, mode B: raw audio → text + real acoustic word confidence (Google Cloud STT).
+// Returns 501 until GOOGLE_STT_API_KEY is set; the client falls back to mode A.
+app.post("/api/transcribe", async (req, res) => {
+  try {
+    const key = process.env.GOOGLE_STT_API_KEY;
+    if (!key) {
+      res.status(501).json({ error: "Cloud STT not configured (set GOOGLE_STT_API_KEY)." });
+      return;
+    }
+    const { audio } = req.body;
+    if (!audio || typeof audio !== "string") {
+      res.status(400).json({ error: "audio (base64) is required." });
+      return;
+    }
+    res.json(await transcribeAudio(audio, key));
+  } catch (error: any) {
+    console.error("Transcribe failed:", error);
+    res.status(500).json({ error: error.message || "Failed to transcribe audio." });
   }
 });
 

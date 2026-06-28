@@ -13,6 +13,7 @@ interface SandboxState {
 const DEFAULT_SANDBOX_STATE: SandboxState = {
   events: [
     {
+      id: "cal-weekly-planning-sync",
       title: "Weekly Planning Sync",
       description: "Brainstorming and alignment session with the engineering team.",
       start: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Tomorrow
@@ -23,6 +24,7 @@ const DEFAULT_SANDBOX_STATE: SandboxState = {
   ],
   tasks: [
     {
+      id: "task-consolidate-q2-feedback",
       title: "Consolidate Q2 feedback document",
       notes: "Pull notes from the shared drive and compile bullet points.",
       status: "created",
