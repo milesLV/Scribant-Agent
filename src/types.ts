@@ -1,4 +1,15 @@
+// Transcriber output: one word with a confidence score. confidence < 0.7 = "strange".
+export interface Word {
+  text: string;
+  start: number;            // char offset into the transcript text
+  end: number;
+  confidence: number;       // 0..1
+  alternatives?: string[];  // likely intended words, best first (for strange words)
+}
+
 export interface CalendarEvent {
+  id: string;
+  sourceText?: string; // verbatim transcript phrase that triggered this item
   title: string;
   description: string;
   start: string; // ISO string
@@ -10,6 +21,8 @@ export interface CalendarEvent {
 }
 
 export interface TaskItem {
+  id: string;
+  sourceText?: string;
   title: string;
   notes: string;
   status: 'pending' | 'created' | 'failed' | 'skipped';
@@ -19,6 +32,8 @@ export interface TaskItem {
 }
 
 export interface SearchQueryItem {
+  id: string;
+  sourceText?: string;
   query: string;
   answer?: string;
   sources?: { uri: string; title: string }[];

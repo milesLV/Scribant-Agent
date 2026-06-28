@@ -12,6 +12,7 @@ import {
   resetSandboxState
 } from "./utils/google-apis";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
+import { itemId } from "./utils/transcript";
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
@@ -42,6 +43,7 @@ export default function App() {
     return parsed.length > 0 ? parsed[0].id : null;
   });
   const [isProcessing, setIsProcessing] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [clearSignal, setClearSignal] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState("");
@@ -66,13 +68,13 @@ export default function App() {
     rawText,
     calendarEvents: (rawRes.calendarEvents || [])
       .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-      .map((evt: any) => ({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain })),
+      .map((evt: any) => ({ ...evt, id: itemId("cal", evt.sourceText, evt.title), status: "pending" as const, uncertain: !!evt.uncertain })),
     tasks: (rawRes.tasks || [])
       .filter((t: any) => t && t.title && t.title.trim() !== "")
-      .map((t: any) => ({ ...t, status: "pending" as const, uncertain: !!t.uncertain })),
+      .map((t: any) => ({ ...t, id: itemId("task", t.sourceText, t.title), status: "pending" as const, uncertain: !!t.uncertain })),
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
-      .map((q: any) => ({ ...q, status: "pending" as const })),
+      .map((q: any) => ({ ...q, id: itemId("search", q.sourceText, q.query), status: "pending" as const })),
     organizedFolder: rawRes.organizedFolderName || "Consciousness Report",
     driveDocs: []
   });
@@ -253,13 +255,17 @@ export default function App() {
   };
 
   const handleGoogleSignIn = () => {
-    const activeClientId = clientId || "710834371714-38ghkgl23o93f0b2f5geffb648082980.apps.googleusercontent.com"; // Standard fallback client id
+    if (!clientId) {
+      setShowSettings(true);
+      showToast("Add your Google OAuth Client ID below to sign in — see the README for the 5-minute GCP setup.");
+      return;
+    }
     const redirectUri = window.location.origin;
     const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile";
-    
-    // Construct standard Implicit Grant Flow auth URL
-    const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${activeClientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&include_granted_scopes=true&prompt=consent`;
-    
+
+    // Standard Implicit Grant Flow auth URL
+    const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&include_granted_scopes=true&prompt=consent`;
+
     window.location.href = googleAuthUrl;
   };
 
@@ -413,13 +419,14 @@ export default function App() {
       });
 
       if (!res.ok) {
-        throw new Error("Grounded search request returned bad response status.");
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error || `Search failed (HTTP ${res.status}).`);
       }
 
       const data = await res.json();
       updateActiveAnalysis(a => {
         const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { query: queryItem.query, status: "completed", answer: data.answer, sources: data.sources };
+        searchQueries[index] = { ...queryItem, status: "completed", answer: data.answer, sources: data.sources };
         return { ...a, searchQueries };
       });
       showToast(`Researced facts retrieved for query: "${queryItem.query}"`);
@@ -427,7 +434,7 @@ export default function App() {
       console.error(err);
       updateActiveAnalysis(a => {
         const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { query: queryItem.query, status: "failed", error: err.message };
+        searchQueries[index] = { ...queryItem, status: "failed", error: err.message };
         return { ...a, searchQueries };
       });
       showToast(`Facts query search failed: ${err.message}`);
@@ -537,11 +544,14 @@ export default function App() {
       <div className="w-full max-w-7xl mx-auto px-4 md:px-6 py-6 space-y-6 flex-1">
         
         {/* Navigation & configurations */}
-        <Header 
-          token={token} 
-          onSetToken={handleSetToken} 
-          clientId={clientId} 
-          onSetClientId={handleSetClientId} 
+        <Header
+          token={token}
+          onSetToken={handleSetToken}
+          clientId={clientId}
+          onSetClientId={handleSetClientId}
+          onSignIn={handleGoogleSignIn}
+          showConfig={showSettings}
+          onShowConfigChange={setShowSettings}
         />
 
         {/* Sync Mode Info Header banner */}
@@ -552,7 +562,7 @@ export default function App() {
               <div className="space-y-0.5">
                 <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
                 <p className="text-[11px] text-stone-500 leading-normal font-sans">
-                  No active Google data is modified. Perfect for quick mock evaluation! Click Google Sync on the right to authorization with real Google Calendar, Tasks, and Drive.
+                  No active Google data is modified. Click Google Sync on the right to authorization with real Google Calendar, Tasks, and Keep.
                 </p>
               </div>
             </div>
@@ -636,9 +646,7 @@ export default function App() {
       </div>
 
       {/* Humble aesthetic footer */}
-      <footer className="border-t border-stone-200 bg-stone-50/50 py-4 text-center text-[10px] text-stone-400 uppercase tracking-widest font-mono">
-        Scribant &bull; Engineered on top-tier Google GenAI models
-      </footer>
+      <footer className="border-t border-stone-200 bg-stone-50/50 py-4 text-center text-[10px] text-stone-400 uppercase tracking-widest font-mono" />
 
     </div>
   );

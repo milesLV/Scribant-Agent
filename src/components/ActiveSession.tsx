@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { StreamRun, CalendarEvent, TaskItem, SearchQueryItem } from "../types";
 import {
-  Calendar, CheckSquare, Search, FolderPlus, FileText, Check,
-  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw
+  Calendar, CheckSquare, Search, FileText, Check,
+  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown
 } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 
@@ -32,7 +32,6 @@ export default function ActiveSession({
   const [executingCal, setExecutingCal] = useState<number | null>(null);
   const [executingTask, setExecutingTask] = useState<number | null>(null);
   const [executingSearch, setExecutingSearch] = useState<number | null>(null);
-  const [executingDrive, setExecutingDrive] = useState(false);
 
   const analysis = run?.analysis;
   
@@ -83,20 +82,6 @@ export default function ActiveSession({
     }
   };
 
-  const handleDriveClick = async () => {
-    const confirmed = window.confirm(
-      `Confirm Action: Organise Files into Drive Folder.\n\nFolder: "${analysis?.organizedFolder || "Stream Summary"}"\n\nThis will write structured meeting reports and markdown brainstorm bullet files directly into organized subfolders. Proceed?`
-    );
-    if (!confirmed) return;
-
-    setExecutingDrive(true);
-    try {
-      await onExecuteDrive();
-    } finally {
-      setExecutingDrive(false);
-    }
-  };
-
   // Helper formats UTC or ISO relative times cleanly
   const formatTimeRange = (startStr: string, endStr: string) => {
     try {
@@ -134,36 +119,6 @@ export default function ActiveSession({
         </div>
       )}
       
-      {/* Google Drive Export Compilation banner */}
-      <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-amber-500">
-        <div className="flex items-start gap-3">
-          <div className="p-2.5 bg-amber-50 rounded-xl text-amber-600 border border-amber-100">
-            <FolderPlus className="w-5 h-5" />
-          </div>
-          <div className="space-y-1">
-            <h4 className="text-sm font-bold text-stone-800 font-sans">Compile Documents to Google Drive</h4>
-            <p className="text-[11px] text-stone-500 font-sans leading-normal">
-              Bundle summary notes, structured insights, and action items inside folder: <span className="font-mono font-semibold bg-stone-100 px-1.5 py-0.5 rounded text-amber-700">{analysis?.organizedFolder || "No active folder"}</span>
-            </p>
-          </div>
-        </div>
-        <button
-          onClick={handleDriveClick}
-          disabled={executingDrive || !analysis}
-          className="w-full sm:w-auto px-5 py-2 text-xs font-bold text-white bg-stone-900 hover:bg-stone-800 disabled:bg-stone-200 disabled:text-stone-400 rounded-lg transition-all flex items-center justify-center gap-1.5 shadow-sm border border-stone-950 cursor-pointer shrink-0"
-        >
-          {executingDrive ? (
-            <>
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Compiling Folder...
-            </>
-          ) : (
-            <>
-              <FolderPlus className="w-3.5 h-3.5" /> Organize Drive Folder
-            </>
-          )}
-        </button>
-      </div>
-
       {/* Grid of parsed actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         
@@ -195,60 +150,77 @@ export default function ActiveSession({
             <p className="text-xs text-stone-400 italic py-2">No search topics identified in this stream.</p>
           ) : (
             <div className="space-y-4 max-h-[300px] overflow-y-auto pr-1">
-              {analysis.searchQueries.map((item, idx) => (
-                <div key={idx} className="border border-stone-100 rounded-xl p-4 bg-stone-50/50 space-y-2.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <p className="text-xs font-semibold text-stone-700 italic font-sans">
-                      &ldquo;{item.query}&rdquo;
-                    </p>
-                    {item.status === 'pending' && (
-                      <button
-                        onClick={() => handleSearchClick(idx, item)}
-                        disabled={executingSearch !== null}
-                        className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
-                      >
-                        {executingSearch === idx ? (
-                          <RefreshCw className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Play className="w-2.5 h-2.5" />
-                        )}
-                        Research
-                      </button>
-                    )}
-                  </div>
+              {analysis.searchQueries.map((item, idx) => {
+                const queryLine = (
+                  <p className="text-xs font-semibold text-stone-700 italic font-sans">
+                    &ldquo;{item.query}&rdquo;
+                  </p>
+                );
 
-                  {item.status === 'completed' && item.answer && (
-                    <div className="text-xs text-stone-600 leading-relaxed bg-white border border-stone-100 p-3 rounded-lg font-sans">
-                      <p className="mb-2 font-normal">{item.answer}</p>
-                      {item.sources && item.sources.length > 0 && (
-                        <div className="pt-2 border-t border-stone-50">
-                          <p className="text-[9px] font-bold text-stone-400 uppercase tracking-wider mb-1.5 font-mono">Sources:</p>
-                          <div className="flex flex-wrap gap-1.5">
-                            {item.sources.map((src, sIdx) => (
-                              <a
-                                key={sIdx}
-                                href={src.uri}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-[10px] text-blue-600 hover:underline bg-stone-50 border border-stone-200/50 px-2 py-0.5 rounded flex items-center gap-0.5"
-                              >
-                                {src.title} <ExternalLink className="w-2.5 h-2.5" />
-                              </a>
-                            ))}
-                          </div>
+                // Completed answers collapse/expand on click (native <details>); body caps at 150px and scrolls.
+                if (item.status === 'completed' && item.answer) {
+                  return (
+                    <details key={idx} className="group border border-stone-100 rounded-xl bg-stone-50/50">
+                      <summary className="flex items-start justify-between gap-3 p-4 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+                        {queryLine}
+                        <ChevronDown className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5 transition-transform group-open:rotate-180" />
+                      </summary>
+                      <div className="px-4 pb-4">
+                        <div className="text-xs text-stone-600 leading-relaxed bg-white border border-stone-100 p-3 rounded-lg font-sans max-h-[150px] overflow-y-auto">
+                          <p className="mb-2 font-normal whitespace-pre-wrap">{item.answer}</p>
+                          {item.sources && item.sources.length > 0 && (
+                            <div className="pt-2 border-t border-stone-50">
+                              <p className="text-[9px] font-bold text-stone-400 uppercase tracking-wider mb-1.5 font-mono">Sources:</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {item.sources.map((src, sIdx) => (
+                                  <a
+                                    key={sIdx}
+                                    href={src.uri}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-[10px] text-blue-600 hover:underline bg-stone-50 border border-stone-200/50 px-2 py-0.5 rounded flex items-center gap-0.5"
+                                  >
+                                    {src.title} <ExternalLink className="w-2.5 h-2.5" />
+                                  </a>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
+                      </div>
+                    </details>
+                  );
+                }
+
+                return (
+                  <div key={idx} className="border border-stone-100 rounded-xl p-4 bg-stone-50/50 space-y-2.5">
+                    <div className="flex items-start justify-between gap-3">
+                      {queryLine}
+                      {item.status === 'pending' && (
+                        <button
+                          onClick={() => handleSearchClick(idx, item)}
+                          disabled={executingSearch !== null}
+                          className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
+                        >
+                          {executingSearch === idx ? (
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Play className="w-2.5 h-2.5" />
+                          )}
+                          Research
+                        </button>
                       )}
                     </div>
-                  )}
 
-                  {item.status === 'failed' && (
-                    <div className="text-xs text-red-600 bg-red-50 border border-red-100 p-2.5 rounded-lg flex items-center gap-1.5">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                      <span>Search failed: {item.error}</span>
-                    </div>
-                  )}
-                </div>
-              ))}
+                    {item.status === 'failed' && (
+                      <div className="text-xs text-red-600 bg-red-50 border border-red-100 p-2.5 rounded-lg flex items-center gap-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                        <span>Search failed: {item.error}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -344,7 +316,7 @@ export default function ActiveSession({
                           ) : (
                             <Calendar className="w-3.5 h-3.5 text-stone-500" />
                           )}
-                          Configure
+                          Add Event
                         </button>
                       )}
                     </div>
@@ -370,7 +342,7 @@ export default function ActiveSession({
           </h3>
 
           {!analysis ? (
-            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No checklist actions logged yet. State tasks in your thoughts (e.g. &ldquo;Draft mock schema beforehand&rdquo;) to see todo suggestions.</p>
+            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No checklist actions logged yet. State tasks in your thoughts (e.g. &ldquo;Pick up groceries on the way home&rdquo;, &ldquo;Drop package off at the post office&rdquo;, &rdquo;Water plants in the garden&rdquo;) to see todo suggestions.</p>
           ) : analysis.tasks.length === 0 ? (
             <p className="text-xs text-stone-400 italic py-2">No checklist elements identified.</p>
           ) : (

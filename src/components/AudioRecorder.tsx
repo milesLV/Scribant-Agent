@@ -47,10 +47,6 @@ export default function AudioRecorder({
   const summarizeAbortControllerRef = useRef<AbortController | null>(null);
   const clearedRef = useRef(false);
 
-  // Silence Duration Config & Timer states
-  const [silenceDuration, setSilenceDuration] = useState<number>(8); // default 8 seconds
-  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
-
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
 
@@ -204,43 +200,6 @@ export default function AudioRecorder({
     };
   }, [transcript, interimTranscript, autoSummarize]);
 
-  // Silence threshold automatic submission timer
-  useEffect(() => {
-    if (!isListening) {
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = null;
-      }
-      return;
-    }
-
-    const fullContent = (transcript + " " + interimTranscript).trim();
-    if (!fullContent) return;
-
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-    }
-
-    silenceTimerRef.current = setTimeout(() => {
-      // Auto-submit active stream of thoughts
-      recognitionRef.current?.stop();
-      setIsListening(false);
-      setIsEditingTranscript(false);
-      onAnalyze(fullContent);
-      if (onShowToast) {
-        onShowToast(`Auto-submitted your thoughts due to ${silenceDuration} seconds of silence!`);
-      } else {
-        alert(`Auto-submitted and structured your stream of thoughts due to ${silenceDuration} seconds of silence!`);
-      }
-    }, silenceDuration * 1000);
-
-    return () => {
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-      }
-    };
-  }, [transcript, interimTranscript, isListening, silenceDuration]);
-
   useEffect(() => {
     // Check for browser support
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -322,7 +281,7 @@ export default function AudioRecorder({
       setRecognitionError(null);
       setIsEditingTranscript(false);
       try {
-        setTranscript("");
+        // Resume onto the existing transcript instead of wiping it (use "Clear Text" to reset).
         setInterimTranscript("");
         recognitionRef.current?.start();
       } catch (err: any) {
@@ -414,22 +373,6 @@ export default function AudioRecorder({
             {isListening ? "Click to Pause Speech Capture" : "Click to Speak Thoughts"}
           </p>
 
-          {/* New Silence Threshold Slider inline inside mic container */}
-          <div className="flex items-center gap-2 mt-4 text-[11px] text-stone-500 bg-stone-50 p-2 rounded-xl border border-stone-150 shadow-3xs">
-            <span className="font-medium font-sans">Silence Detection:</span>
-            <input
-              type="range"
-              min="1"
-              max="15"
-              value={silenceDuration}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSilenceDuration(Number(e.target.value))}
-              className="w-20 h-1 bg-stone-200 rounded-lg appearance-none cursor-pointer accent-amber-600"
-              title="Silence timer before autocommit"
-            />
-            <span className="bg-amber-100 text-amber-800 font-bold px-1.5 py-0.5 rounded text-[9px] font-mono whitespace-nowrap">
-              {silenceDuration}s autorun
-            </span>
-          </div>
         </div>
       )}
 
@@ -460,7 +403,7 @@ export default function AudioRecorder({
             </div>
             {!useKeyboard && isListening && (
               <span className="text-[9px] font-medium text-emerald-600 bg-emerald-50 border border-emerald-150 px-1.5 py-0.5 rounded animate-pulse">
-                Active Listening &bull; Autocommit in {silenceDuration}s
+                Active Listening
               </span>
             )}
           </div>
