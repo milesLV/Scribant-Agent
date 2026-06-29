@@ -10,7 +10,6 @@ export function locateSpan(transcript: string, sourceText?: string): { start: nu
 }
 
 // Stable id so the same trigger phrase maps to the same item across re-analyses (lets reconciliation
-// keep/update instead of duplicating). ponytail: phrase-derived slug; collisions possible at scale,
 // switch to a hash only if items ever clash.
 export function itemId(prefix: string, ...keys: (string | undefined)[]): string {
   const key = keys.find(k => k && k.trim()) || "x";
@@ -18,7 +17,6 @@ export function itemId(prefix: string, ...keys: (string | undefined)[]): string 
   return `${prefix}-${slug}`;
 }
 
-// ponytail self-check: `npx tsx src/utils/transcript.ts`
 if (typeof process !== "undefined" && process.argv[1]?.endsWith("transcript.ts")) {
   const eq = (a: unknown, b: unknown, m: string) => {
     if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);

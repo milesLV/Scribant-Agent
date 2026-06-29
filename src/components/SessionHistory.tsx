@@ -40,7 +40,7 @@ export default function SessionHistory({
 
       {runs.length === 0 ? (
         <div className="text-center py-6 text-xs text-stone-400 italic">
-          No previous stream sessions saved. Try speaking or typing your first stream of consciousness!
+          No previous sessions saved. Try speaking or typing your first thoughts!
         </div>
       ) : (
         <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">

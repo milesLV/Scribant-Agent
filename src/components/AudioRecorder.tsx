@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText } from "lucide-react";
+import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
+import { Word } from "../types";
+
+// confidence below this = "strange" (misheard). Mirrors STRANGE_THRESHOLD in transcriber.ts.
+const STRANGE_THRESHOLD = 0.7;
 
 interface AudioRecorderProps {
   onAnalyze: (text: string) => void;
@@ -50,10 +54,83 @@ export default function AudioRecorder({
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
 
+  // Web Speech stops itself on silence; we auto-restart unless the user (or a fatal error) stopped it.
+  const manualStopRef = useRef(false);
+
   // Correction Dropdown state
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
 
+  // Strange-word proofread state. `words` are scored against the exact text in proofedTextRef
+  // (offsets index into it), so corrections splice safely even as the live transcript moves on.
+  const [words, setWords] = useState<Word[] | null>(null);
+  const [isProofing, setIsProofing] = useState(false);
+  const [activeStrange, setActiveStrange] = useState<number | null>(null);
+  const proofedTextRef = useRef("");
+  const proofAbortRef = useRef<AbortController | null>(null);
+
   const recognitionRef = useRef<any>(null);
+
+  // Ask the server (mode A: LLM proofreader) which words look misheard. Same Word[] the Cloud STT
+  // path (mode B) returns, so the highlight/correct UI below is provider-agnostic.
+  const runProofread = async (text: string) => {
+    const t = text.trim();
+    if (!t) { setWords(null); return; }
+    if (proofAbortRef.current) proofAbortRef.current.abort();
+    const controller = new AbortController();
+    proofAbortRef.current = controller;
+    setIsProofing(true);
+    try {
+      const res = await fetch("/api/transcribe-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: t }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        proofedTextRef.current = t;
+        setWords(data.words || null);
+        setActiveStrange(null);
+      }
+    } catch (err: any) {
+      if (err.name !== "AbortError") console.error("Proofread failed:", err);
+    } finally {
+      setIsProofing(false);
+      proofAbortRef.current = null;
+    }
+  };
+
+  // Swap a strange word for one of its suggestions. Splice into the proofed text (stable offsets),
+  // then drop the now-stale scores — the user can re-check the corrected transcript.
+  const correctWord = (i: number, replacement: string) => {
+    if (!words) return;
+    const w = words[i];
+    const base = proofedTextRef.current;
+    setTranscript(base.slice(0, w.start) + replacement + base.slice(w.end) + " ");
+    setWords(null);
+    setActiveStrange(null);
+  };
+
+  // "It's fine" — keep the word as transcribed and clear its highlight.
+  const keepWord = (i: number) => {
+    setWords(ws => ws ? ws.map((w, j) => j === i ? { ...w, confidence: 1 } : w) : ws);
+    setActiveStrange(null);
+  };
+
+  // Scores belong to a specific text; once the transcript diverges they're stale, so drop them.
+  useEffect(() => {
+    if (words && transcript.trim() !== proofedTextRef.current) {
+      setWords(null);
+      setActiveStrange(null);
+    }
+  }, [transcript, words]);
+
+  // Auto-proofread once the user pauses the mic, so strange words surface before they Analyze.
+  useEffect(() => {
+    if (!isListening && transcript.trim() && transcript.trim() !== proofedTextRef.current) {
+      runProofread(transcript);
+    }
+  }, [isListening]);
 
   const triggerLiveSummary = async (textToSummarize: string) => {
     if (!textToSummarize.trim()) {
@@ -135,6 +212,7 @@ export default function AudioRecorder({
       isSummarizingRef.current = false;
       setIsSummarizing(false);
       if (isListening) {
+        manualStopRef.current = true;
         recognitionRef.current?.stop();
         setIsListening(false);
       }
@@ -143,6 +221,9 @@ export default function AudioRecorder({
       setLiveSummary("");
       if (onChangeSummary) onChangeSummary("");
       setIsEditingTranscript(false);
+      setWords(null);
+      setActiveStrange(null);
+      proofedTextRef.current = "";
       lastSummarizedRef.current = "";
       lastSummarizedTimeRef.current = 0;
     }
@@ -240,34 +321,48 @@ export default function AudioRecorder({
       if (finalStr) {
         setTranscript((prev: string) => {
           const cleanedPrev = prev.trim();
-          const cleanedFinal = finalStr.trim();
+          // Collapse internal whitespace — the recognizer prefixes continued results with a space,
+          // which doubles up against the space we append and reflows the line.
+          const cleanedFinal = finalStr.replace(/\s+/g, " ").trim();
           if (!cleanedPrev) return cleanedFinal + " ";
           return cleanedPrev + " " + cleanedFinal + " ";
         });
       }
 
-      setInterimTranscript(interimStr.trim());
+      setInterimTranscript(interimStr.replace(/\s+/g, " ").trim());
     };
 
     rec.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error);
-      if (event.error === "not-allowed") {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed" || event.error === "audio-capture") {
+        manualStopRef.current = true; // fatal — don't auto-restart
         setRecognitionError("Microphone access denied. Please grant microphone permissions or type your thoughts below!");
       } else if (event.error === "no-speech") {
-        // Safe to ignore minor timeouts
+        // Safe to ignore minor timeouts — onend will auto-restart.
       } else {
         setRecognitionError(`Speech recognition error: ${event.error}`);
       }
     };
 
     rec.onend = () => {
-      setIsListening(false);
+      // Keep listening through silence-driven stops; only quit when manually stopped.
+      if (manualStopRef.current) {
+        manualStopRef.current = false;
+        setIsListening(false);
+        return;
+      }
+      try {
+        rec.start();
+      } catch {
+        setIsListening(false);
+      }
     };
 
     recognitionRef.current = rec;
 
     return () => {
       if (recognitionRef.current) {
+        manualStopRef.current = true; // unmounting — don't let onend restart
         recognitionRef.current.abort();
       }
     };
@@ -275,6 +370,7 @@ export default function AudioRecorder({
 
   const handleToggleListening = () => {
     if (isListening) {
+      manualStopRef.current = true;
       recognitionRef.current?.stop();
     } else {
       ignoreSpeechResultsRef.current = false;
@@ -297,6 +393,7 @@ export default function AudioRecorder({
     if (!fullText) return;
 
     if (isListening) {
+      manualStopRef.current = true;
       recognitionRef.current?.stop();
     }
 
@@ -308,6 +405,67 @@ export default function AudioRecorder({
     setTranscript("");
     setInterimTranscript("");
     setIsEditingTranscript(false);
+    setWords(null);
+    setActiveStrange(null);
+    proofedTextRef.current = "";
+  };
+
+  const strangeCount = words ? words.filter(w => w.confidence < STRANGE_THRESHOLD).length : 0;
+
+  // Render the proofed transcript with strange words as clickable correction chips.
+  const renderProofed = () => {
+    const base = proofedTextRef.current;
+    const out: React.ReactNode[] = [];
+    let cursor = 0;
+    words!.forEach((w, i) => {
+      if (w.start > cursor) out.push(<span key={`g${i}`}>{base.slice(cursor, w.start)}</span>);
+      cursor = w.end;
+      if (w.confidence >= STRANGE_THRESHOLD) {
+        out.push(<span key={`w${i}`}>{base.slice(w.start, w.end)}</span>);
+        return;
+      }
+      const alts = w.alternatives ?? [];
+      out.push(
+        <span key={`w${i}`} className="relative inline-block">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setActiveStrange(activeStrange === i ? null : i); }}
+            title="Possibly misheard — click to correct"
+            className="bg-amber-100 text-amber-900 rounded px-0.5 underline decoration-wavy decoration-amber-400 decoration-1 cursor-pointer hover:bg-amber-200 transition-colors"
+          >
+            {base.slice(w.start, w.end)}
+          </button>
+          {activeStrange === i && (
+            <span
+              onClick={(e) => e.stopPropagation()}
+              className="absolute z-20 left-0 top-full mt-1 min-w-[120px] bg-white border border-stone-200 rounded-lg shadow-lg p-1 flex flex-col text-left"
+            >
+              {alts.length > 0 ? alts.map((alt, k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => correctWord(i, alt)}
+                  className="text-left text-xs text-stone-700 hover:bg-amber-50 rounded px-2 py-1 transition-colors"
+                >
+                  {alt}
+                </button>
+              )) : (
+                <span className="text-[10px] text-stone-400 italic px-2 py-1">No suggestion</span>
+              )}
+              <button
+                type="button"
+                onClick={() => keepWord(i)}
+                className="text-left text-[10px] text-stone-400 hover:text-stone-600 hover:bg-stone-50 rounded px-2 py-1 border-t border-stone-100 mt-1 transition-colors"
+              >
+                Keep as-is
+              </button>
+            </span>
+          )}
+        </span>
+      );
+    });
+    if (cursor < base.length) out.push(<span key="tail">{base.slice(cursor)}</span>);
+    return out;
   };
 
   return (
@@ -317,7 +475,7 @@ export default function AudioRecorder({
         <div className="flex items-center gap-2">
           <div className={`w-2.5 h-2.5 rounded-full ${isListening ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
           <h2 className="text-sm font-semibold text-stone-800 tracking-tight font-sans">
-            {isListening ? "Listening to your thoughts..." : "Capture your Stream of Consciousness"}
+            {isListening ? "Listening to your thoughts..." : "Capture your thoughts"}
           </h2>
         </div>
         <button
@@ -401,11 +559,33 @@ export default function AudioRecorder({
                 </button>
               )}
             </div>
-            {!useKeyboard && isListening && (
-              <span className="text-[9px] font-medium text-emerald-600 bg-emerald-50 border border-emerald-150 px-1.5 py-0.5 rounded animate-pulse">
-                Active Listening
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {strangeCount > 0 && !isEditingTranscript && (
+                <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                  {strangeCount} strange
+                </span>
+              )}
+              {!isListening && !useKeyboard && (
+                <button
+                  type="button"
+                  onClick={() => runProofread(transcript)}
+                  disabled={isProofing || !transcript.trim()}
+                  title="Check for misheard words"
+                  className="p-1 text-stone-500 hover:text-amber-700 hover:bg-stone-100 rounded transition-colors disabled:opacity-40 cursor-pointer"
+                >
+                  {isProofing ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
+                  ) : (
+                    <SpellCheck className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              )}
+              {!useKeyboard && isListening && (
+                <span className="text-[9px] font-medium text-emerald-600 bg-emerald-50 border border-emerald-150 px-1.5 py-0.5 rounded animate-pulse">
+                  Active Listening
+                </span>
+              )}
+            </div>
           </div>
           
           <div className="flex-1 flex flex-col min-h-0">
@@ -430,10 +610,10 @@ export default function AudioRecorder({
               >
                 {(transcript || interimTranscript) ? (
                   <span className="leading-relaxed font-sans text-stone-750">
-                    {transcript}
+                    {words ? renderProofed() : transcript}
                     {interimTranscript && (
                       <span className="text-amber-500 italic font-medium animate-pulse">
-                        {" " + interimTranscript}
+                        {(transcript && !/\s$/.test(transcript) ? " " : "") + interimTranscript}
                       </span>
                     )}
                   </span>
@@ -551,7 +731,7 @@ export default function AudioRecorder({
             </>
           ) : (
             <>
-              <Send className="w-3.5 h-3.5" /> Run Consciousness Analysis
+              <Send className="w-3.5 h-3.5" /> Analyze Thoughts
             </>
           )}
         </button>

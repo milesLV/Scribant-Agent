@@ -91,7 +91,7 @@ async function validateAndInitGeminiClients() {
     throw new Error("All Gemini API keys failed validation. Check your .env keys.");
   }
 
-  console.log(`\n🟢  Key pool ready: ${geminiClients.length}/${candidates.length} key(s) available. Starting with key index 0.\n`);
+  console.log(`Key pool ready: ${geminiClients.length}/${candidates.length} key(s) available. Starting with key index 0.\n`);
 }
 
 function getGeminiClient(): GoogleGenAI {
@@ -249,7 +249,7 @@ function cleanJsonString(rawText: string): string {
   return text;
 }
 
-// 1. Analyze Stream of Consciousness endpoint
+// 1. Intent Classifier endpoint — turn the transcript into calendar/task/search items
 app.post("/api/analyze", async (req, res) => {
   try {
     const { text, currentLocalTime, liveSummary } = req.body;
@@ -259,30 +259,33 @@ app.post("/api/analyze", async (req, res) => {
     }
 
     const ai = getGeminiClient();
-    const systemInstruction = `You are a high-fidelity intent parsing engine for a "Stream of Consciousness" thought transcription app.
+    const systemInstruction = `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
 The user is speaking or writing their thoughts in an unfiltered "brain dump" format.
 Analyze the provided stream of thoughts and categorize segments into different structured action buckets.
 
 Here is the context of what has been spoken/transcribed:
 - Full raw transcript: "${text}"
-- Current Local Time: ${currentLocalTime || "June 4, 2026"}
+- Current Local Time: ${currentLocalTime || new Date().toISOString()}
 - AI Live Notes Summary: "${liveSummary || ""}"
 
 You MUST output strictly a JSON object with the following keys and criteria:
 
 1. "ideasSummary": (string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.
-2. "calendarEvents": (array of objects) ONLY include events that have some sort of date/time context and action associated with them (e.g. YES to "Tomorrow I want to make burritos" or "Next Monday I want to call my grandmother"). DO NOT include general self-improvement intentions or vague statements (e.g. NO to "I want to do better at coding tomorrow" or "I need to go to the gym next week"). If there is uncertainty about whether the commitment is set or if the date/time is vague (e.g. "I need to go to the gym next week" or "Tomorrow I will work on that thing"), include the event but set "uncertain": true. Otherwise set "uncertain": false. Each object must have:
+2. "calendarEvents": (array of objects) Things that HAPPEN on a timeline — you attend them or they occur over a span of time (appointments, meetings, trips, birthdays). Use a calendar event when the TIME ITSELF matters: either a specific clock time you must be present for ("groomer tomorrow at 9", "dinner with Sam at 7"), OR a whole day/days something occupies even without a clock time ("driving to Yosemite tomorrow", "my sister's birthday Friday"). DO NOT use a calendar event for an action you merely need to finish by some point — that is a task with a dueDate (see #3). DO NOT include vague aspirations (NO to "I want to do better at coding"). Set "uncertain": true when the commitment, date, or time is vague (e.g. "we should grab lunch sometime"), else false. Each object must have:
    - "title": (string) Event summary/title
    - "description": (string) Event description/context
-   - "start": (string) Start time as ISO-8601 string (use the current local time to translate relative terms like "tomorrow", "next week", etc.)
-   - "end": (string) End time as ISO-8601 string
-   - "uncertain": (boolean) Set to true if the commitment, date, or time details are vague or uncertain, else false.
+   - "allDay": (boolean) true if it spans whole day(s) with no specific clock time (trips, birthdays, holidays, out-of-office); false for events with a start time.
+   - "start": (string) Start as ISO-8601 (use the current local time to resolve "tomorrow", "tonight", "next week"). For all-day events use the date at 00:00.
+   - "end": (string) End as ISO-8601. Default to 30 minutes after start when no duration is implied (for all-day, the same day or the stated span).
+   - "uncertain": (boolean)
    - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).
-3. "tasks": (array of objects) ONLY include semi-well-defined tasks or actions (e.g. YES to "I need to prepare for my interview with Google" or "When I get home I want to create a budget to follow"). DO NOT include general mood statements (e.g. NO to "I want my life together" or "I should probably work on my project"). If the task details are vague or uncertain, include the task but set "uncertain": true. Otherwise set "uncertain": false. Each object must have:
+3. "tasks": (array of objects) Things you DO and check off — actions you can complete at any time rather than at a fixed clock time ("water the plants", "renew my passport", "clean the house before the walk-through", "prepare for my interview"). If the action has a deadline or upper bound, capture it in "dueDate"; if instead it must happen AT a specific time you attend, it is a calendar event. DO NOT include vague moods (NO to "I want my life together" or "I should work on my project"). Set "uncertain": true when the task or its details are vague, else false. Each object must have:
    - "title": (string) Compact title of the task
    - "notes": (string) Any descriptions, sub-items, or context
+   - "dueDate": (string) Deadline as an ISO date "YYYY-MM-DD" if the action is bounded ("today", "by Friday", "before the walk-through" — resolve relative to the current local time); empty string "" if open-ended.
    - "uncertain": (boolean) Set to true if the task itself or its details are vague or uncertain, else false.
    - "sourceText": (string) The exact words from the transcript that triggered this task, copied verbatim (not paraphrased).
+GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake event time. Only make a calendar event when being there at that specific time matters, or when it occupies whole days. A flexible action with just a deadline (e.g. "hit the gym sometime next week") is a task (uncertain) with a dueDate, NOT an event.
 4. "searchQueries": (array of objects) ONLY include searchable, well-defined questions or queries (e.g. YES to "I wonder what the most efficient gas mileage for my Toyota Sienna is" or "Where is the best place to eat?"). DO NOT include personal, unsearchable thoughts (e.g. NO to "I wonder what I will eat when I get home" or "What do I have in my fridge?"). Each object must have:
    - "query": (string) The search query text
    - "sourceText": (string) The exact words from the transcript that triggered this query, copied verbatim (not paraphrased).
@@ -292,7 +295,7 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
 
     const response = await generateWithFallback(ai, {
       model: MODEL_FALLBACKS[0],
-      contents: `Current Time context: ${currentLocalTime || "2026-06-04"}\n\nStream of thoughts:\n"${text}"`,
+      contents: `Current Time context: ${currentLocalTime || new Date().toISOString()}\n\nStream of thoughts:\n"${text}"`,
       config: {
         systemInstruction,
         responseMimeType: "application/json",
@@ -314,9 +317,10 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
                   start: { type: Type.STRING, description: "Start time as ISO-8601 string" },
                   end: { type: Type.STRING, description: "End time as ISO-8601 string" },
                   uncertain: { type: Type.BOOLEAN, description: "Whether there is uncertainty about the event commitment or details" },
+                  allDay: { type: Type.BOOLEAN, description: "True if it spans whole day(s) with no specific clock time" },
                   sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this event" }
                 },
-                required: ["title", "description", "start", "end", "uncertain", "sourceText"]
+                required: ["title", "description", "start", "end", "uncertain", "allDay", "sourceText"]
               }
             },
             tasks: {
@@ -328,9 +332,10 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
                   title: { type: Type.STRING, description: "Compact title of the task" },
                   notes: { type: Type.STRING, description: "Any descriptions, sub-items, or context" },
                   uncertain: { type: Type.BOOLEAN, description: "Whether the task itself or its details are vague or uncertain" },
+                  dueDate: { type: Type.STRING, description: "Deadline as ISO date YYYY-MM-DD if bounded, else empty string" },
                   sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this task" }
                 },
-                required: ["title", "notes", "uncertain", "sourceText"]
+                required: ["title", "notes", "uncertain", "dueDate", "sourceText"]
               }
             },
             searchQueries: {
@@ -383,7 +388,7 @@ app.post("/api/summarize-live", async (req, res) => {
     }
 
     const ai = getGeminiClient();
-    const systemInstruction = `You are a real-time summarizing assistant for a "Stream of Consciousness" thought parsing app.
+    const systemInstruction = `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
 The user is speaking or typing their thoughts live.
 Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
 Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points. Highlight key terms or entities in bold format (e.g., **Key Term**).`;
@@ -452,7 +457,7 @@ app.post("/api/search", async (req, res) => {
     const ai = getGeminiClient();
     const response = await generateWithFallback(ai, {
       model: MODEL_FALLBACKS[0],
-      contents: `Search the web and provide a comprehensive, objective answer to this research query from the stream of consciousness: "${query}"`,
+      contents: `Search the web and provide a comprehensive, objective answer to this research query: "${query}"`,
       config: {
         tools: [{ googleSearch: {} }],
       },

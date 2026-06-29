@@ -39,7 +39,7 @@ export default function ActiveSession({
     return (
       <div className="bg-white border border-stone-200 rounded-2xl p-8 text-center shadow-sm">
         <Sparkles className="w-8 h-8 mx-auto text-stone-300 animate-pulse mb-3" />
-        <h3 className="text-sm font-semibold text-stone-700">Analysing Stream of Consciousness...</h3>
+        <h3 className="text-sm font-semibold text-stone-700">Analyzing your thoughts...</h3>
         <p className="text-xs text-stone-400 mt-1 max-w-sm mx-auto">Gemini is structuring your thoughts, detecting appointments, and aligning action folders.</p>
       </div>
     );
@@ -259,6 +259,11 @@ export default function ActiveSession({
                             Uncertain Draft
                           </span>
                         )}
+                        {item.allDay && (
+                          <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
+                            All-day
+                          </span>
+                        )}
                         <input
                           type="text"
                           value={item.title}
@@ -378,6 +383,11 @@ export default function ActiveSession({
                           className="text-[11px] text-stone-500 font-sans bg-transparent border-b border-transparent hover:border-stone-200 focus:border-purple-500 outline-none w-full py-0.5"
                           placeholder="Add notes..."
                         />
+                        {item.dueDate && (
+                          <span className="inline-block mt-1 text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
+                            Due {new Date(item.dueDate).toLocaleDateString()}
+                          </span>
+                        )}
                       </div>
 
                     <div className="shrink-0">

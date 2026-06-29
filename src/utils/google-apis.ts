@@ -1,7 +1,7 @@
 import { CalendarEvent, TaskItem, DriveDocItem } from "../types";
 
 // In-memory or localStorage cache for sandbox state so it persists across runs
-const SANDBOX_STATE_KEY = "stream_consciousness_sandbox";
+const SANDBOX_STATE_KEY = "scribant_sandbox";
 
 interface SandboxState {
   events: CalendarEvent[];
@@ -202,6 +202,26 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
   }
 
   // Real Integration Mode
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const dateOnly = (iso: string) => new Date(iso).toISOString().slice(0, 10);
+
+  let start: any, end: any;
+  if (event.allDay) {
+    // All-day events use date (not dateTime); Google treats end.date as exclusive.
+    const sd = dateOnly(event.start);
+    let ed = event.end ? dateOnly(event.end) : sd;
+    if (ed <= sd) {
+      const next = new Date(sd);
+      next.setUTCDate(next.getUTCDate() + 1);
+      ed = next.toISOString().slice(0, 10);
+    }
+    start = { date: sd };
+    end = { date: ed };
+  } else {
+    start = { dateTime: event.start, timeZone };
+    end = { dateTime: event.end, timeZone };
+  }
+
   const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
     method: "POST",
     headers: {
@@ -211,14 +231,8 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
     body: JSON.stringify({
       summary: event.title,
       description: event.description,
-      start: {
-        dateTime: event.start,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-      },
-      end: {
-        dateTime: event.end,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-      }
+      start,
+      end
     })
   });
 
@@ -249,7 +263,8 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
     return newId;
   }
 
-  // Real Integration Mode: Fetch tasklists to find @default primary or list
+  // Real Integration Mode: Fetch tasklists to find @default primary or list.
+  // Google Tasks stores the date portion of `due` only (time of day is discarded).
   const res = await fetch("https://www.googleapis.com/tasks/v1/lists/@default/tasks", {
     method: "POST",
     headers: {
@@ -258,7 +273,8 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
     },
     body: JSON.stringify({
       title: task.title,
-      notes: task.notes
+      notes: task.notes,
+      ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {})
     })
   });
 

@@ -47,7 +47,6 @@ export async function markStrangeWords(
 
   for (const s of strange) {
     // Trust the index when its word matches; otherwise fall back to first text match.
-    // ponytail: index-with-text-fallback matching; fine for brain-dump length. Revisit only if the model miscounts often.
     let i = s.index;
     if (!(words[i] && looseEq(words[i].text, s.word))) i = words.findIndex(w => looseEq(w.text, s.word));
     if (i >= 0 && words[i]) {
@@ -91,7 +90,6 @@ export async function transcribeAudio(
 }
 
 // ---- helpers ----
-// ponytail: tiny local fence-strip; shares intent with server's cleanJsonString, not worth a shared util for one line.
 function stripFences(s: string): string {
   const t = s.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const a = t.indexOf("{"), b = t.lastIndexOf("}");
@@ -104,7 +102,6 @@ function clamp(n: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
-// ponytail self-check: `npx tsx transcriber.ts`
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   (async () => {
     const toks = tokenize("call grandma tomorow");

@@ -68,14 +68,14 @@ export default function App() {
     rawText,
     calendarEvents: (rawRes.calendarEvents || [])
       .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-      .map((evt: any) => ({ ...evt, id: itemId("cal", evt.sourceText, evt.title), status: "pending" as const, uncertain: !!evt.uncertain })),
+      .map((evt: any) => ({ ...evt, id: itemId("cal", evt.sourceText, evt.title), status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay })),
     tasks: (rawRes.tasks || [])
       .filter((t: any) => t && t.title && t.title.trim() !== "")
-      .map((t: any) => ({ ...t, id: itemId("task", t.sourceText, t.title), status: "pending" as const, uncertain: !!t.uncertain })),
+      .map((t: any) => ({ ...t, id: itemId("task", t.sourceText, t.title), status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined })),
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
       .map((q: any) => ({ ...q, id: itemId("search", q.sourceText, q.query), status: "pending" as const })),
-    organizedFolder: rawRes.organizedFolderName || "Consciousness Report",
+    organizedFolder: rawRes.organizedFolderName || "Session Notes",
     driveDocs: []
   });
 
@@ -308,7 +308,7 @@ export default function App() {
         },
         {
           name: "2_Extracted_Insights.md",
-          content: `# Extracted Ideas & Insights\n\nBelow are summarized thoughts and bullet points captured from your stream of consciousness:\n\n${analysis.summary}`,
+          content: `# Extracted Ideas & Insights\n\nBelow are summarized thoughts and bullet points captured from your spoken thoughts:\n\n${analysis.summary}`,
           mimeType: "text/markdown",
           type: "ideas",
           status: "pending"
@@ -331,7 +331,7 @@ export default function App() {
       setLiveDraft(null);
       setLiveSummary("");
       
-      showToast("Consciousness stream structured! Actionable items detected.");
+      showToast("Thoughts structured! Actionable items detected.");
     } catch (error: any) {
       console.error(error);
       showToast(`Analyzer Error: ${error.message || "Failed to process speech intents."}`);
@@ -446,7 +446,7 @@ export default function App() {
     const run = { analysis: activeAnalysis };
     if (!run.analysis) return;
 
-    const folderName = run.analysis.organizedFolder || "Stream Consciousness Report";
+    const folderName = run.analysis.organizedFolder || "Session Notes";
 
     try {
       // Step 1: Create the parent category folder
@@ -627,7 +627,7 @@ export default function App() {
             </div>
           ) : (
             <div className="bg-white/40 border border-stone-200/50 rounded-2xl p-5 text-center text-xs text-stone-400 italic">
-              No past streaming sessions found. Run a stream of consciousness recording to begin compiling folders.
+              No past sessions found. Record your thoughts to begin compiling folders.
             </div>
           )}
         </div>
