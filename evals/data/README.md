@@ -7,9 +7,9 @@ properties**, never exact strings — LLM output varies.
 ## Running
 
 `../run.ts` is the runner — no framework. It POSTs each case to a **live dev
-server** (`npm run dev`), grades by properties, prints per-case pass/fail,
-aggregate metrics, and a tool-selection confusion matrix, then dumps
-failing **trajectories** (full input→output) to `../out/<ts>.jsonl`.
+server** (`npm run dev`), grades by properties, and prints per-case pass/fail
+(with each failure's reasons inline), aggregate metrics, and a tool-selection
+confusion matrix.
 
 ```bash
 npm run eval                     # everything

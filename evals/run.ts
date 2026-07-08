@@ -9,7 +9,7 @@
 //
 // Live mode POSTs to a running server (npm run dev). Override with EVAL_BASE_URL.
 // output-quality.jsonl uses the optional LLM judge (--judge); everything else is deterministic.
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -18,7 +18,6 @@ import { GoogleGenAI } from "@google/genai";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(HERE, "data");
-const OUT = path.join(HERE, "out");
 const BASE = process.env.EVAL_BASE_URL || "http://localhost:3000";
 const STRANGE_THRESHOLD = 0.7;
 
@@ -278,32 +277,26 @@ async function runLive(filter: { file?: string; tags?: string[] }) {
   const wantTag = (c: any) => !filter.tags || filter.tags.some(t => (c.tags || []).includes(t));
   const mat = emptyMatrix();
   const results: any[] = [];
-  const trajectories: any[] = [];
 
   const useJudge = process.argv.includes("--judge");
   const analyze = (c: any) => post("/api/analyze", { text: c.transcript, currentLocalTime: c.now, liveSummary: "" });
   // One row per dataset: which file, its result `kind`, and how to run+grade a case. The per-suite
-  // variance (endpoint, request shape, grader, trajectory fields) lives in `run`; the loop is shared.
-  const suites: { file: string; kind: string; run: (c: any) => Promise<{ r: any; traj: any }> }[] = [
-    { file: "intent-classification.jsonl", kind: "intent", run: async c => {
-      const out = await analyze(c); return { r: gradeIntent(c, out, mat), traj: { transcript: c.transcript, expect: c.expect, produced: out } }; } },
-    { file: "strange-word-detection.jsonl", kind: "transcriber", run: async c => {
-      const out = await post("/api/transcribe-correct", { text: c.text }); return { r: gradeTranscriber(c, out), traj: { text: c.text, produced: out } }; } },
-    { file: "correction-routing.jsonl", kind: "correction", run: async c => {
-      const out = await post("/api/transcribe-correct", { text: c.text }); return { r: gradeCorrection(c, out), traj: { text: c.text, gold: c.gold, produced: out } }; } },
+  // variance (endpoint, request shape, grader) lives in `run`; the loop is shared.
+  const suites: { file: string; kind: string; run: (c: any) => Promise<any> }[] = [
+    { file: "intent-classification.jsonl", kind: "intent", run: async c => gradeIntent(c, await analyze(c), mat) },
+    { file: "strange-word-detection.jsonl", kind: "transcriber", run: async c => gradeTranscriber(c, await post("/api/transcribe-correct", { text: c.text })) },
+    { file: "correction-routing.jsonl", kind: "correction", run: async c => gradeCorrection(c, await post("/api/transcribe-correct", { text: c.text })) },
     { file: "output-quality.jsonl", kind: "tooloutput", run: async c => {
       const out = c.query ? await post("/api/search", { query: c.query }) : await analyze(c);
       const jr = (useJudge && c.judge?.quality) ? await judge(c.judge.quality, JSON.stringify(out)) : undefined;
-      return { r: gradeToolOutput(c, out, jr), traj: { input: c.query || c.transcript, produced: out } }; } },
+      return gradeToolOutput(c, out, jr); } },
   ];
 
   for (const s of suites) {
     if (filter.file && filter.file !== s.file.replace(/\.jsonl$/, "")) continue;
     for (const c of loadJsonl(s.file).filter(wantTag)) {
       try {
-        const { r, traj } = await s.run(c);
-        results.push(r);
-        if (!r.pass) trajectories.push({ id: c.id, ...traj, fails: r.fails });
+        results.push(await s.run(c));
       } catch (e: any) {
         results.push({ kind: s.kind, id: c.id, note: c.note, pass: false, fails: [`ERROR ${e.message}`] });
       }
@@ -335,13 +328,6 @@ async function runLive(filter: { file?: string; tags?: string[] }) {
   console.log("\nMetrics:");
   for (const [k, v] of Object.entries(metrics)) console.log(`  ${k.padEnd(20)} ${typeof v === "number" ? (v as number).toFixed(3) : v}`);
   if (intent.length) printMatrix(mat);
-
-  if (trajectories.length) {
-    if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true });
-    const f = path.join(OUT, `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
-    writeFileSync(f, trajectories.map(t => JSON.stringify(t)).join("\n"));
-    console.log(`\n${trajectories.length} failing trajectory(ies) -> ${path.relative(process.cwd(), f)}`);
-  }
 
   const baseFile = path.join(HERE, "baseline.json");
   if (process.argv.includes("--save-baseline")) {
