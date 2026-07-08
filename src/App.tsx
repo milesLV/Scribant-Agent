@@ -10,7 +10,7 @@ import {
   createCalendarEvent, 
   createGoogleTask,
   resetSandboxState
-} from "./utils/google-apis";
+} from "./utils/google-workspace";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { itemId } from "./utils/transcript";
 
@@ -49,7 +49,6 @@ export default function App() {
   const [liveTranscript, setLiveTranscript] = useState("");
   const [liveDraft, setLiveDraft] = useState<AnalysisResult | null>(null);
   const [liveSummary, setLiveSummary] = useState("");
-  const [isMicActive, setIsMicActive] = useState(false);
   const [isLiveAnalyzing, setIsLiveAnalyzing] = useState(false);
   const isLiveAnalyzingRef = useRef(false);
 
@@ -68,16 +67,25 @@ export default function App() {
     rawText,
     calendarEvents: (rawRes.calendarEvents || [])
       .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-      .map((evt: any) => ({ ...evt, id: itemId("cal", evt.sourceText, evt.title), status: "pending" as const, uncertain: !!evt.uncertain })),
+      .map((evt: any) => ({ ...evt, id: itemId("cal", evt.sourceText, evt.title), status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay })),
     tasks: (rawRes.tasks || [])
       .filter((t: any) => t && t.title && t.title.trim() !== "")
-      .map((t: any) => ({ ...t, id: itemId("task", t.sourceText, t.title), status: "pending" as const, uncertain: !!t.uncertain })),
+      .map((t: any) => ({ ...t, id: itemId("task", t.sourceText, t.title), status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined })),
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
       .map((q: any) => ({ ...q, id: itemId("search", q.sourceText, q.query), status: "pending" as const })),
-    organizedFolder: rawRes.organizedFolderName || "Consciousness Report",
+    organizedFolder: rawRes.organizedFolderName || "Session Notes",
     driveDocs: []
   });
+
+  // POST the transcript to the intent classifier. `signal` lets the live-draft path cancel in-flight calls.
+  const postAnalyze = (text: string, signal?: AbortSignal) =>
+    fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary }),
+      signal,
+    });
 
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
   const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) => {
@@ -200,14 +208,7 @@ export default function App() {
       lastAnalyzedTextRef.current = capturedText;
 
       try {
-        const currentLocalTime = new Date().toISOString();
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: capturedText, currentLocalTime, liveSummary }),
-          signal: controller.signal
-        });
-
+        const res = await postAnalyze(capturedText, controller.signal);
         if (res.ok) {
           const rawRes = await res.json();
           setLiveDraft(toAnalysisResult(rawRes, capturedText));
@@ -280,15 +281,7 @@ export default function App() {
     }
 
     try {
-      const currentLocalTime = new Date().toISOString();
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ text, currentLocalTime, liveSummary })
-      });
-
+      const res = await postAnalyze(text);
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || "Brain dump categorization failed.");
@@ -308,7 +301,7 @@ export default function App() {
         },
         {
           name: "2_Extracted_Insights.md",
-          content: `# Extracted Ideas & Insights\n\nBelow are summarized thoughts and bullet points captured from your stream of consciousness:\n\n${analysis.summary}`,
+          content: `# Extracted Ideas & Insights\n\nBelow are summarized thoughts and bullet points captured from your spoken thoughts:\n\n${analysis.summary}`,
           mimeType: "text/markdown",
           type: "ideas",
           status: "pending"
@@ -331,7 +324,7 @@ export default function App() {
       setLiveDraft(null);
       setLiveSummary("");
       
-      showToast("Consciousness stream structured! Actionable items detected.");
+      showToast("Thoughts structured! Actionable items detected.");
     } catch (error: any) {
       console.error(error);
       showToast(`Analyzer Error: ${error.message || "Failed to process speech intents."}`);
@@ -426,7 +419,7 @@ export default function App() {
       const data = await res.json();
       updateActiveAnalysis(a => {
         const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { ...queryItem, status: "completed", answer: data.answer, sources: data.sources };
+        searchQueries[index] = { ...queryItem, status: "completed", condensed: data.condensed, answer: data.answer, sources: data.sources };
         return { ...a, searchQueries };
       });
       showToast(`Researced facts retrieved for query: "${queryItem.query}"`);
@@ -443,10 +436,9 @@ export default function App() {
 
   // 4. Google Drive folder & files organization dispatcher
   const handleExecuteDrive = async () => {
-    const run = { analysis: activeAnalysis };
-    if (!run.analysis) return;
+    if (!activeAnalysis) return;
 
-    const folderName = run.analysis.organizedFolder || "Stream Consciousness Report";
+    const folderName = activeAnalysis.organizedFolder || "Session Notes";
 
     try {
       // Step 1: Create the parent category folder
@@ -454,13 +446,13 @@ export default function App() {
 
       // Step 2: Formulate dynamic Action report log document
       const actLogsContent = `# Actions & Tasks Log Report\n\nGenerated on: ${new Date().toLocaleString()}\n\n## Actionable checklist saved:\n${
-        run.analysis.tasks.map(t => `- [x] ${t.title}: ${t.notes || 'No description'}`).join('\n') || "No tasks recorded."
+        activeAnalysis.tasks.map(t => `- [x] ${t.title}: ${t.notes || 'No description'}`).join('\n') || "No tasks recorded."
       }\n\n## Scheduled Appointments:\n${
-        run.analysis.calendarEvents.map(e => `- **${e.title}**: ${e.start} to ${e.end}`).join('\n') || "No appointments registered."
+        activeAnalysis.calendarEvents.map(e => `- **${e.title}**: ${e.start} to ${e.end}`).join('\n') || "No appointments registered."
       }`;
 
       const documentsToUpload: Omit<DriveDocItem, "status">[] = [
-        ...run.analysis.driveDocs.map(d => ({ name: d.name, content: d.content, mimeType: d.mimeType, type: d.type })),
+        ...activeAnalysis.driveDocs.map(d => ({ name: d.name, content: d.content, mimeType: d.mimeType, type: d.type })),
         { name: "3_Action_Log_Report.md", content: actLogsContent, mimeType: "text/markdown", type: "report" }
       ];
 
@@ -584,15 +576,13 @@ export default function App() {
             clearSignal={clearSignal}
             onChangeTranscript={setLiveTranscript}
             onChangeSummary={setLiveSummary}
-            onListeningChange={setIsMicActive}
           />
         </div>
 
         {/* Results layout: rendered cleanly underneath the Microphone */}
         <div className="pt-2">
-          <ActiveSession 
-            run={displayedRun} 
-            token={token}
+          <ActiveSession
+            run={displayedRun}
             onExecuteCalendar={handleExecuteCalendar}
             onExecuteTask={handleExecuteTask}
             onExecuteSearch={handleExecuteSearch}
@@ -627,7 +617,7 @@ export default function App() {
             </div>
           ) : (
             <div className="bg-white/40 border border-stone-200/50 rounded-2xl p-5 text-center text-xs text-stone-400 italic">
-              No past streaming sessions found. Run a stream of consciousness recording to begin compiling folders.
+              No past sessions found. Record your thoughts to begin compiling folders.
             </div>
           )}
         </div>

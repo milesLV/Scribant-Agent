@@ -1,7 +1,7 @@
 import { CalendarEvent, TaskItem, DriveDocItem } from "../types";
 
 // In-memory or localStorage cache for sandbox state so it persists across runs
-const SANDBOX_STATE_KEY = "stream_consciousness_sandbox";
+const SANDBOX_STATE_KEY = "scribant_sandbox";
 
 interface SandboxState {
   events: CalendarEvent[];
@@ -64,21 +64,24 @@ function saveSandboxState(state: SandboxState) {
   localStorage.setItem(SANDBOX_STATE_KEY, JSON.stringify(state));
 }
 
+// Sandbox create: mint a mock id, let the caller shape+push its item, persist, return the id.
+function sandboxAdd(prefix: string, push: (state: SandboxState, id: string) => void): string {
+  const state = getSandboxState();
+  const id = `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+  push(state, id);
+  saveSandboxState(state);
+  return id;
+}
+
 // ==========================================
 // GOOGLE DRIVE SERVICE
 // ==========================================
 
 export async function createDriveFolder(token: string | null, folderName: string): Promise<string> {
   if (!token) {
-    // Sandbox Mode
-    const state = getSandboxState();
-    const existing = state.folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
+    const existing = getSandboxState().folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
     if (existing) return existing.id;
-    
-    const newId = `mock-fld-${Math.random().toString(36).substr(2, 9)}`;
-    state.folders.push({ id: newId, name: folderName });
-    saveSandboxState(state);
-    return newId;
+    return sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName }));
   }
 
   // Real Integration Mode
@@ -127,20 +130,8 @@ export async function uploadDriveFile(
   folderId?: string
 ): Promise<string> {
   if (!token) {
-    // Sandbox Mode
-    const state = getSandboxState();
-    const newId = `mock-doc-${Math.random().toString(36).substr(2, 9)}`;
-    state.docs.push({
-      name: fileName,
-      content,
-      mimeType: "text/markdown",
-      type: "summary",
-      status: "created",
-      fileId: newId,
-      folderId
-    });
-    saveSandboxState(state);
-    return newId;
+    return sandboxAdd("mock-doc", (s, id) =>
+      s.docs.push({ name: fileName, content, mimeType: "text/markdown", type: "summary", status: "created", fileId: id, folderId }));
   }
 
   // Real Integration Mode: Step 1 Create Metadata
@@ -189,19 +180,30 @@ export async function uploadDriveFile(
 
 export async function createCalendarEvent(token: string | null, event: Omit<CalendarEvent, "status">): Promise<string> {
   if (!token) {
-    // Sandbox Mode
-    const state = getSandboxState();
-    const newId = `mock-evt-${Math.random().toString(36).substr(2, 9)}`;
-    state.events.push({
-      ...event,
-      status: "scheduled",
-      eventId: newId
-    });
-    saveSandboxState(state);
-    return newId;
+    return sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, status: "scheduled", eventId: id }));
   }
 
   // Real Integration Mode
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const dateOnly = (iso: string) => new Date(iso).toISOString().slice(0, 10);
+
+  let start: any, end: any;
+  if (event.allDay) {
+    // All-day events use date (not dateTime); Google treats end.date as exclusive.
+    const sd = dateOnly(event.start);
+    let ed = event.end ? dateOnly(event.end) : sd;
+    if (ed <= sd) {
+      const next = new Date(sd);
+      next.setUTCDate(next.getUTCDate() + 1);
+      ed = next.toISOString().slice(0, 10);
+    }
+    start = { date: sd };
+    end = { date: ed };
+  } else {
+    start = { dateTime: event.start, timeZone };
+    end = { dateTime: event.end, timeZone };
+  }
+
   const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
     method: "POST",
     headers: {
@@ -211,14 +213,8 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
     body: JSON.stringify({
       summary: event.title,
       description: event.description,
-      start: {
-        dateTime: event.start,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-      },
-      end: {
-        dateTime: event.end,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-      }
+      start,
+      end
     })
   });
 
@@ -237,19 +233,11 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
 
 export async function createGoogleTask(token: string | null, task: Omit<TaskItem, "status">): Promise<string> {
   if (!token) {
-    // Sandbox Mode
-    const state = getSandboxState();
-    const newId = `mock-task-${Math.random().toString(36).substr(2, 9)}`;
-    state.tasks.push({
-      ...task,
-      status: "created",
-      taskId: newId
-    });
-    saveSandboxState(state);
-    return newId;
+    return sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id }));
   }
 
-  // Real Integration Mode: Fetch tasklists to find @default primary or list
+  // Real Integration Mode: Fetch tasklists to find @default primary or list.
+  // Google Tasks stores the date portion of `due` only (time of day is discarded).
   const res = await fetch("https://www.googleapis.com/tasks/v1/lists/@default/tasks", {
     method: "POST",
     headers: {
@@ -258,7 +246,8 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
     },
     body: JSON.stringify({
       title: task.title,
-      notes: task.notes
+      notes: task.notes,
+      ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {})
     })
   });
 

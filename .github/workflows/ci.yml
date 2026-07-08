@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # lets you run the live `eval` job on demand
+
+jobs:
+  # Keyless gate — runs on every push/PR. tsc + all self-checks (skills, transcriber,
+  # server-utils, eval graders). No API key, no network, ~seconds.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  # Live model eval — costs Gemini tokens and needs quota, so it's manual only
+  # (workflow_dispatch). Add a GEMINI_API_KEY repo secret first; it grades against
+  # evals/baseline.json and fails if a metric regresses (once a baseline is committed).
+  eval:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start dev server
+        run: npm run dev &
+      - name: Wait for server
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://localhost:3000/ && exit 0
+            sleep 2
+          done
+          echo "server never came up (bad/exhausted GEMINI_API_KEY?)" && exit 1
+      - run: npm run eval

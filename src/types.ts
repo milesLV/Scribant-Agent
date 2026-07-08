@@ -14,6 +14,7 @@ export interface CalendarEvent {
   description: string;
   start: string; // ISO string
   end: string; // ISO string
+  allDay?: boolean; // spans whole day(s) with no clock time (trip, birthday, OOO)
   status: 'pending' | 'scheduled' | 'failed' | 'skipped';
   eventId?: string;
   error?: string;
@@ -25,17 +26,19 @@ export interface TaskItem {
   sourceText?: string;
   title: string;
   notes: string;
+  dueDate?: string; // ISO date (YYYY-MM-DD) deadline, if the action is time-bounded
   status: 'pending' | 'created' | 'failed' | 'skipped';
   taskId?: string;
   error?: string;
   uncertain?: boolean;
 }
 
-export interface SearchQueryItem {
+interface SearchQueryItem {
   id: string;
   sourceText?: string;
   query: string;
-  answer?: string;
+  condensed?: string; // 1-2 sentence direct answer (shown collapsed)
+  answer?: string;    // fuller in-depth answer (shown expanded)
   sources?: { uri: string; title: string }[];
   status: 'pending' | 'completed' | 'failed' | 'skipped';
   error?: string;

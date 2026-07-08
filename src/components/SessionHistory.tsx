@@ -1,5 +1,5 @@
 import { StreamRun } from "../types";
-import { Brain, FileText, Calendar, CheckSquare, Search, ChevronRight, CornerDownRight } from "lucide-react";
+import { Brain, FileText, Calendar, CheckSquare, ChevronRight } from "lucide-react";
 
 interface SessionHistoryProps {
   runs: StreamRun[];
@@ -14,16 +14,8 @@ export default function SessionHistory({
 }: SessionHistoryProps) {
   
   const formatDate = (isoStr: string) => {
-    try {
-      const d = new Date(isoStr);
-      return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    } catch {
-      return "Undated Run";
-    }
-  };
-
-  const getRunSnippet = (text: string) => {
-    return text.length > 70 ? text.substring(0, 70) + "..." : text;
+    const d = new Date(isoStr);
+    return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   };
 
   return (
@@ -40,7 +32,7 @@ export default function SessionHistory({
 
       {runs.length === 0 ? (
         <div className="text-center py-6 text-xs text-stone-400 italic">
-          No previous stream sessions saved. Try speaking or typing your first stream of consciousness!
+          No previous sessions saved. Try speaking or typing your first thoughts!
         </div>
       ) : (
         <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
@@ -70,8 +62,8 @@ export default function SessionHistory({
                     <ChevronRight className={`w-3.5 h-3.5 ${isSelected ? "text-amber-600" : "text-stone-300"}`} />
                   </div>
 
-                  <p className="text-xs font-medium text-stone-700 font-sans leading-tight mt-0.5 line-clamp-1 truncate w-full">
-                    {getRunSnippet(run.rawText)}
+                  <p className="text-xs font-medium text-stone-700 font-sans leading-tight mt-0.5 truncate w-full">
+                    {run.rawText}
                   </p>
 
                   {hasAnalysis && run.analysis && (

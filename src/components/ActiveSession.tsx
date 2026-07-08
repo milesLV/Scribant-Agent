@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { StreamRun, CalendarEvent, TaskItem, SearchQueryItem } from "../types";
+import { StreamRun, CalendarEvent, TaskItem } from "../types";
 import {
   Calendar, CheckSquare, Search, FileText, Check,
   ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown
@@ -8,7 +8,6 @@ import MarkdownBullets from "./MarkdownBullets";
 
 interface ActiveSessionProps {
   run: StreamRun | null;
-  token: string | null;
   onExecuteCalendar: (index: number) => Promise<void>;
   onExecuteTask: (index: number) => Promise<void>;
   onExecuteSearch: (index: number) => Promise<void>;
@@ -20,7 +19,6 @@ interface ActiveSessionProps {
 
 export default function ActiveSession({
   run,
-  token,
   onExecuteCalendar,
   onExecuteTask,
   onExecuteSearch,
@@ -39,7 +37,7 @@ export default function ActiveSession({
     return (
       <div className="bg-white border border-stone-200 rounded-2xl p-8 text-center shadow-sm">
         <Sparkles className="w-8 h-8 mx-auto text-stone-300 animate-pulse mb-3" />
-        <h3 className="text-sm font-semibold text-stone-700">Analysing Stream of Consciousness...</h3>
+        <h3 className="text-sm font-semibold text-stone-700">Analyzing your thoughts...</h3>
         <p className="text-xs text-stone-400 mt-1 max-w-sm mx-auto">Gemini is structuring your thoughts, detecting appointments, and aligning action folders.</p>
       </div>
     );
@@ -73,7 +71,7 @@ export default function ActiveSession({
     }
   };
 
-  const handleSearchClick = async (idx: number, qi: SearchQueryItem) => {
+  const handleSearchClick = async (idx: number) => {
     setExecutingSearch(idx);
     try {
       await onExecuteSearch(idx);
@@ -82,31 +80,13 @@ export default function ActiveSession({
     }
   };
 
-  // Helper formats UTC or ISO relative times cleanly
-  const formatTimeRange = (startStr: string, endStr: string) => {
-    try {
-      const start = new Date(startStr);
-      const end = new Date(endStr);
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return "Indeterminate schedule";
-      }
-      return `${start.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} at ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – ${end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    } catch {
-      return "Indeterminate schedule";
-    }
-  };
-
   const toDatetimeLocalString = (isoString: string): string => {
     if (!isoString) return "";
-    try {
-      const date = new Date(isoString);
-      if (isNaN(date.getTime())) return "";
-      const offset = date.getTimezoneOffset();
-      const localDate = new Date(date.getTime() - offset * 60 * 1000);
-      return localDate.toISOString().slice(0, 16);
-    } catch {
-      return "";
-    }
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return "";
+    const offset = date.getTimezoneOffset();
+    const localDate = new Date(date.getTime() - offset * 60 * 1000);
+    return localDate.toISOString().slice(0, 16);
   };
 
   return (
@@ -162,7 +142,12 @@ export default function ActiveSession({
                   return (
                     <details key={idx} className="group border border-stone-100 rounded-xl bg-stone-50/50">
                       <summary className="flex items-start justify-between gap-3 p-4 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
-                        {queryLine}
+                        <div className="min-w-0">
+                          {queryLine}
+                          {item.condensed && (
+                            <p className="text-xs text-stone-600 leading-relaxed mt-1 font-sans font-normal">{item.condensed}</p>
+                          )}
+                        </div>
                         <ChevronDown className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5 transition-transform group-open:rotate-180" />
                       </summary>
                       <div className="px-4 pb-4">
@@ -198,7 +183,7 @@ export default function ActiveSession({
                       {queryLine}
                       {item.status === 'pending' && (
                         <button
-                          onClick={() => handleSearchClick(idx, item)}
+                          onClick={() => handleSearchClick(idx)}
                           disabled={executingSearch !== null}
                           className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
                         >
@@ -257,6 +242,11 @@ export default function ActiveSession({
                         {isUncertain && (
                           <span className="inline-block text-[9px] font-bold text-amber-700 bg-amber-100 border border-amber-250/30 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 font-mono">
                             Uncertain Draft
+                          </span>
+                        )}
+                        {item.allDay && (
+                          <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
+                            All-day
                           </span>
                         )}
                         <input
@@ -378,6 +368,11 @@ export default function ActiveSession({
                           className="text-[11px] text-stone-500 font-sans bg-transparent border-b border-transparent hover:border-stone-200 focus:border-purple-500 outline-none w-full py-0.5"
                           placeholder="Add notes..."
                         />
+                        {item.dueDate && (
+                          <span className="inline-block mt-1 text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
+                            Due {new Date(item.dueDate).toLocaleDateString()}
+                          </span>
+                        )}
                       </div>
 
                     <div className="shrink-0">
