@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 import { Word } from "../types";
+import { applyCorrections } from "../utils/transcript";
 
 // confidence below this = "strange" (misheard). Mirrors STRANGE_THRESHOLD in transcriber.ts.
 const STRANGE_THRESHOLD = 0.7;
@@ -13,7 +14,6 @@ interface AudioRecorderProps {
   clearSignal?: number;
   onChangeTranscript?: (text: string) => void;
   onChangeSummary?: (summary: string) => void;
-  onListeningChange?: (isListening: boolean) => void;
 }
 
 // Global declaration for SpeechRecognition
@@ -30,8 +30,7 @@ export default function AudioRecorder({
   onShowToast,
   clearSignal,
   onChangeTranscript,
-  onChangeSummary,
-  onListeningChange
+  onChangeSummary
 }: AudioRecorderProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
@@ -67,11 +66,12 @@ export default function AudioRecorder({
   const [activeStrange, setActiveStrange] = useState<number | null>(null);
   const proofedTextRef = useRef("");
   const proofAbortRef = useRef<AbortController | null>(null);
+  const proofTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const recognitionRef = useRef<any>(null);
 
-  // Ask the server (mode A: LLM proofreader) which words look misheard. Same Word[] the Cloud STT
-  // path (mode B) returns, so the highlight/correct UI below is provider-agnostic.
+  // Ask the server's proofread router (mode A2): obvious typos come back as `corrections` (auto-applied
+  // here) and ambiguous mishearings as low-confidence `words` (surfaced as clickable chips below).
   const runProofread = async (text: string) => {
     const t = text.trim();
     if (!t) { setWords(null); return; }
@@ -80,7 +80,7 @@ export default function AudioRecorder({
     proofAbortRef.current = controller;
     setIsProofing(true);
     try {
-      const res = await fetch("/api/transcribe-check", {
+      const res = await fetch("/api/transcribe-correct", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: t }),
@@ -88,8 +88,12 @@ export default function AudioRecorder({
       });
       if (res.ok) {
         const data = await res.json();
-        proofedTextRef.current = t;
-        setWords(data.words || null);
+        // Auto-apply the obvious fixes; keep only the ambiguous flags, offsets shifted to match.
+        const { text: corrected, words: flags } = applyCorrections(t, data.words || [], data.corrections || []);
+        const tail = transcript.startsWith(t) ? transcript.slice(t.length) : "";
+        proofedTextRef.current = corrected;
+        if (corrected !== t) setTranscript(corrected + tail);
+        setWords(flags.length ? flags : null);
         setActiveStrange(null);
       }
     } catch (err: any) {
@@ -100,14 +104,23 @@ export default function AudioRecorder({
     }
   };
 
-  // Swap a strange word for one of its suggestions. Splice into the proofed text (stable offsets),
-  // then drop the now-stale scores — the user can re-check the corrected transcript.
+  // Swap a strange word for one of its suggestions. Splice into the proofed text and shift every
+  // later word's offsets by the length delta, so the OTHER highlights survive the edit intact.
   const correctWord = (i: number, replacement: string) => {
     if (!words) return;
     const w = words[i];
     const base = proofedTextRef.current;
-    setTranscript(base.slice(0, w.start) + replacement + base.slice(w.end) + " ");
-    setWords(null);
+    const delta = replacement.length - (w.end - w.start);
+    const newBase = base.slice(0, w.start) + replacement + base.slice(w.end);
+    const tail = transcript.startsWith(base) ? transcript.slice(base.length) : "";
+    const newWords = words.map((x, j) => {
+      if (j === i) return { ...x, text: replacement, end: x.start + replacement.length, confidence: 1, alternatives: undefined };
+      if (j > i) return { ...x, start: x.start + delta, end: x.end + delta };
+      return x;
+    });
+    proofedTextRef.current = newBase;
+    setWords(newWords);
+    setTranscript(newBase + tail);
     setActiveStrange(null);
   };
 
@@ -117,20 +130,24 @@ export default function AudioRecorder({
     setActiveStrange(null);
   };
 
-  // Scores belong to a specific text; once the transcript diverges they're stale, so drop them.
+  // Scores stay valid as long as the proofed text is still the HEAD of the transcript — appends
+  // (new speech) keep the existing highlights; only a mid-text edit invalidates them.
   useEffect(() => {
-    if (words && transcript.trim() !== proofedTextRef.current) {
+    if (words && proofedTextRef.current && !transcript.startsWith(proofedTextRef.current)) {
       setWords(null);
       setActiveStrange(null);
     }
   }, [transcript, words]);
 
-  // Auto-proofread once the user pauses the mic, so strange words surface before they Analyze.
+  // Auto-proofread shortly after the transcript stops changing, so strange words surface on their
+  // own (the mic no longer auto-stops). Debounced to avoid a request per recognized chunk.
   useEffect(() => {
-    if (!isListening && transcript.trim() && transcript.trim() !== proofedTextRef.current) {
-      runProofread(transcript);
-    }
-  }, [isListening]);
+    const t = transcript.trim();
+    if (!t || isEditingTranscript || t === proofedTextRef.current) return;
+    if (proofTimerRef.current) clearTimeout(proofTimerRef.current);
+    proofTimerRef.current = setTimeout(() => runProofread(transcript), 2500);
+    return () => { if (proofTimerRef.current) clearTimeout(proofTimerRef.current); };
+  }, [transcript, isEditingTranscript]);
 
   const triggerLiveSummary = async (textToSummarize: string) => {
     if (!textToSummarize.trim()) {
@@ -185,13 +202,6 @@ export default function AudioRecorder({
       onChangeTranscript((transcript + " " + interimTranscript).trim());
     }
   }, [transcript, interimTranscript, onChangeTranscript]);
-
-  // Notify parent of microphone listening changes
-  useEffect(() => {
-    if (onListeningChange) {
-      onListeningChange(isListening);
-    }
-  }, [isListening, onListeningChange]);
 
   // External clear signal from parent (Clear All button)
   useEffect(() => {
@@ -465,6 +475,8 @@ export default function AudioRecorder({
       );
     });
     if (cursor < base.length) out.push(<span key="tail">{base.slice(cursor)}</span>);
+    // Text spoken/typed after the last proofread isn't scored yet — render it plain (no highlight).
+    if (transcript.length > base.length) out.push(<span key="unproofed">{transcript.slice(base.length)}</span>);
     return out;
   };
 
@@ -549,15 +561,6 @@ export default function AudioRecorder({
               <span className="text-[10px] font-bold text-stone-700 uppercase tracking-widest font-mono">
                 {useKeyboard || isEditingTranscript ? "Editable Input Text" : "Live Unfiltered Transcript"}
               </span>
-              {isEditingTranscript && !useKeyboard && (
-                <button
-                  type="button"
-                  onClick={() => setIsEditingTranscript(false)}
-                  className="text-[10px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded border border-emerald-200/50 cursor-pointer transition-all shrink-0 animate-pulse ml-2"
-                >
-                  ✓ Done Editing
-                </button>
-              )}
             </div>
             <div className="flex items-center gap-2">
               {strangeCount > 0 && !isEditingTranscript && (
@@ -565,7 +568,7 @@ export default function AudioRecorder({
                   {strangeCount} strange
                 </span>
               )}
-              {!isListening && !useKeyboard && (
+              {!useKeyboard && (
                 <button
                   type="button"
                   onClick={() => runProofread(transcript)}
@@ -594,6 +597,8 @@ export default function AudioRecorder({
                 id="type-thoughts-textarea"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
+                onBlur={() => setIsEditingTranscript(false)}
+                autoFocus={isEditingTranscript && !useKeyboard}
                 disabled={isProcessing}
                 placeholder="Write down whatever is on your mind. For example:&#10;'Today is a solid day. Discussing the product roadmap with Alice on June 10 at 2pm. Keep a note to draft the mock schema beforehand. I wonder who designed the Concorde airplane originally? Also, remember to grab coffee on the way home.'"
                 className="w-full flex-1 bg-transparent border-0 p-0 text-xs text-stone-700 leading-normal focus:ring-0 outline-none resize-none font-sans"
@@ -610,7 +615,7 @@ export default function AudioRecorder({
               >
                 {(transcript || interimTranscript) ? (
                   <span className="leading-relaxed font-sans text-stone-750">
-                    {words ? renderProofed() : transcript}
+                    {words && transcript.startsWith(proofedTextRef.current) ? renderProofed() : transcript}
                     {interimTranscript && (
                       <span className="text-amber-500 italic font-medium animate-pulse">
                         {(transcript && !/\s$/.test(transcript) ? " " : "") + interimTranscript}

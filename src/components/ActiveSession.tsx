@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { StreamRun, CalendarEvent, TaskItem, SearchQueryItem } from "../types";
+import { StreamRun, CalendarEvent, TaskItem } from "../types";
 import {
   Calendar, CheckSquare, Search, FileText, Check,
   ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown
@@ -8,7 +8,6 @@ import MarkdownBullets from "./MarkdownBullets";
 
 interface ActiveSessionProps {
   run: StreamRun | null;
-  token: string | null;
   onExecuteCalendar: (index: number) => Promise<void>;
   onExecuteTask: (index: number) => Promise<void>;
   onExecuteSearch: (index: number) => Promise<void>;
@@ -20,7 +19,6 @@ interface ActiveSessionProps {
 
 export default function ActiveSession({
   run,
-  token,
   onExecuteCalendar,
   onExecuteTask,
   onExecuteSearch,
@@ -73,7 +71,7 @@ export default function ActiveSession({
     }
   };
 
-  const handleSearchClick = async (idx: number, qi: SearchQueryItem) => {
+  const handleSearchClick = async (idx: number) => {
     setExecutingSearch(idx);
     try {
       await onExecuteSearch(idx);
@@ -82,31 +80,13 @@ export default function ActiveSession({
     }
   };
 
-  // Helper formats UTC or ISO relative times cleanly
-  const formatTimeRange = (startStr: string, endStr: string) => {
-    try {
-      const start = new Date(startStr);
-      const end = new Date(endStr);
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return "Indeterminate schedule";
-      }
-      return `${start.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} at ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – ${end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    } catch {
-      return "Indeterminate schedule";
-    }
-  };
-
   const toDatetimeLocalString = (isoString: string): string => {
     if (!isoString) return "";
-    try {
-      const date = new Date(isoString);
-      if (isNaN(date.getTime())) return "";
-      const offset = date.getTimezoneOffset();
-      const localDate = new Date(date.getTime() - offset * 60 * 1000);
-      return localDate.toISOString().slice(0, 16);
-    } catch {
-      return "";
-    }
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return "";
+    const offset = date.getTimezoneOffset();
+    const localDate = new Date(date.getTime() - offset * 60 * 1000);
+    return localDate.toISOString().slice(0, 16);
   };
 
   return (
@@ -162,7 +142,12 @@ export default function ActiveSession({
                   return (
                     <details key={idx} className="group border border-stone-100 rounded-xl bg-stone-50/50">
                       <summary className="flex items-start justify-between gap-3 p-4 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
-                        {queryLine}
+                        <div className="min-w-0">
+                          {queryLine}
+                          {item.condensed && (
+                            <p className="text-xs text-stone-600 leading-relaxed mt-1 font-sans font-normal">{item.condensed}</p>
+                          )}
+                        </div>
                         <ChevronDown className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5 transition-transform group-open:rotate-180" />
                       </summary>
                       <div className="px-4 pb-4">
@@ -198,7 +183,7 @@ export default function ActiveSession({
                       {queryLine}
                       {item.status === 'pending' && (
                         <button
-                          onClick={() => handleSearchClick(idx, item)}
+                          onClick={() => handleSearchClick(idx)}
                           disabled={executingSearch !== null}
                           className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
                         >

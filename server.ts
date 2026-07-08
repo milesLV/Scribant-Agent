@@ -1,15 +1,13 @@
 import express from "express";
 import path from "path";
-import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import { markStrangeWords, transcribeAudio } from "./transcriber";
+import { proofreadAndCorrect } from "./transcriber";
+import { SKILLS, skillSchemaProperties } from "./skills";
+import { cleanJsonString, splitTiers, filterValidCalendarEvents, nextIndex, runWithFallback, resolveDate } from "./server-utils";
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
@@ -34,8 +32,10 @@ let keysValidated = false;
 /** Probe a single key with a tiny generateContent call. Returns true if live. */
 async function probeGeminiKey(client: GoogleGenAI, envName: string): Promise<boolean> {
   try {
+    // Probe the model we actually serve from (MODEL_FALLBACKS[0]), not a retired/limit:0 one — probing
+    // a free-tier limit:0 model (e.g. gemini-2.0-flash) makes every key look "quota exhausted".
     await client.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: MODEL_FALLBACKS[0],
       contents: "ping",
       config: { maxOutputTokens: 1 },
     });
@@ -104,18 +104,18 @@ function getGeminiClient(): GoogleGenAI {
 /** Rotate to the next API key (called on 429). */
 function rotateGeminiKey() {
   if (geminiClients.length > 1) {
-    geminiClientIndex = (geminiClientIndex + 1) % geminiClients.length;
+    geminiClientIndex = nextIndex(geminiClientIndex, geminiClients.length);
     console.log(`🔄  Rotated to Gemini key index ${geminiClientIndex}`);
   }
 }
 
-// Gemini models tried in order. A local Ollama model is appended only when OLLAMA_MODEL is set
-// (e.g. OLLAMA_MODEL=gemma3), so it never poisons the chain with ECONNREFUSED when Ollama isn't running.
+// Gemini models tried in order, then a LOCAL Ollama model as the last-resort fallback — the safety
+// net when every Gemini key is quota-exhausted. It's last, so if Ollama isn't running the ECONNREFUSED
+// just ends the chain (throwing the prior Gemini error). Defaults to gemma4; override with OLLAMA_MODEL.
 const MODEL_FALLBACKS = [
   "gemini-2.5-flash",
   "gemini-2.5-pro",
-  "gemini-2.0-flash",
-  ...(process.env.OLLAMA_MODEL ? [`ollama:${process.env.OLLAMA_MODEL}`] : []),
+  `ollama:${process.env.OLLAMA_MODEL || "gemma4"}`,
 ];
 
 /**
@@ -169,85 +169,24 @@ async function generateWithFallback(
   _ai: GoogleGenAI,
   params: { model: string; contents: string; config?: any }
 ): Promise<any> {
-  const modelsToTry = [
-    params.model,
-    ...MODEL_FALLBACKS.filter(m => m !== params.model)
-  ];
-
-  let lastError: any = null;
-
-  for (const model of modelsToTry) {
-    try {
-      if (model.startsWith("ollama:")) {
-        const ollamaModel = model.replace("ollama:", "");
-        return await callOllama(ollamaModel, params);
-      } else {
-        // Always pick from the rotating key pool for Gemini models
-        const client = getGeminiClient();
-        const response = await client.models.generateContent({
-          ...params,
-          model,
-        });
-        return response;
-      }
-    } catch (err: any) {
-      lastError = err;
-      const status = err?.status ?? err?.httpStatusCode ?? err?.code;
-      const message = err?.message ?? "";
-
-      const isRetryable =
-        status === 203 ||
-        status === 429 ||
-        status === 503 ||
-        message.includes("203") ||
-        message.includes("429") ||
-        message.includes("RESOURCE_EXHAUSTED") ||
-        message.includes("Quota exceeded") ||
-        message.includes("overloaded") ||
-        message.includes("unavailable") ||
-        message.includes("rate limit") ||
-        message.includes("fetch failed") ||
-        message.includes("ECONNREFUSED");
-
-      if (isRetryable) {
-        console.warn(
-          `Model "${model}" returned error ${status || message}. Rotating API key and falling back to next model...`
-        );
-        // Rotate API key before trying the next model
-        if (!model.startsWith("ollama:")) rotateGeminiKey();
-        continue;
-      }
-
-      // Non-retryable error — throw immediately
-      throw err;
-    }
-  }
-
-  // All models exhausted
-  throw lastError || new Error("All fallback models failed.");
+  const models = [params.model, ...MODEL_FALLBACKS.filter(m => m !== params.model)];
+  const isOllama = (m: string) => m.startsWith("ollama:");
+  // Orchestration (retry/rotate/fallback classification) lives in server-utils.runWithFallback,
+  // unit-tested there; this closure just supplies the real Gemini/Ollama callers + key rotation.
+  return runWithFallback(models, params, {
+    callModel: (model, p) =>
+      isOllama(model)
+        ? callOllama(model.replace("ollama:", ""), p)
+        : getGeminiClient().models.generateContent({ ...p, model }),
+    rotate: rotateGeminiKey,
+    isOllama,
+    onRetry: (model, err) =>
+      console.warn(`Model "${model}" returned error ${err?.status ?? err?.message}. Rotating API key and falling back to next model...`),
+  });
 }
 
-function cleanJsonString(rawText: string): string {
-  if (!rawText) return "{}";
-  let text = rawText.trim();
-
-  // Strip markdown code fences (```json ... ``` or ``` ... ```)
-  if (text.startsWith("```")) {
-    text = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-  }
-
-  // Extract just the JSON object — from first '{' to last '}'
-  const objStart = text.indexOf("{");
-  const objEnd = text.lastIndexOf("}");
-  if (objStart !== -1 && objEnd !== -1 && objEnd > objStart) {
-    text = text.slice(objStart, objEnd + 1);
-  }
-
-  // Remove trailing commas before ] or } (common LLM mistake)
-  text = text.replace(/,\s*([}\]])/g, "$1");
-
-  return text;
-}
+// cleanJsonString / splitTiers / filterValidCalendarEvents / nextIndex now live in ./server-utils
+// (pure + unit-tested there). Everything below is the HTTP + LLM-gateway layer.
 
 // 1. Intent Classifier endpoint — turn the transcript into calendar/task/search items
 app.post("/api/analyze", async (req, res) => {
@@ -259,6 +198,16 @@ app.post("/api/analyze", async (req, res) => {
     }
 
     const ai = getGeminiClient();
+    // Prompt criteria + schema are generated from the skill registry (skills.ts). Order is fixed:
+    // ideasSummary (1), each skill (2..), organizedFolderName (last) — the calendar criteria's
+    // "(see #3)" reference relies on tasks landing at index 3.
+    const criteriaEntries = [
+      { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
+      ...SKILLS.map(s => ({ key: s.name, body: s.description })),
+      { key: "organizedFolderName", body: `(string) A clean, professional, descriptive 2-4 word folder name to organize these files under in Google Drive (e.g. "Project Beta Alignment", "Home Gardening Brainstorm").` },
+    ];
+    const criteriaText = criteriaEntries.map((e, i) => `${i + 1}. "${e.key}": ${e.body}`).join("\n");
+
     const systemInstruction = `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
 The user is speaking or writing their thoughts in an unfiltered "brain dump" format.
 Analyze the provided stream of thoughts and categorize segments into different structured action buckets.
@@ -270,28 +219,25 @@ Here is the context of what has been spoken/transcribed:
 
 You MUST output strictly a JSON object with the following keys and criteria:
 
-1. "ideasSummary": (string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.
-2. "calendarEvents": (array of objects) Things that HAPPEN on a timeline — you attend them or they occur over a span of time (appointments, meetings, trips, birthdays). Use a calendar event when the TIME ITSELF matters: either a specific clock time you must be present for ("groomer tomorrow at 9", "dinner with Sam at 7"), OR a whole day/days something occupies even without a clock time ("driving to Yosemite tomorrow", "my sister's birthday Friday"). DO NOT use a calendar event for an action you merely need to finish by some point — that is a task with a dueDate (see #3). DO NOT include vague aspirations (NO to "I want to do better at coding"). Set "uncertain": true when the commitment, date, or time is vague (e.g. "we should grab lunch sometime"), else false. Each object must have:
-   - "title": (string) Event summary/title
-   - "description": (string) Event description/context
-   - "allDay": (boolean) true if it spans whole day(s) with no specific clock time (trips, birthdays, holidays, out-of-office); false for events with a start time.
-   - "start": (string) Start as ISO-8601 (use the current local time to resolve "tomorrow", "tonight", "next week"). For all-day events use the date at 00:00.
-   - "end": (string) End as ISO-8601. Default to 30 minutes after start when no duration is implied (for all-day, the same day or the stated span).
-   - "uncertain": (boolean)
-   - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).
-3. "tasks": (array of objects) Things you DO and check off — actions you can complete at any time rather than at a fixed clock time ("water the plants", "renew my passport", "clean the house before the walk-through", "prepare for my interview"). If the action has a deadline or upper bound, capture it in "dueDate"; if instead it must happen AT a specific time you attend, it is a calendar event. DO NOT include vague moods (NO to "I want my life together" or "I should work on my project"). Set "uncertain": true when the task or its details are vague, else false. Each object must have:
-   - "title": (string) Compact title of the task
-   - "notes": (string) Any descriptions, sub-items, or context
-   - "dueDate": (string) Deadline as an ISO date "YYYY-MM-DD" if the action is bounded ("today", "by Friday", "before the walk-through" — resolve relative to the current local time); empty string "" if open-ended.
-   - "uncertain": (boolean) Set to true if the task itself or its details are vague or uncertain, else false.
-   - "sourceText": (string) The exact words from the transcript that triggered this task, copied verbatim (not paraphrased).
-GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake event time. Only make a calendar event when being there at that specific time matters, or when it occupies whole days. A flexible action with just a deadline (e.g. "hit the gym sometime next week") is a task (uncertain) with a dueDate, NOT an event.
-4. "searchQueries": (array of objects) ONLY include searchable, well-defined questions or queries (e.g. YES to "I wonder what the most efficient gas mileage for my Toyota Sienna is" or "Where is the best place to eat?"). DO NOT include personal, unsearchable thoughts (e.g. NO to "I wonder what I will eat when I get home" or "What do I have in my fridge?"). Each object must have:
-   - "query": (string) The search query text
-   - "sourceText": (string) The exact words from the transcript that triggered this query, copied verbatim (not paraphrased).
-5. "organizedFolderName": (string) A clean, professional, descriptive 2-4 word folder name to organize these files under in Google Drive (e.g. "Project Beta Alignment", "Home Gardening Brainstorm").
+${criteriaText}
 
 CRITICAL: If there are no items matching a category's strict criteria, you MUST return an empty array [] for that field. Do not generate empty or placeholder objects. Return ONLY the valid JSON object.`;
+
+    const responseSchema = {
+      type: Type.OBJECT,
+      properties: {
+        ideasSummary: {
+          type: Type.STRING,
+          description: "A beautifully organized list of summarized ideas and insights, in markdown bullet points."
+        },
+        ...skillSchemaProperties(),
+        organizedFolderName: {
+          type: Type.STRING,
+          description: "Descriptive name for a drive folder."
+        }
+      },
+      required: ["ideasSummary", ...SKILLS.map(s => s.name), "organizedFolderName"]
+    };
 
     const response = await generateWithFallback(ai, {
       model: MODEL_FALLBACKS[0],
@@ -299,64 +245,7 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
       config: {
         systemInstruction,
         responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            ideasSummary: {
-              type: Type.STRING,
-              description: "A beautifully organized list of summarized ideas and insights, in markdown bullet points."
-            },
-            calendarEvents: {
-              type: Type.ARRAY,
-              description: "List of calendar events that should be scheduled.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING, description: "Event summary/title" },
-                  description: { type: Type.STRING, description: "Event description/context" },
-                  start: { type: Type.STRING, description: "Start time as ISO-8601 string" },
-                  end: { type: Type.STRING, description: "End time as ISO-8601 string" },
-                  uncertain: { type: Type.BOOLEAN, description: "Whether there is uncertainty about the event commitment or details" },
-                  allDay: { type: Type.BOOLEAN, description: "True if it spans whole day(s) with no specific clock time" },
-                  sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this event" }
-                },
-                required: ["title", "description", "start", "end", "uncertain", "allDay", "sourceText"]
-              }
-            },
-            tasks: {
-              type: Type.ARRAY,
-              description: "Actionable todo checklist items found in the text.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING, description: "Compact title of the task" },
-                  notes: { type: Type.STRING, description: "Any descriptions, sub-items, or context" },
-                  uncertain: { type: Type.BOOLEAN, description: "Whether the task itself or its details are vague or uncertain" },
-                  dueDate: { type: Type.STRING, description: "Deadline as ISO date YYYY-MM-DD if bounded, else empty string" },
-                  sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this task" }
-                },
-                required: ["title", "notes", "uncertain", "dueDate", "sourceText"]
-              }
-            },
-            searchQueries: {
-              type: Type.ARRAY,
-              description: "Questions or topics they explicitly mentioned searching or finding info on.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  query: { type: Type.STRING },
-                  sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this query" }
-                },
-                required: ["query", "sourceText"]
-              }
-            },
-            organizedFolderName: {
-              type: Type.STRING,
-              description: "Descriptive name for a drive folder."
-            }
-          },
-          required: ["ideasSummary", "calendarEvents", "tasks", "searchQueries", "organizedFolderName"]
-        }
+        responseSchema,
       }
     });
 
@@ -364,12 +253,33 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
     const parsed = JSON.parse(cleanedText);
 
     console.log(`[analyze] text=${text.length}ch → events=${parsed.calendarEvents?.length ?? 0} tasks=${parsed.tasks?.length ?? 0} queries=${parsed.searchQueries?.length ?? 0}`);
-    // Drop calendar events with a missing/placeholder start time (the client only filters on title).
-    if (parsed.calendarEvents) {
-      parsed.calendarEvents = parsed.calendarEvents.filter((evt: any) =>
-        evt?.start && evt.start.trim() !== "" && !evt.start.includes("undefined")
-      );
+    // Deterministic date resolution: re-resolve start/dueDate from the verbatim sourceText with chrono,
+    // overriding the model's calendar arithmetic (its weak spot) but keeping its value when the phrase
+    // carries no date. Time-of-day comes from chrono only when the phrase stated one, else the model's.
+    const refISO = currentLocalTime || new Date().toISOString();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    for (const evt of parsed.calendarEvents || []) {
+      const r = resolveDate(evt.sourceText || "", refISO);
+      if (!r) continue;
+      const timeOfDay = evt.allDay ? "00:00:00"
+        : r.hour != null ? `${pad(r.hour)}:${pad(r.minute ?? 0)}:00`
+        : (String(evt.start || "").match(/T(\d{2}:\d{2}:\d{2})/)?.[1] ?? "09:00:00");
+      evt.start = `${r.date}T${timeOfDay}`;
+      if (evt.allDay) {
+        evt.end = `${r.date}T00:00:00`;
+      } else {
+        const e = new Date(evt.start); e.setMinutes(e.getMinutes() + 30); // ponytail: +30min default; end duration isn't tracked
+        evt.end = `${e.getFullYear()}-${pad(e.getMonth() + 1)}-${pad(e.getDate())}T${pad(e.getHours())}:${pad(e.getMinutes())}:00`;
+      }
     }
+    for (const task of parsed.tasks || []) {
+      if (!task.dueDate) continue; // model saw no deadline -> don't invent one from a stray date token
+      const r = resolveDate(task.sourceText || "", refISO);
+      if (r) task.dueDate = r.date;
+    }
+
+    // Drop calendar events with a missing/placeholder start time (the client only filters on title).
+    if (parsed.calendarEvents) parsed.calendarEvents = filterValidCalendarEvents(parsed.calendarEvents);
 
     res.json(parsed);
   } catch (error: any) {
@@ -408,40 +318,19 @@ Be extremely concise. Skip any introductory remarks, system summaries, or conver
   }
 });
 
-// Transcriber, mode A: augment Web Speech text with LLM confidence + suggestions.
-app.post("/api/transcribe-check", async (req, res) => {
+// Transcriber, mode A: route obvious typos → auto-corrections, ambiguous mishearings → flags.
+app.post("/api/transcribe-correct", async (req, res) => {
   try {
     const { text } = req.body;
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Text is required and must be a string." });
       return;
     }
-    const words = await markStrangeWords(text, (p) => generateWithFallback(getGeminiClient(), p));
-    res.json({ words });
+    const result = await proofreadAndCorrect(text, (p) => generateWithFallback(getGeminiClient(), p));
+    res.json(result);
   } catch (error: any) {
-    console.error("Transcribe-check failed:", error);
-    res.status(500).json({ error: error.message || "Failed to evaluate transcript." });
-  }
-});
-
-// Transcriber, mode B: raw audio → text + real acoustic word confidence (Google Cloud STT).
-// Returns 501 until GOOGLE_STT_API_KEY is set; the client falls back to mode A.
-app.post("/api/transcribe", async (req, res) => {
-  try {
-    const key = process.env.GOOGLE_STT_API_KEY;
-    if (!key) {
-      res.status(501).json({ error: "Cloud STT not configured (set GOOGLE_STT_API_KEY)." });
-      return;
-    }
-    const { audio } = req.body;
-    if (!audio || typeof audio !== "string") {
-      res.status(400).json({ error: "audio (base64) is required." });
-      return;
-    }
-    res.json(await transcribeAudio(audio, key));
-  } catch (error: any) {
-    console.error("Transcribe failed:", error);
-    res.status(500).json({ error: error.message || "Failed to transcribe audio." });
+    console.error("Transcribe-correct failed:", error);
+    res.status(500).json({ error: error.message || "Failed to proofread transcript." });
   }
 });
 
@@ -457,7 +346,10 @@ app.post("/api/search", async (req, res) => {
     const ai = getGeminiClient();
     const response = await generateWithFallback(ai, {
       model: MODEL_FALLBACKS[0],
-      contents: `Search the web and provide a comprehensive, objective answer to this research query: "${query}"`,
+      contents: `Search the web and answer this research query: "${query}".
+Respond in EXACTLY this format, nothing else:
+CONDENSED: <a direct 1-2 sentence answer>
+DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`,
       config: {
         tools: [{ googleSearch: {} }],
       },
@@ -474,9 +366,12 @@ app.post("/api/search", async (req, res) => {
           }))
       : [];
 
+    const { condensed, inDepth } = splitTiers(response.text || "");
     res.json({
       query,
-      answer: response.text || "No summary answer generated.",
+      condensed,
+      inDepth,
+      answer: inDepth || "No summary answer generated.", // back-compat: existing client reads `answer`
       sources,
     });
   } catch (error: any) {
@@ -499,7 +394,7 @@ async function setupVite() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }

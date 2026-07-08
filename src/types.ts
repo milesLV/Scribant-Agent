@@ -33,11 +33,12 @@ export interface TaskItem {
   uncertain?: boolean;
 }
 
-export interface SearchQueryItem {
+interface SearchQueryItem {
   id: string;
   sourceText?: string;
   query: string;
-  answer?: string;
+  condensed?: string; // 1-2 sentence direct answer (shown collapsed)
+  answer?: string;    // fuller in-depth answer (shown expanded)
   sources?: { uri: string; title: string }[];
   status: 'pending' | 'completed' | 'failed' | 'skipped';
   error?: string;
