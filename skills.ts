@@ -2,11 +2,11 @@
 // /api/analyze generates its responseSchema + prompt criteria from this list, so adding a skill is
 // a single array entry instead of edits scattered across a 130-line prompt and a 60-line schema.
 //
-// Scope note: a Skill here is EXTRACTION only (what the model emits). Execution stays per-item in
-// the client (handleScheduleEvent/handleCreateTask/handleRunSearch in App.tsx) — that review-then-act
-// UI is deliberately not a batch loop, so there's no `execute` here. Document-level outputs
-// (ideasSummary, organizedFolderName) are not skills; they live inline in server.ts.
-import { Type } from "@google/genai";
+// Scope note: a Skill here is EXTRACTION only (what the model emits). Execution stays per-item
+// behind the client's review-then-act UI (handleExecute* in App.tsx → /api/execute), deliberately
+// not a batch loop, so there's no `execute` here. Document-level outputs (ideasSummary,
+// organizedFolderName) are not skills; they live inline in server.ts.
+import { z } from "zod";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
 
@@ -14,7 +14,7 @@ interface Skill {
   name: string;              // response key AND the client-side bucket it normalizes into
   arrayDescription: string;  // schema-level description of the array
   description: string;       // criteria block injected into the classifier prompt (starts with the type)
-  itemSchema: any;           // Gemini responseSchema for ONE item
+  itemSchema: z.ZodObject<z.ZodRawShape>; // Zod schema for ONE item (feeds the ADK agent's outputSchema)
 }
 
 const calendarSkill: Skill = {
@@ -28,19 +28,15 @@ const calendarSkill: Skill = {
    - "end": (string) End as ISO-8601. Default to 30 minutes after start when no duration is implied (for all-day, the same day or the stated span).
    - "uncertain": (boolean)
    - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).`,
-  itemSchema: {
-    type: Type.OBJECT,
-    properties: {
-      title: { type: Type.STRING, description: "Event summary/title" },
-      description: { type: Type.STRING, description: "Event description/context" },
-      start: { type: Type.STRING, description: "Start time as ISO-8601 string" },
-      end: { type: Type.STRING, description: "End time as ISO-8601 string" },
-      uncertain: { type: Type.BOOLEAN, description: "Whether there is uncertainty about the event commitment or details" },
-      allDay: { type: Type.BOOLEAN, description: "True if it spans whole day(s) with no specific clock time" },
-      sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this event" },
-    },
-    required: ["title", "description", "start", "end", "uncertain", "allDay", "sourceText"],
-  },
+  itemSchema: z.object({
+    title: z.string().describe("Event summary/title"),
+    description: z.string().describe("Event description/context"),
+    start: z.string().describe("Start time as ISO-8601 string"),
+    end: z.string().describe("End time as ISO-8601 string"),
+    uncertain: z.boolean().describe("Whether there is uncertainty about the event commitment or details"),
+    allDay: z.boolean().describe("True if it spans whole day(s) with no specific clock time"),
+    sourceText: z.string().describe("Verbatim transcript phrase that triggered this event"),
+  }),
 };
 
 const tasksSkill: Skill = {
@@ -53,17 +49,13 @@ const tasksSkill: Skill = {
    - "uncertain": (boolean) Set to true if the task itself or its details are vague or uncertain, else false.
    - "sourceText": (string) The exact words from the transcript that triggered this task, copied verbatim (not paraphrased).
 GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake event time. Only make a calendar event when being there at that specific time matters, or when it occupies whole days. A flexible action with just a deadline (e.g. "hit the gym sometime next week") is a task (uncertain) with a dueDate, NOT an event.`,
-  itemSchema: {
-    type: Type.OBJECT,
-    properties: {
-      title: { type: Type.STRING, description: "Compact title of the task" },
-      notes: { type: Type.STRING, description: "Any descriptions, sub-items, or context" },
-      uncertain: { type: Type.BOOLEAN, description: "Whether the task itself or its details are vague or uncertain" },
-      dueDate: { type: Type.STRING, description: "Deadline as ISO date YYYY-MM-DD if bounded, else empty string" },
-      sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this task" },
-    },
-    required: ["title", "notes", "uncertain", "dueDate", "sourceText"],
-  },
+  itemSchema: z.object({
+    title: z.string().describe("Compact title of the task"),
+    notes: z.string().describe("Any descriptions, sub-items, or context"),
+    uncertain: z.boolean().describe("Whether the task itself or its details are vague or uncertain"),
+    dueDate: z.string().describe("Deadline as ISO date YYYY-MM-DD if bounded, else empty string"),
+    sourceText: z.string().describe("Verbatim transcript phrase that triggered this task"),
+  }),
 };
 
 const searchSkill: Skill = {
@@ -72,23 +64,19 @@ const searchSkill: Skill = {
   description: `(array of objects) ONLY include searchable, well-defined questions or queries (e.g. YES to "I wonder what the most efficient gas mileage for my Toyota Sienna is" or "Where is the best place to eat?"). DO NOT include personal, unsearchable thoughts (e.g. NO to "I wonder what I will eat when I get home" or "What do I have in my fridge?"). Each object must have:
    - "query": (string) The search query text
    - "sourceText": (string) The exact words from the transcript that triggered this query, copied verbatim (not paraphrased).`,
-  itemSchema: {
-    type: Type.OBJECT,
-    properties: {
-      query: { type: Type.STRING },
-      sourceText: { type: Type.STRING, description: "Verbatim transcript phrase that triggered this query" },
-    },
-    required: ["query", "sourceText"],
-  },
+  itemSchema: z.object({
+    query: z.string(),
+    sourceText: z.string().describe("Verbatim transcript phrase that triggered this query"),
+  }),
 };
 
 // Order matters: the calendar criteria references tasks as "#3", so keep calendar→tasks→search.
 export const SKILLS: Skill[] = [calendarSkill, tasksSkill, searchSkill];
 
-// {"calendarEvents": {type: ARRAY, items: ...}, ...} — spread into the analyze responseSchema.
-export function skillSchemaProperties(): Record<string, any> {
+// {"calendarEvents": z.array(...), ...} — spread into the analyze agent's Zod outputSchema.
+export function skillSchemaProperties(): Record<string, z.ZodTypeAny> {
   return Object.fromEntries(
-    SKILLS.map(s => [s.name, { type: Type.ARRAY, description: s.arrayDescription, items: s.itemSchema }])
+    SKILLS.map(s => [s.name, z.array(s.itemSchema).describe(s.arrayDescription)])
   );
 }
 
@@ -96,9 +84,10 @@ export function skillSchemaProperties(): Record<string, any> {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const props = skillSchemaProperties();
   assert.deepEqual(Object.keys(props), ["calendarEvents", "tasks", "searchQueries"]);
-  assert.equal(props.calendarEvents.type, Type.ARRAY);
+  assert.ok(props.calendarEvents instanceof z.ZodArray);
+  // Zod object fields are required by default — the shape keys ARE the required list.
   assert.deepEqual(
-    props.tasks.items.required,
+    Object.keys((props.tasks as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element.shape),
     ["title", "notes", "uncertain", "dueDate", "sourceText"]
   );
   // tasks must stay index 3 (calendar=2) so the calendar criteria's "(see #3)" reference holds.

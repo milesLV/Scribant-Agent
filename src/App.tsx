@@ -185,7 +185,6 @@ export default function App() {
       return;
     }
 
-    // Clear any pending timer
     if (liveAnalysisTimerRef.current) {
       clearTimeout(liveAnalysisTimerRef.current);
       liveAnalysisTimerRef.current = null;
@@ -196,7 +195,6 @@ export default function App() {
       isLiveAnalyzingRef.current = true;
       setIsLiveAnalyzing(true);
 
-      // Cancel previous in-flight request
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -270,11 +268,9 @@ export default function App() {
     window.location.href = googleAuthUrl;
   };
 
-  // Perform Gemini analysis on text input
   const handleAnalyzeStream = async (text: string) => {
     setIsProcessing(true);
-    
-    // Stop any active live fetches
+
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -319,7 +315,7 @@ export default function App() {
       setRuns(prev => [newRun, ...prev]);
       setSelectedRunId(newRun.id);
       
-      // Clear live draft and transcript so no more tokens are consumed after finalization!
+      // Clear live draft and transcript so no more tokens are consumed after finalization
       setLiveTranscript("");
       setLiveDraft(null);
       setLiveSummary("");
@@ -338,7 +334,6 @@ export default function App() {
     ? liveDraft
     : runs.find(r => r.id === selectedRunId)?.analysis ?? null;
 
-  // 1. Google Calendar Integration dispatcher
   const handleExecuteCalendar = async (index: number) => {
     const event = activeAnalysis?.calendarEvents[index];
     if (!event) return;
@@ -377,7 +372,6 @@ export default function App() {
     });
   };
 
-  // 2. Google Tasks Integration dispatcher
   const handleExecuteTask = async (index: number) => {
     const task = activeAnalysis?.tasks[index];
     if (!task) return;
@@ -400,7 +394,6 @@ export default function App() {
     }
   };
 
-  // 3. Grounded Gemini Search query dispatcher
   const handleExecuteSearch = async (index: number) => {
     const queryItem = activeAnalysis?.searchQueries[index];
     if (!queryItem) return;
@@ -419,7 +412,7 @@ export default function App() {
       const data = await res.json();
       updateActiveAnalysis(a => {
         const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { ...queryItem, status: "completed", condensed: data.condensed, answer: data.answer, sources: data.sources };
+        searchQueries[index] = { ...queryItem, status: "completed", condensed: data.condensed, answer: data.inDepth, sources: data.sources };
         return { ...a, searchQueries };
       });
       showToast(`Researced facts retrieved for query: "${queryItem.query}"`);
@@ -434,17 +427,14 @@ export default function App() {
     }
   };
 
-  // 4. Google Drive folder & files organization dispatcher
   const handleExecuteDrive = async () => {
     if (!activeAnalysis) return;
 
     const folderName = activeAnalysis.organizedFolder || "Session Notes";
 
     try {
-      // Step 1: Create the parent category folder
       const folderId = await createDriveFolder(token, folderName);
 
-      // Step 2: Formulate dynamic Action report log document
       const actLogsContent = `# Actions & Tasks Log Report\n\nGenerated on: ${new Date().toLocaleString()}\n\n## Actionable checklist saved:\n${
         activeAnalysis.tasks.map(t => `- [x] ${t.title}: ${t.notes || 'No description'}`).join('\n') || "No tasks recorded."
       }\n\n## Scheduled Appointments:\n${
@@ -458,7 +448,6 @@ export default function App() {
 
       const uploadedDocs: DriveDocItem[] = [];
 
-      // Step 3: Sequentially upload files into folder
       for (const doc of documentsToUpload) {
         const fileId = await uploadDriveFile(token, doc.name, doc.content, folderId);
         uploadedDocs.push({
@@ -480,12 +469,10 @@ export default function App() {
 
   const handleClearAll = () => {
     if (window.confirm("Are you sure you want to clear everything? This will reset the transcript, AI notes, bulletins, calendar events, search queries, and to-dos.")) {
-      // Abort any ongoing fetches or analysis requests
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
-      // Reset state
       setRuns([]);
       setSelectedRunId(null);
       setClearSignal(prev => prev + 1);
