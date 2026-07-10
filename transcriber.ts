@@ -14,8 +14,8 @@ function tokenize(text: string): { text: string; start: number; end: number }[] 
   return out;
 }
 
-// `generate` is the server's generateWithFallback gateway, injected to dodge a circular import
-// (and so the Transcriber inherits the same key-rotation + local-LLM fallback as the other agents).
+// `generate` is the server's LLM gateway (an ADK agent call in production), injected so this
+// module stays model-agnostic and its self-check can run with a stub.
 type Generate = (params: { model: string; contents: string; config?: any }) => Promise<{ text?: string }>;
 
 // ---- Provider A: obvious correction vs ambiguous flag (the proofread router) ------

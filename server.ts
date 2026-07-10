@@ -1,11 +1,13 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { LlmAgent, Runner, InMemorySessionService, GOOGLE_SEARCH, setLogLevel, LogLevel } from "@google/adk";
+import { z } from "zod";
 import dotenv from "dotenv";
 import { proofreadAndCorrect } from "./transcriber";
 import { SKILLS, skillSchemaProperties } from "./skills";
-import { cleanJsonString, splitTiers, filterValidCalendarEvents, nextIndex, runWithFallback, resolveDate } from "./server-utils";
+import { cleanJsonString, splitTiers, filterValidCalendarEvents, resolveDate } from "./server-utils";
+import { buildWorkspaceTools, gcalCreateEvent, gtasksCreateTask } from "./workspace-tools";
 
 dotenv.config();
 
@@ -14,181 +16,62 @@ app.use(express.json());
 
 const PORT = 3000;
 
-// ---------------------------------------------------------------------------
-// Multi-API-key pool: validate all GEMINI_API_KEY* keys on startup, then
-// rotate through working ones on 429 errors.
-// ---------------------------------------------------------------------------
-const GEMINI_KEY_ENV_NAMES = [
-  "GEMINI_API_KEY",
-  "GEMINI_API_KEY1",
-  "GEMINI_API_KEY2",
-  "GEMINI_API_KEY3",
-];
+// One model, one key (GEMINI_API_KEY, read by ADK from env). ponytail: single-key by design;
+// re-add rotation as a custom BaseLlm if quota hurts.
+const MODEL = "gemini-2.5-flash";
+setLogLevel(LogLevel.WARN); // silence ADK's per-event INFO logging
 
-const geminiClients: GoogleGenAI[] = [];
-let geminiClientIndex = 0;
-let keysValidated = false;
-
-/** Probe a single key with a tiny generateContent call. Returns true if live. */
-async function probeGeminiKey(client: GoogleGenAI, envName: string): Promise<boolean> {
-  try {
-    // Probe the model we actually serve from (MODEL_FALLBACKS[0]), not a retired/limit:0 one — probing
-    // a free-tier limit:0 model (e.g. gemini-2.0-flash) makes every key look "quota exhausted".
-    await client.models.generateContent({
-      model: MODEL_FALLBACKS[0],
-      contents: "ping",
-      config: { maxOutputTokens: 1 },
-    });
-    console.log(`✅  ${envName} — key is live`);
-    return true;
-  } catch (err: any) {
-    const status = err?.status ?? err?.httpStatusCode ?? err?.code;
-    const msg = err?.message ?? "";
-    // 429 means the key is real but quota is exhausted — still keep it in pool
-    // so it can be retried after rotation. Other errors (401, 403) = bad key.
-    if (status === 429 || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429")) {
-      console.warn(`⚠️  ${envName} — key valid but quota exhausted (will still use in rotation)`);
-      return true;
+// Stateless agent call: ephemeral session per request, drain events, keep the last text and any
+// grounding metadata. ADK reports model failures as error EVENTS (errorCode/errorMessage), not
+// throws — they must be surfaced here or a 429 looks like an empty answer. Transient errors
+// retry up to 3× with backoff.
+const sessionService = new InMemorySessionService();
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+async function askAgent(agent: LlmAgent, text: string): Promise<{ text: string; grounding?: any }> {
+  const runner = new Runner({ appName: "scribant", agent, sessionService });
+  for (let attempt = 1; ; attempt++) {
+    let out = "";
+    let grounding: any;
+    let errEvent: any = null;
+    for await (const ev of runner.runEphemeral({
+      userId: "local",
+      newMessage: { role: "user", parts: [{ text }] },
+    })) {
+      if (ev.errorCode) errEvent = ev;
+      const t = ev.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") ?? "";
+      if (t) out = t;
+      if (ev.groundingMetadata) grounding = ev.groundingMetadata;
     }
-    console.error(`❌  ${envName} — key rejected (status ${status}): ${msg.slice(0, 80)}`);
-    return false;
-  }
-}
-
-/** Run at server startup: build the validated client pool in parallel. */
-async function validateAndInitGeminiClients() {
-  if (keysValidated) return;
-  keysValidated = true;
-
-  const candidates: { envName: string; client: GoogleGenAI }[] = [];
-  for (const envName of GEMINI_KEY_ENV_NAMES) {
-    const key = process.env[envName];
-    if (key && key.trim()) {
-      candidates.push({
-        envName,
-        client: new GoogleGenAI({
-          apiKey: key.trim(),
-          httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-        }),
-      });
+    if (!errEvent) return { text: out, grounding };
+    const msg = String(errEvent.errorMessage || "");
+    const isTransient = ["429", "503"].includes(String(errEvent.errorCode))
+      || ["RESOURCE_EXHAUSTED", "overloaded", "high demand"].some(s => msg.includes(s));
+    if (!isTransient || attempt >= 3) {
+      throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
     }
-  }
-
-  if (candidates.length === 0) {
-    throw new Error("No GEMINI_API_KEY* values found in .env. Please add at least one.");
-  }
-
-  console.log(`\n🔑  Validating ${candidates.length} Gemini API key(s)...`);
-  const results = await Promise.all(
-    candidates.map(({ envName, client }) => probeGeminiKey(client, envName))
-  );
-
-  for (let i = 0; i < candidates.length; i++) {
-    if (results[i]) geminiClients.push(candidates[i].client);
-  }
-
-  if (geminiClients.length === 0) {
-    throw new Error("All Gemini API keys failed validation. Check your .env keys.");
-  }
-
-  console.log(`Key pool ready: ${geminiClients.length}/${candidates.length} key(s) available. Starting with key index 0.\n`);
-}
-
-function getGeminiClient(): GoogleGenAI {
-  if (geminiClients.length === 0) {
-    throw new Error("Gemini clients not yet initialized. Server startup may still be in progress.");
-  }
-  return geminiClients[geminiClientIndex % geminiClients.length];
-}
-
-/** Rotate to the next API key (called on 429). */
-function rotateGeminiKey() {
-  if (geminiClients.length > 1) {
-    geminiClientIndex = nextIndex(geminiClientIndex, geminiClients.length);
-    console.log(`🔄  Rotated to Gemini key index ${geminiClientIndex}`);
+    // Gemini 429s carry a retryDelay ("retryDelay":"22s"); honor it, else back off 15s/attempt.
+    const delayS = Number(msg.match(/retryDelay[^0-9]*(\d+)/)?.[1]) || 15 * attempt;
+    console.warn(`[askAgent] 429 on ${agent.name}, retrying in ${delayS}s (attempt ${attempt}/3)`);
+    await sleep(delayS * 1000);
   }
 }
 
-// Gemini models tried in order, then a LOCAL Ollama model as the last-resort fallback — the safety
-// net when every Gemini key is quota-exhausted. It's last, so if Ollama isn't running the ECONNREFUSED
-// just ends the chain (throwing the prior Gemini error). Defaults to gemma4; override with OLLAMA_MODEL.
-const MODEL_FALLBACKS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
-  `ollama:${process.env.OLLAMA_MODEL || "gemma4"}`,
-];
+// Prompt criteria + schema are generated once from the skill registry (skills.ts). Order is fixed:
+// ideasSummary (1), each skill (2..), organizedFolderName (last) — the calendar criteria's
+// "(see #3)" reference relies on tasks landing at index 3.
+const analyzeCriteriaText = [
+  { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
+  ...SKILLS.map(s => ({ key: s.name, body: s.description })),
+  { key: "organizedFolderName", body: `(string) A clean, professional, descriptive 2-4 word folder name to organize these files under in Google Drive (e.g. "Project Beta Alignment", "Home Gardening Brainstorm").` },
+].map((e, i) => `${i + 1}. "${e.key}": ${e.body}`).join("\n");
 
-/**
- * Calls local Ollama API
- */
-async function callOllama(
-  model: string,
-  params: { contents: string; config?: any }
-): Promise<any> {
-  const isJson = params.config?.responseMimeType === "application/json";
-  let prompt = params.contents;
-  if (params.config?.systemInstruction) {
-    prompt = params.config.systemInstruction + "\n\n" + prompt;
-  }
-  
-  const body: any = {
-    model: model,
-    prompt: prompt,
-    stream: false,
-  };
-  
-  if (isJson) {
-    body.format = "json";
-  }
+const analyzeOutputSchema = z.object({
+  ideasSummary: z.string().describe("A beautifully organized list of summarized ideas and insights, in markdown bullet points."),
+  ...skillSchemaProperties(),
+  organizedFolderName: z.string().describe("Descriptive name for a drive folder."),
+});
 
-  const res = await fetch("http://localhost:11434/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  
-  if (!res.ok) {
-    const errorText = await res.text();
-    const err: any = new Error(`Ollama error ${res.status}: ${errorText}`);
-    err.status = res.status;
-    throw err;
-  }
-  
-  const data = await res.json();
-  return {
-    text: data.response
-  };
-}
-
-/**
- * Wraps ai.models.generateContent with automatic model fallback.
- * On a 203 (or any HTTP error status ≥ 200 that isn't 200), it retries
- * with the next model in MODEL_FALLBACKS.
- */
-async function generateWithFallback(
-  _ai: GoogleGenAI,
-  params: { model: string; contents: string; config?: any }
-): Promise<any> {
-  const models = [params.model, ...MODEL_FALLBACKS.filter(m => m !== params.model)];
-  const isOllama = (m: string) => m.startsWith("ollama:");
-  // Orchestration (retry/rotate/fallback classification) lives in server-utils.runWithFallback,
-  // unit-tested there; this closure just supplies the real Gemini/Ollama callers + key rotation.
-  return runWithFallback(models, params, {
-    callModel: (model, p) =>
-      isOllama(model)
-        ? callOllama(model.replace("ollama:", ""), p)
-        : getGeminiClient().models.generateContent({ ...p, model }),
-    rotate: rotateGeminiKey,
-    isOllama,
-    onRetry: (model, err) =>
-      console.warn(`Model "${model}" returned error ${err?.status ?? err?.message}. Rotating API key and falling back to next model...`),
-  });
-}
-
-// cleanJsonString / splitTiers / filterValidCalendarEvents / nextIndex now live in ./server-utils
-// (pure + unit-tested there). Everything below is the HTTP + LLM-gateway layer.
-
-// 1. Intent Classifier endpoint — turn the transcript into calendar/task/search items
+// Intent classifier — turn the transcript into calendar/task/search items
 app.post("/api/analyze", async (req, res) => {
   try {
     const { text, currentLocalTime, liveSummary } = req.body;
@@ -197,57 +80,34 @@ app.post("/api/analyze", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-    // Prompt criteria + schema are generated from the skill registry (skills.ts). Order is fixed:
-    // ideasSummary (1), each skill (2..), organizedFolderName (last) — the calendar criteria's
-    // "(see #3)" reference relies on tasks landing at index 3.
-    const criteriaEntries = [
-      { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
-      ...SKILLS.map(s => ({ key: s.name, body: s.description })),
-      { key: "organizedFolderName", body: `(string) A clean, professional, descriptive 2-4 word folder name to organize these files under in Google Drive (e.g. "Project Beta Alignment", "Home Gardening Brainstorm").` },
-    ];
-    const criteriaText = criteriaEntries.map((e, i) => `${i + 1}. "${e.key}": ${e.body}`).join("\n");
-
-    const systemInstruction = `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
+    // Transcript + time arrive in the user message; the instruction carries only the criteria
+    // and the live-summary context (referenced by the ideasSummary criteria).
+    const instruction = `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
 The user is speaking or writing their thoughts in an unfiltered "brain dump" format.
 Analyze the provided stream of thoughts and categorize segments into different structured action buckets.
 
-Here is the context of what has been spoken/transcribed:
-- Full raw transcript: "${text}"
-- Current Local Time: ${currentLocalTime || new Date().toISOString()}
-- AI Live Notes Summary: "${liveSummary || ""}"
+AI Live Notes Summary: "${liveSummary || ""}"
 
 You MUST output strictly a JSON object with the following keys and criteria:
 
-${criteriaText}
+${analyzeCriteriaText}
 
 CRITICAL: If there are no items matching a category's strict criteria, you MUST return an empty array [] for that field. Do not generate empty or placeholder objects. Return ONLY the valid JSON object.`;
 
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        ideasSummary: {
-          type: Type.STRING,
-          description: "A beautifully organized list of summarized ideas and insights, in markdown bullet points."
-        },
-        ...skillSchemaProperties(),
-        organizedFolderName: {
-          type: Type.STRING,
-          description: "Descriptive name for a drive folder."
-        }
-      },
-      required: ["ideasSummary", ...SKILLS.map(s => s.name), "organizedFolderName"]
-    };
-
-    const response = await generateWithFallback(ai, {
-      model: MODEL_FALLBACKS[0],
-      contents: `Current Time context: ${currentLocalTime || new Date().toISOString()}\n\nStream of thoughts:\n"${text}"`,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema,
-      }
+    // Per-request agent: the instruction embeds the request's live summary.
+    const agent = new LlmAgent({
+      name: "intent_classifier",
+      model: MODEL,
+      instruction,
+      outputSchema: analyzeOutputSchema,
+      disallowTransferToParent: true,
+      disallowTransferToPeers: true,
     });
+
+    const response = await askAgent(
+      agent,
+      `Current Time context: ${currentLocalTime || new Date().toISOString()}\n\nStream of thoughts:\n"${text}"`
+    );
 
     const cleanedText = cleanJsonString(response.text || "{}");
     const parsed = JSON.parse(cleanedText);
@@ -288,7 +148,16 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
   }
 });
 
-// 1.5. Live Summarize Stream endpoint
+// Live summarizer — rolling bullet summary while the user is still speaking
+const liveSummarizer = new LlmAgent({
+  name: "live_summarizer",
+  model: MODEL,
+  instruction: `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
+The user is speaking or typing their thoughts live.
+Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
+Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points. Highlight key terms or entities in bold format (e.g., **Key Term**).`,
+});
+
 app.post("/api/summarize-live", async (req, res) => {
   try {
     const { text } = req.body;
@@ -297,28 +166,16 @@ app.post("/api/summarize-live", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-    const systemInstruction = `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
-The user is speaking or typing their thoughts live.
-Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
-Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points. Highlight key terms or entities in bold format (e.g., **Key Term**).`;
-
-    const response = await generateWithFallback(ai, {
-      model: MODEL_FALLBACKS[0],
-      contents: `Raw draft thoughts:\n"${text}"`,
-      config: {
-        systemInstruction,
-      }
-    });
-
-    res.json({ summary: response.text?.trim() || "" });
+    const response = await askAgent(liveSummarizer, `Raw draft thoughts:\n"${text}"`);
+    res.json({ summary: response.text.trim() });
   } catch (error: any) {
     console.error("Live summarize API failed:", error);
     res.status(500).json({ error: error.message || "Failed to generate quick summary." });
   }
 });
 
-// Transcriber, mode A: route obvious typos → auto-corrections, ambiguous mishearings → flags.
+// Proofreader — obvious typos → auto-corrections, ambiguous mishearings → low-confidence flags.
+// transcriber.ts owns the prompt and parsing; it gets the model via an injected per-call agent.
 app.post("/api/transcribe-correct", async (req, res) => {
   try {
     const { text } = req.body;
@@ -326,7 +183,17 @@ app.post("/api/transcribe-correct", async (req, res) => {
       res.status(400).json({ error: "Text is required and must be a string." });
       return;
     }
-    const result = await proofreadAndCorrect(text, (p) => generateWithFallback(getGeminiClient(), p));
+    const result = await proofreadAndCorrect(text, async (p) => {
+      const agent = new LlmAgent({
+        name: "proofreader",
+        model: p.model || MODEL,
+        instruction: p.config?.systemInstruction ?? "",
+        generateContentConfig: p.config?.responseMimeType
+          ? { responseMimeType: p.config.responseMimeType }
+          : undefined,
+      });
+      return { text: (await askAgent(agent, p.contents)).text };
+    });
     res.json(result);
   } catch (error: any) {
     console.error("Transcribe-correct failed:", error);
@@ -334,7 +201,33 @@ app.post("/api/transcribe-correct", async (req, res) => {
   }
 });
 
-// 2. Google Search Grounding API
+// Grounded search. Grounding can't be combined with a JSON outputSchema, so the answer stays
+// marker-formatted text (CONDENSED:/DETAILED:) parsed by splitTiers.
+const groundedSearcher = new LlmAgent({
+  name: "grounded_searcher",
+  model: MODEL,
+  instruction: "You are a research assistant. Use Google Search to ground your answer, then respond in exactly the format the user requests.",
+  tools: [GOOGLE_SEARCH],
+});
+
+// Shared by the /api/search route and the orchestrator's web_search tool.
+async function groundedSearch(query: string) {
+  const response = await askAgent(groundedSearcher, `Search the web and answer this research query: "${query}".
+Respond in EXACTLY this format, nothing else:
+CONDENSED: <a direct 1-2 sentence answer>
+DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`);
+
+  const chunks = response.grounding?.groundingChunks;
+  const sources = chunks
+    ? chunks
+        .filter((c: any) => c.web?.uri)
+        .map((c: any) => ({ uri: c.web.uri, title: c.web.title || c.web.uri }))
+    : [];
+
+  const { condensed, inDepth } = splitTiers(response.text || "");
+  return { query, condensed, inDepth, sources };
+}
+
 app.post("/api/search", async (req, res) => {
   try {
     const { query } = req.body;
@@ -343,47 +236,106 @@ app.post("/api/search", async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-    const response = await generateWithFallback(ai, {
-      model: MODEL_FALLBACKS[0],
-      contents: `Search the web and answer this research query: "${query}".
-Respond in EXACTLY this format, nothing else:
-CONDENSED: <a direct 1-2 sentence answer>
-DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-    });
-
-    // Extract grounding URLs and sources
-    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    const sources = chunks
-      ? chunks
-          .filter((c: any) => c.web?.uri)
-          .map((c: any) => ({
-            uri: c.web.uri,
-            title: c.web.title || c.web.uri,
-          }))
-      : [];
-
-    const { condensed, inDepth } = splitTiers(response.text || "");
-    res.json({
-      query,
-      condensed,
-      inDepth,
-      answer: inDepth || "No summary answer generated.", // back-compat: existing client reads `answer`
-      sources,
-    });
+    res.json(await groundedSearch(query));
   } catch (error: any) {
     console.error("Search API failed:", error);
     res.status(500).json({ error: error.message || "Failed to execute grounded search." });
   }
 });
 
-// Configure Vite or Serve static bundle
-async function setupVite() {
-  // Validate all API keys first — pool must be ready before serving requests
-  await validateAndInitGeminiClients();
+// Execute ONE reviewed item. The review-then-act gate is the client UI: this is only called after
+// a human approves an item, with their OAuth token forwarded per request. Sandbox mode never
+// reaches here (the client simulates locally when signed out).
+app.post("/api/execute", async (req, res) => {
+  try {
+    const { kind, item, accessToken } = req.body;
+    if (!accessToken || typeof accessToken !== "string") {
+      res.status(400).json({ error: "accessToken is required (sandbox mode executes client-side)." });
+      return;
+    }
+    if (!item || typeof item !== "object" || typeof item.title !== "string" || !item.title) {
+      res.status(400).json({ error: "item with a string title is required." });
+      return;
+    }
+    if (kind === "calendar") {
+      if (typeof item.start !== "string" || !item.start) {
+        res.status(400).json({ error: "calendar item requires a start time." });
+        return;
+      }
+      res.json({ id: await gcalCreateEvent(accessToken, item) });
+    } else if (kind === "task") {
+      res.json({ id: await gtasksCreateTask(accessToken, item) });
+    } else {
+      res.status(400).json({ error: `Unknown kind "${kind}" (expected "calendar" or "task").` });
+    }
+  } catch (error: any) {
+    console.error("Execute API failed:", error);
+    res.status(500).json({ error: error.message || "Failed to execute action." });
+  }
+});
+
+// Orchestrator: brain-dump in → tool calls out. Without an accessToken the write tools DRY-RUN
+// (mock ids) — passing a real token is the caller's explicit consent to execute, so the browser's
+// review-then-act UI never routes through here.
+app.post("/api/agent", async (req, res) => {
+  try {
+    const { text, currentLocalTime, accessToken } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "Text is required and must be a string." });
+      return;
+    }
+
+    const criteria = SKILLS.map(s => `- ${s.name}: ${s.description}`).join("\n");
+    const agent = new LlmAgent({
+      name: "orchestrator",
+      model: MODEL,
+      instruction: `You are an action-taking assistant for an app that captures a person's unfiltered spoken thoughts.
+Read the brain-dump transcript and act on it with your tools:
+- create_calendar_event for things that happen at a time / occupy days
+- create_task for actions to complete (use dueDate for deadlines)
+- web_search for well-defined searchable questions the user raised
+Use the same judgement criteria as the app's intent classifier:
+${criteria}
+Current Local Time for resolving relative dates: ${currentLocalTime || new Date().toISOString()}.
+IMPORTANT: only call a write tool for CLEAR, non-uncertain items. If a thought is vague ("we should grab lunch sometime"), do NOT act on it — mention it under "Skipped (too vague)" instead.
+After acting, reply with a short markdown summary of what you did and what you skipped.`,
+      tools: buildWorkspaceTools({ token: accessToken || null, search: groundedSearch }),
+    });
+
+    // Drains events directly (not askAgent): the caller needs the tool-call log, and there must be
+    // NO retry here — re-running the agent re-executes write tools (duplicate events/tasks).
+    const runner = new Runner({ appName: "scribant", agent, sessionService });
+    const actions: { tool: string; args: any; result?: any }[] = [];
+    let summary = "";
+    for await (const ev of runner.runEphemeral({
+      userId: "local",
+      newMessage: { role: "user", parts: [{ text: `Brain-dump transcript:\n"${text}"` }] },
+    })) {
+      if (ev.errorCode) throw new Error(`Model error ${ev.errorCode}: ${String(ev.errorMessage || "").slice(0, 200)}`);
+      for (const p of ev.content?.parts ?? []) {
+        if (p.functionCall) actions.push({ tool: p.functionCall.name || "?", args: p.functionCall.args });
+        if (p.functionResponse) {
+          const open = actions.find(a => a.tool === p.functionResponse!.name && a.result === undefined);
+          if (open) open.result = p.functionResponse.response;
+        }
+        if (p.text) summary = p.text;
+      }
+    }
+
+    console.log(`[agent] text=${text.length}ch → ${actions.length} action(s)${accessToken ? "" : " (dry-run)"}`);
+    res.json({ summary, actions, simulated: !accessToken });
+  } catch (error: any) {
+    console.error("Agent API failed:", error);
+    res.status(500).json({ error: error.message || "Agent run failed." });
+  }
+});
+
+// Startup: key check, then Vite middleware (dev) or static bundle (prod), then listen.
+async function main() {
+  // ADK reads the key from env at call time — fail fast at startup if none is set.
+  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
+    throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) found in .env. Please add one.");
+  }
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -405,4 +357,4 @@ async function setupVite() {
   });
 }
 
-setupVite();
+main();

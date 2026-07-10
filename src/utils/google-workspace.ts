@@ -178,53 +178,24 @@ export async function uploadDriveFile(
 // GOOGLE CALENDAR SERVICE
 // ==========================================
 
+// Real mode executes server-side: the item + OAuth token go to /api/execute. Sandbox stays local.
+async function executeOnServer(kind: "calendar" | "task", item: object, token: string): Promise<string> {
+  const res = await fetch("/api/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, item, accessToken: token })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Execution failed (HTTP ${res.status}).`);
+  return data.id;
+}
+
 export async function createCalendarEvent(token: string | null, event: Omit<CalendarEvent, "status">): Promise<string> {
   if (!token) {
     return sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, status: "scheduled", eventId: id }));
   }
-
-  // Real Integration Mode
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  const dateOnly = (iso: string) => new Date(iso).toISOString().slice(0, 10);
-
-  let start: any, end: any;
-  if (event.allDay) {
-    // All-day events use date (not dateTime); Google treats end.date as exclusive.
-    const sd = dateOnly(event.start);
-    let ed = event.end ? dateOnly(event.end) : sd;
-    if (ed <= sd) {
-      const next = new Date(sd);
-      next.setUTCDate(next.getUTCDate() + 1);
-      ed = next.toISOString().slice(0, 10);
-    }
-    start = { date: sd };
-    end = { date: ed };
-  } else {
-    start = { dateTime: event.start, timeZone };
-    end = { dateTime: event.end, timeZone };
-  }
-
-  const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      summary: event.title,
-      description: event.description,
-      start,
-      end
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error?.message || "Failed to schedule event on calendar");
-  }
-
-  const result = await res.json();
-  return result.id;
+  const { title, description, start, end, allDay } = event;
+  return executeOnServer("calendar", { title, description, start, end, allDay }, token);
 }
 
 // ==========================================
@@ -235,29 +206,8 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
   if (!token) {
     return sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id }));
   }
-
-  // Real Integration Mode: Fetch tasklists to find @default primary or list.
-  // Google Tasks stores the date portion of `due` only (time of day is discarded).
-  const res = await fetch("https://www.googleapis.com/tasks/v1/lists/@default/tasks", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      title: task.title,
-      notes: task.notes,
-      ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {})
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error?.message || "Failed to create task in Google Tasks List");
-  }
-
-  const result = await res.json();
-  return result.id;
+  const { title, notes, dueDate } = task;
+  return executeOnServer("task", { title, notes, dueDate }, token);
 }
 
 export function resetSandboxState() {

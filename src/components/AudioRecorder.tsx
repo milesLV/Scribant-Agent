@@ -16,7 +16,6 @@ interface AudioRecorderProps {
   onChangeSummary?: (summary: string) => void;
 }
 
-// Global declaration for SpeechRecognition
 declare global {
   interface Window {
     webkitSpeechRecognition: any;
@@ -38,7 +37,7 @@ export default function AudioRecorder({
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [useKeyboard, setUseKeyboard] = useState(false);
   
-  // Custom Live Summarized states
+  // live summary state
   const [liveSummary, setLiveSummary] = useState<string>("");
   const [isSummarizing, setIsSummarizing] = useState(false);
   const isSummarizingRef = useRef(false);
@@ -56,7 +55,6 @@ export default function AudioRecorder({
   // Web Speech stops itself on silence; we auto-restart unless the user (or a fatal error) stopped it.
   const manualStopRef = useRef(false);
 
-  // Correction Dropdown state
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
 
   // Strange-word proofread state. `words` are scored against the exact text in proofedTextRef

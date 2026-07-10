@@ -42,11 +42,6 @@ export function filterValidCalendarEvents(events: any): any[] {
   );
 }
 
-// One step of round-robin key rotation. Guards len===0 so an empty pool can't produce NaN.
-export function nextIndex(current: number, len: number): number {
-  return len > 0 ? (current + 1) % len : 0;
-}
-
 // Deterministically resolve the date/time in a natural-language phrase against a reference time.
 // The model reliably understands WHICH day a phrase means but is unreliable at the calendar
 // arithmetic (named weekdays especially: "by Friday" -> today, "this coming Friday" -> a Saturday).
@@ -63,44 +58,6 @@ export function resolveDate(phrase: string, referenceISO: string): ResolvedDate 
   const pad = (n: number) => String(n).padStart(2, "0");
   const timed = c.isCertain("hour");
   return { date: `${y}-${pad(mo)}-${pad(d)}`, hour: timed ? c.get("hour") : null, minute: timed ? (c.get("minute") ?? 0) : null };
-}
-
-// Is this error worth falling back to the next model / rotating the key? Transient/quota/network
-// errors are retryable; auth/not-found (401/403/404) are not — retrying those just wastes calls.
-function isRetryableError(err: any): boolean {
-  const status = err?.status ?? err?.httpStatusCode ?? err?.code;
-  const message = String(err?.message ?? "");
-  if (status === 203 || status === 429 || status === 503) return true;
-  return ["203", "429", "RESOURCE_EXHAUSTED", "Quota exceeded", "overloaded",
-    "unavailable", "rate limit", "fetch failed", "ECONNREFUSED"].some(s => message.includes(s));
-}
-
-interface FallbackDeps {
-  callModel: (model: string, params: { contents: string; config?: any }) => Promise<any>;
-  rotate?: () => void;                    // called before the next model on a retryable Gemini error
-  isOllama?: (model: string) => boolean;  // ollama models use the local daemon, not the key pool
-  onRetry?: (model: string, err: any) => void;
-}
-
-// Try each model in order; on a retryable error rotate the key (unless it's an Ollama model) and
-// fall through; on a non-retryable error throw at once; if all models fail, throw the last error.
-export async function runWithFallback(
-  models: string[],
-  params: { contents: string; config?: any },
-  deps: FallbackDeps,
-): Promise<any> {
-  let lastError: any = null;
-  for (const model of models) {
-    try {
-      return await deps.callModel(model, params);
-    } catch (err: any) {
-      lastError = err;
-      if (!isRetryableError(err)) throw err;
-      deps.onRetry?.(model, err);
-      if (deps.rotate && !deps.isOllama?.(model)) deps.rotate();
-    }
-  }
-  throw lastError || new Error("All fallback models failed.");
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
@@ -124,11 +81,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   assert.deepEqual(filterValidCalendarEvents(undefined), []);
   assert.deepEqual(filterValidCalendarEvents(null), []);
 
-  // nextIndex — wrap + empty-pool guard
-  assert.equal(nextIndex(0, 3), 1);
-  assert.equal(nextIndex(2, 3), 0);
-  assert.equal(nextIndex(5, 0), 0);
-
   // resolveDate — deterministic date math from NL phrases (ref = Saturday 2026-06-27), no model needed
   const R = "2026-06-27T09:00:00";
   assert.equal(resolveDate("Don't forget the birthday is this coming Friday", R)?.date, "2026-07-03"); // was model's 07-04 (a Sat)
@@ -140,48 +92,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   assert.equal(three?.date, "2026-06-30"); assert.equal(three?.hour, 10);
   assert.equal(resolveDate("water my plants today", R)?.hour, null);                                   // no stated time -> null (keep model's)
   assert.equal(resolveDate("I want to organize my life better", R), null);                             // no date -> null (leave model alone)
-
-  // isRetryableError — transient/quota/network retryable, auth/not-found not
-  assert.equal(isRetryableError({ status: 429 }), true);
-  assert.equal(isRetryableError({ status: 503 }), true);
-  assert.equal(isRetryableError({ message: "fetch failed: ECONNREFUSED" }), true);
-  assert.equal(isRetryableError({ message: "model is overloaded" }), true);
-  assert.equal(isRetryableError({ status: 401 }), false);
-  assert.equal(isRetryableError({ status: 404, message: "model not found" }), false);
-  assert.equal(isRetryableError({ message: "some other error" }), false);
-
-  // runWithFallback — 2nd model succeeds after a 429; rotate happens once
-  let rotations = 0;
-  const r1 = await runWithFallback(["a", "b"], { contents: "x" }, {
-    callModel: async (model: string) => { if (model === "a") throw { status: 429 }; return { text: `ok:${model}` }; },
-    rotate: () => { rotations++; },
-  });
-  assert.equal(r1.text, "ok:b");
-  assert.equal(rotations, 1, "one rotation before falling to model b");
-
-  // runWithFallback — all models exhausted (all 429) -> throws the last error
-  await assert.rejects(
-    runWithFallback(["a", "b"], { contents: "x" }, { callModel: async () => { throw { status: 429, message: "RESOURCE_EXHAUSTED" }; } }),
-    (e: any) => e.status === 429,
-  );
-
-  // runWithFallback — non-retryable (401) throws immediately, never tries model b
-  let calls = 0;
-  await assert.rejects(
-    runWithFallback(["a", "b"], { contents: "x" }, { callModel: async () => { calls++; throw { status: 401 }; } }),
-    (e: any) => e.status === 401,
-  );
-  assert.equal(calls, 1, "non-retryable error must not fall through to the next model");
-
-  // runWithFallback — Ollama ECONNREFUSED is retryable but does NOT rotate the Gemini key
-  let ollamaRotations = 0;
-  const r2 = await runWithFallback(["ollama:gemma3", "gemini"], { contents: "x" }, {
-    callModel: async (m: string) => { if (m.startsWith("ollama:")) throw { message: "ECONNREFUSED" }; return { text: "gemini-ok" }; },
-    rotate: () => { ollamaRotations++; },
-    isOllama: (m: string) => m.startsWith("ollama:"),
-  });
-  assert.equal(r2.text, "gemini-ok");
-  assert.equal(ollamaRotations, 0, "an Ollama failure must not burn a Gemini key rotation");
 
   console.log("server-utils self-check ✓");
 })();
