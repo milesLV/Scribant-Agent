@@ -1,19 +1,28 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
-import { Word } from "../types";
+import { Word, ProofResult } from "../types";
 import { applyCorrections } from "../utils/transcript";
 
-// confidence below this = "strange" (misheard). Mirrors STRANGE_THRESHOLD in transcriber.ts.
+// confidence below this = "strange" (misheard). Same value as applyCorrections' strangeThreshold
+// default in utils/transcript.ts and the eval grader.
 const STRANGE_THRESHOLD = 0.7;
 
+// The capture cycle lives in App (one debounce timer → /api/live). This component owns the
+// transcript and the correction-splicing that keeps highlight offsets valid; it receives finished
+// stage results as props rather than fetching any of them itself.
 interface AudioRecorderProps {
   onAnalyze: (text: string) => void;
   isProcessing: boolean;
   onShowToast?: (msg: string) => void;
   clearSignal?: number;
   onChangeTranscript?: (text: string) => void;
-  onChangeSummary?: (summary: string) => void;
+  liveSummary: string;
+  proofResult: ProofResult | null;
+  busy: { proof: boolean; summary: boolean; plan: boolean };
+  autoRun: boolean;
+  onAutoRunChange: (on: boolean) => void;
+  onRunNow: () => void;
 }
 
 declare global {
@@ -29,25 +38,18 @@ export default function AudioRecorder({
   onShowToast,
   clearSignal,
   onChangeTranscript,
-  onChangeSummary
+  liveSummary,
+  proofResult,
+  busy,
+  autoRun,
+  onAutoRunChange,
+  onRunNow
 }: AudioRecorderProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [interimTranscript, setInterimTranscript] = useState("");
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [useKeyboard, setUseKeyboard] = useState(false);
-  
-  // live summary state
-  const [liveSummary, setLiveSummary] = useState<string>("");
-  const [isSummarizing, setIsSummarizing] = useState(false);
-  const isSummarizingRef = useRef(false);
-  const [autoSummarize, setAutoSummarize] = useState(true);
-  const lastSummarizedRef = useRef<string>("");
-  const lastSummarizedTimeRef = useRef<number>(0);
-  const liveSummaryTimerRef = useRef<NodeJS.Timeout | null>(null);
-  // Abort controller for in-flight summarize fetches; clearedRef prevents stale responses writing back
-  const summarizeAbortControllerRef = useRef<AbortController | null>(null);
-  const clearedRef = useRef(false);
 
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
@@ -60,47 +62,37 @@ export default function AudioRecorder({
   // Strange-word proofread state. `words` are scored against the exact text in proofedTextRef
   // (offsets index into it), so corrections splice safely even as the live transcript moves on.
   const [words, setWords] = useState<Word[] | null>(null);
-  const [isProofing, setIsProofing] = useState(false);
   const [activeStrange, setActiveStrange] = useState<number | null>(null);
   const proofedTextRef = useRef("");
-  const proofAbortRef = useRef<AbortController | null>(null);
-  const proofTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const recognitionRef = useRef<any>(null);
 
-  // Ask the server's proofread router (mode A2): obvious typos come back as `corrections` (auto-applied
-  // here) and ambiguous mishearings as low-confidence `words` (surfaced as clickable chips below).
-  const runProofread = async (text: string) => {
-    const t = text.trim();
-    if (!t) { setWords(null); return; }
-    if (proofAbortRef.current) proofAbortRef.current.abort();
-    const controller = new AbortController();
-    proofAbortRef.current = controller;
-    setIsProofing(true);
-    try {
-      const res = await fetch("/api/transcribe-correct", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: t }),
-        signal: controller.signal,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        // Auto-apply the obvious fixes; keep only the ambiguous flags, offsets shifted to match.
-        const { text: corrected, words: flags } = applyCorrections(t, data.words || [], data.corrections || []);
-        const tail = transcript.startsWith(t) ? transcript.slice(t.length) : "";
-        proofedTextRef.current = corrected;
-        if (corrected !== t) setTranscript(corrected + tail);
-        setWords(flags.length ? flags : null);
-        setActiveStrange(null);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") console.error("Proofread failed:", err);
-    } finally {
-      setIsProofing(false);
-      proofAbortRef.current = null;
-    }
-  };
+  // Read during the proofResult effect, which must see CURRENT values without re-running every time
+  // speech appends or the editor toggles. Assigned in render so they are never a frame stale.
+  const transcriptRef = useRef("");
+  const editingRef = useRef(false);
+  transcriptRef.current = transcript;
+  // Click-to-edit only, not keyboard mode — gating on `useKeyboard` too would mean typed input
+  // never gets corrected at all.
+  editingRef.current = isEditingTranscript;
+
+  // A finished proofread stage arrived: auto-apply the obvious fixes and keep the ambiguous flags,
+  // offsets shifted to match. `proofResult.text` is what was scored and must still be the HEAD of
+  // the transcript — a mid-text edit invalidates every offset, and splicing anyway would swap in a
+  // stale corrected copy, silently discarding whatever came after it.
+  useEffect(() => {
+    if (!proofResult) return;
+    const base = proofResult.text;
+    const current = transcriptRef.current;
+    if (!current.startsWith(base)) return;
+    if (editingRef.current) return; // don't rewrite text out from under an active cursor
+
+    const { text: corrected, words: flags } = applyCorrections(base, proofResult.words || [], proofResult.corrections || []);
+    proofedTextRef.current = corrected;
+    if (corrected !== base) setTranscript(corrected + current.slice(base.length));
+    setWords(flags.length ? flags : null);
+    setActiveStrange(null);
+  }, [proofResult]);
 
   // Swap a strange word for one of its suggestions. Splice into the proofed text and shift every
   // later word's offsets by the length delta, so the OTHER highlights survive the edit intact.
@@ -137,63 +129,6 @@ export default function AudioRecorder({
     }
   }, [transcript, words]);
 
-  // Auto-proofread shortly after the transcript stops changing, so strange words surface on their
-  // own (the mic no longer auto-stops). Debounced to avoid a request per recognized chunk.
-  useEffect(() => {
-    const t = transcript.trim();
-    if (!t || isEditingTranscript || t === proofedTextRef.current) return;
-    if (proofTimerRef.current) clearTimeout(proofTimerRef.current);
-    proofTimerRef.current = setTimeout(() => runProofread(transcript), 2500);
-    return () => { if (proofTimerRef.current) clearTimeout(proofTimerRef.current); };
-  }, [transcript, isEditingTranscript]);
-
-  const triggerLiveSummary = async (textToSummarize: string) => {
-    if (!textToSummarize.trim()) {
-      setLiveSummary("");
-      if (onChangeSummary) onChangeSummary("");
-      return;
-    }
-    if (isSummarizingRef.current) return;
-    // Abort any previous in-flight request
-    if (summarizeAbortControllerRef.current) {
-      summarizeAbortControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    summarizeAbortControllerRef.current = controller;
-    isSummarizingRef.current = true;
-    setIsSummarizing(true);
-    try {
-      const res = await fetch("/api/summarize-live", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: textToSummarize }),
-        signal: controller.signal,
-      });
-      // If the session was cleared while the request was in flight, discard the result
-      if (clearedRef.current) return;
-      if (res.ok) {
-        const data = await res.json();
-        if (!clearedRef.current) {
-          setLiveSummary(data.summary);
-          lastSummarizedRef.current = textToSummarize;
-          if (onChangeSummary) {
-            onChangeSummary(data.summary);
-          }
-        }
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        console.error("Live summarization failed:", err);
-      }
-    } finally {
-      isSummarizingRef.current = false;
-      setIsSummarizing(false);
-      summarizeAbortControllerRef.current = null;
-    }
-  };
-
   // Notify parent of transcript modifications (include interim text for real-time live analysis)
   useEffect(() => {
     if (onChangeTranscript) {
@@ -204,21 +139,7 @@ export default function AudioRecorder({
   // External clear signal from parent (Clear All button)
   useEffect(() => {
     if (clearSignal && clearSignal > 0) {
-      // Mark as cleared so any in-flight requests discard their results
-      clearedRef.current = true;
       ignoreSpeechResultsRef.current = true;
-      // Abort any in-flight summarize request immediately
-      if (summarizeAbortControllerRef.current) {
-        summarizeAbortControllerRef.current.abort();
-        summarizeAbortControllerRef.current = null;
-      }
-      // Cancel any pending summarize timer
-      if (liveSummaryTimerRef.current) {
-        clearTimeout(liveSummaryTimerRef.current);
-        liveSummaryTimerRef.current = null;
-      }
-      isSummarizingRef.current = false;
-      setIsSummarizing(false);
       if (isListening) {
         manualStopRef.current = true;
         recognitionRef.current?.stop();
@@ -226,68 +147,12 @@ export default function AudioRecorder({
       }
       setTranscript("");
       setInterimTranscript("");
-      setLiveSummary("");
-      if (onChangeSummary) onChangeSummary("");
       setIsEditingTranscript(false);
       setWords(null);
       setActiveStrange(null);
       proofedTextRef.current = "";
-      lastSummarizedRef.current = "";
-      lastSummarizedTimeRef.current = 0;
     }
   }, [clearSignal]);
-
-  // Live Notes Summary update loop
-  useEffect(() => {
-    const textToSummarize = (transcript + " " + interimTranscript).trim();
-    if (!textToSummarize || !autoSummarize) {
-      if (!textToSummarize) {
-        setLiveSummary("");
-      }
-      lastSummarizedRef.current = "";
-      return;
-    }
-    // New content arrived — allow summaries again
-    clearedRef.current = false;
-
-    if (textToSummarize.length < 15) {
-      return;
-    }
-
-    // Clear any existing timer
-    if (liveSummaryTimerRef.current) {
-      clearTimeout(liveSummaryTimerRef.current);
-    }
-
-    const runSummary = () => {
-      if (isSummarizingRef.current) return;
-      triggerLiveSummary(textToSummarize);
-      lastSummarizedRef.current = textToSummarize;
-      lastSummarizedTimeRef.current = Date.now();
-    };
-
-    const timeSinceLastRun = Date.now() - lastSummarizedTimeRef.current;
-    const textHasChanged = textToSummarize !== lastSummarizedRef.current;
-
-    if (textHasChanged && timeSinceLastRun >= 10000) {
-      // Periodic check every 10 seconds of active speech
-      runSummary();
-    } else {
-      // Debounce when they pause: fire after 2 seconds
-      liveSummaryTimerRef.current = setTimeout(() => {
-        const currentText = lastSummarizedRef.current;
-        if (textToSummarize !== currentText) {
-          runSummary();
-        }
-      }, 2000);
-    }
-
-    return () => {
-      if (liveSummaryTimerRef.current) {
-        clearTimeout(liveSummaryTimerRef.current);
-      }
-    };
-  }, [transcript, interimTranscript, autoSummarize]);
 
   useEffect(() => {
     // Check for browser support
@@ -569,12 +434,12 @@ export default function AudioRecorder({
               {!useKeyboard && (
                 <button
                   type="button"
-                  onClick={() => runProofread(transcript)}
-                  disabled={isProofing || !transcript.trim()}
-                  title="Check for misheard words"
+                  onClick={onRunNow}
+                  disabled={busy.proof || !transcript.trim()}
+                  title="Run the live pipeline now — proofread, summary and draft actions"
                   className="p-1 text-stone-500 hover:text-amber-700 hover:bg-stone-100 rounded transition-colors disabled:opacity-40 cursor-pointer"
                 >
-                  {isProofing ? (
+                  {busy.proof ? (
                     <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
                   ) : (
                     <SpellCheck className="w-3.5 h-3.5" />
@@ -641,11 +506,11 @@ export default function AudioRecorder({
             </div>
             
             <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1 cursor-pointer" title="Auto-summarize periodically as you type or speak">
+              <label className="flex items-center gap-1 cursor-pointer" title="Auto-run the live pipeline (proofread, summary, draft actions) as you type or speak">
                 <input
                   type="checkbox"
-                  checked={autoSummarize}
-                  onChange={(e) => setAutoSummarize(e.target.checked)}
+                  checked={autoRun}
+                  onChange={(e) => onAutoRunChange(e.target.checked)}
                   className="rounded text-amber-600 focus:ring-amber-500 w-3 h-3 border-stone-300"
                 />
                 <span className="text-[9px] text-stone-500 select-none">Auto</span>
@@ -653,12 +518,12 @@ export default function AudioRecorder({
 
               <button
                 type="button"
-                onClick={() => triggerLiveSummary(transcript)}
-                disabled={isSummarizing || !transcript.trim()}
-                title="Summarize draft now"
+                onClick={onRunNow}
+                disabled={busy.summary || !transcript.trim()}
+                title="Run the live pipeline now — proofread, summary and draft actions"
                 className="p-1 text-stone-500 hover:text-amber-700 hover:bg-stone-100 rounded transition-colors disabled:opacity-44 cursor-pointer"
               >
-                {isSummarizing ? (
+                {busy.summary ? (
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
                 ) : (
                   <Sparkles className="w-3.5 h-3.5 text-stone-600 hover:text-amber-600" />
@@ -672,7 +537,7 @@ export default function AudioRecorder({
               <MarkdownBullets text={liveSummary} />
             ) : (
               <div className="text-stone-400 italic text-[11px] h-full flex flex-col justify-center items-center text-center px-4 leading-normal">
-                {isSummarizing ? (
+                {busy.summary ? (
                   <span className="flex items-center gap-2 text-stone-500 font-medium animate-pulse">
                     <RefreshCw className="w-4 h-4 animate-spin text-amber-500" /> Creating bullet points...
                   </span>
@@ -689,8 +554,8 @@ export default function AudioRecorder({
           {liveSummary && (
             <div className="pt-2 border-t border-stone-150/70 flex items-center justify-between text-[9px] text-stone-400 font-mono">
               <span className="flex items-center gap-1">
-                <div className={`w-1.5 h-1.5 rounded-full ${isSummarizing ? 'bg-amber-400 animate-pulse' : 'bg-stone-300'}`} />
-                {isSummarizing ? "Updating bullets..." : "Notes synchronized"}
+                <div className={`w-1.5 h-1.5 rounded-full ${busy.summary ? 'bg-amber-400 animate-pulse' : 'bg-stone-300'}`} />
+                {busy.summary ? "Updating bullets..." : "Notes synchronized"}
               </span>
               <button
                 type="button"
@@ -730,7 +595,7 @@ export default function AudioRecorder({
         >
           {isProcessing ? (
             <>
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Customizing folders...
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Structuring thoughts...
             </>
           ) : (
             <>

@@ -60,7 +60,38 @@ export function resolveDate(phrase: string, referenceISO: string): ResolvedDate 
   return { date: `${y}-${pad(mo)}-${pad(d)}`, hour: timed ? c.get("hour") : null, minute: timed ? (c.get("minute") ?? 0) : null };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
+// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
+// Deterministic date pass over a raw classifier plan, in place. The model reliably picks WHICH day
+// a phrase means but is unreliable at the arithmetic, so start/dueDate get re-resolved from the
+// verbatim sourceText via chrono; the model's value survives when the phrase carries no date.
+// Time-of-day comes from chrono only when the phrase stated one, else the model's, else 09:00.
+export function resolvePlanDates(plan: any, refISO: string): any {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  for (const evt of plan?.calendarEvents || []) {
+    const r = resolveDate(evt.sourceText || "", refISO);
+    if (!r) continue;
+    const timeOfDay = evt.allDay ? "00:00:00"
+      : r.hour != null ? `${pad(r.hour)}:${pad(r.minute ?? 0)}:00`
+      : (String(evt.start || "").match(/T(\d{2}:\d{2}:\d{2})/)?.[1] ?? "09:00:00");
+    evt.start = `${r.date}T${timeOfDay}`;
+    if (evt.allDay) {
+      evt.end = `${r.date}T00:00:00`;
+    } else {
+      const e = new Date(evt.start); e.setMinutes(e.getMinutes() + 30); // ponytail: +30min default; end duration isn't tracked
+      evt.end = `${e.getFullYear()}-${pad(e.getMonth() + 1)}-${pad(e.getDate())}T${pad(e.getHours())}:${pad(e.getMinutes())}:00`;
+    }
+  }
+  for (const task of plan?.tasks || []) {
+    if (!task.dueDate) continue; // model saw no deadline -> don't invent one from a stray date token
+    const r = resolveDate(task.sourceText || "", refISO);
+    if (r) task.dueDate = r.date;
+  }
+  // Drop calendar events with a missing/placeholder start time (the client only filters on title).
+  if (plan?.calendarEvents) plan.calendarEvents = filterValidCalendarEvents(plan.calendarEvents);
+  return plan;
+}
+
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   // cleanJsonString — happy / sad / edge
   assert.equal(cleanJsonString('```json\n{"a":1}\n```'), '{"a":1}');           // fenced
   assert.equal(cleanJsonString(""), "{}");                                      // empty -> {}
@@ -92,6 +123,29 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   assert.equal(three?.date, "2026-06-30"); assert.equal(three?.hour, 10);
   assert.equal(resolveDate("water my plants today", R)?.hour, null);                                   // no stated time -> null (keep model's)
   assert.equal(resolveDate("I want to organize my life better", R), null);                             // no date -> null (leave model alone)
+
+  // resolvePlanDates — the whole pass, as /api/analyze and /api/live both run it
+  const plan = resolvePlanDates({
+    calendarEvents: [
+      { title: "Dentist", sourceText: "dentist tomorrow at 3pm", start: "2026-01-01T09:00:00", allDay: false },
+      { title: "Yosemite", sourceText: "driving to Yosemite tomorrow", start: "2026-01-01T00:00:00", allDay: true },
+      { title: "Vague", sourceText: "someday we should meet", start: "2026-06-29T11:00:00", allDay: false },
+      { title: "Placeholder", sourceText: "no date here", start: "" },
+    ],
+    tasks: [
+      { title: "Passport", sourceText: "renew my passport by Friday", dueDate: "2026-01-01" },
+      { title: "Open-ended", sourceText: "water the plants sometime", dueDate: "" },
+    ],
+  }, R);
+  assert.equal(plan.calendarEvents[0].start, "2026-06-28T15:00:00");   // stated time honored
+  assert.equal(plan.calendarEvents[0].end, "2026-06-28T15:30:00");     // +30min default
+  assert.equal(plan.calendarEvents[1].start, "2026-06-28T00:00:00");   // all-day pinned to midnight
+  assert.equal(plan.calendarEvents[1].end, "2026-06-28T00:00:00");
+  assert.equal(plan.calendarEvents[2].start, "2026-06-29T11:00:00");   // no date in phrase -> model's value kept
+  assert.equal(plan.calendarEvents.length, 3);                          // blank start dropped
+  assert.equal(plan.tasks[0].dueDate, "2026-07-03");                    // "by Friday" re-resolved
+  assert.equal(plan.tasks[1].dueDate, "");                              // no deadline -> not invented
+  assert.deepEqual(resolvePlanDates({}, R), {});                        // empty plan is a no-op
 
   console.log("server-utils self-check ✓");
 })();

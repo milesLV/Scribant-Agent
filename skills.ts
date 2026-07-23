@@ -5,7 +5,7 @@
 // Scope note: a Skill here is EXTRACTION only (what the model emits). Execution stays per-item
 // behind the client's review-then-act UI (handleExecute* in App.tsx → /api/execute), deliberately
 // not a batch loop, so there's no `execute` here. Document-level outputs (ideasSummary,
-// organizedFolderName) are not skills; they live inline in server.ts.
+// organizedFolderName) are not skills; they live inline in agents.ts.
 import { z } from "zod";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
@@ -81,7 +81,8 @@ export function skillSchemaProperties(): Record<string, z.ZodTypeAny> {
 }
 
 // ponytail: self-check guards the response contract the client depends on. Run: tsx skills.ts
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   const props = skillSchemaProperties();
   assert.deepEqual(Object.keys(props), ["calendarEvents", "tasks", "searchQueries"]);
   assert.ok(props.calendarEvents instanceof z.ZodArray);

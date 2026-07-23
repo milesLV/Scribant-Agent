@@ -81,7 +81,8 @@ function clamp(n: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   (async () => {
     const toks = tokenize("call grandma tomorow");
     assert.equal(toks.length, 3);

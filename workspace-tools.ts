@@ -1,10 +1,10 @@
-// Server-side Google Workspace executors + their ADK FunctionTool wrappers.
+// Server-side Google Workspace executors, called by /api/execute after a human approves an item.
 // Real mode calls the Google REST APIs with a per-request OAuth token forwarded from the client
-// (tokens live in the browser; there is no server-side OAuth). With no token the tools DRY-RUN:
-// mint a mock id and echo what would have happened — the browser's localStorage sandbox is a
-// separate, client-only simulation and stays untouched.
-import { z } from "zod";
-import { FunctionTool } from "@google/adk";
+// (tokens live in the browser; there is no server-side OAuth). Signed out, the browser runs its own
+// localStorage sandbox and never reaches here.
+//
+// ponytail: plain functions, no ADK FunctionTool wrappers — nothing calls tools autonomously since
+// /api/agent was deleted. If an autonomous mode ever comes back, wrapping these is ~10 lines each.
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
@@ -61,54 +61,9 @@ export async function gtasksCreateTask(token: string, task: TaskInput): Promise<
   return data.id;
 }
 
-const mockId = (prefix: string) => `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
-
-type SearchFn = (query: string) => Promise<{ condensed: string; inDepth: string; sources: { uri: string; title: string }[] }>;
-
-// The three tools the orchestrator agent can call. token === null ⇒ dry-run (mock ids, no network
-// except search, which is read-only and always real).
-export function buildWorkspaceTools(opts: { token: string | null; search: SearchFn }) {
-  const { token, search } = opts;
-  return [
-    new FunctionTool({
-      name: "create_calendar_event",
-      description: "Schedule an event on the user's Google Calendar. Use for things that happen at a specific time or occupy whole days.",
-      parameters: z.object({
-        title: z.string().describe("Event summary/title"),
-        description: z.string().describe("Event description/context; empty string if none"),
-        start: z.string().describe("Start as ISO-8601 local datetime, e.g. 2026-07-10T15:00:00"),
-        end: z.string().describe("End as ISO-8601 local datetime; 30 minutes after start if no duration implied"),
-        allDay: z.boolean().describe("True if it spans whole day(s) with no specific clock time"),
-      }),
-      execute: async (event) =>
-        token
-          ? { eventId: await gcalCreateEvent(token, event), simulated: false }
-          : { eventId: mockId("mock-evt"), simulated: true },
-    }),
-    new FunctionTool({
-      name: "create_task",
-      description: "Add a todo item to the user's Google Tasks list. Use for actions to complete, optionally with a deadline.",
-      parameters: z.object({
-        title: z.string().describe("Compact title of the task"),
-        notes: z.string().describe("Descriptions, sub-items, or context; empty string if none"),
-        dueDate: z.string().describe("Deadline as ISO date YYYY-MM-DD, or empty string if open-ended"),
-      }),
-      execute: async (task) =>
-        token
-          ? { taskId: await gtasksCreateTask(token, task), simulated: false }
-          : { taskId: mockId("mock-task"), simulated: true },
-    }),
-    new FunctionTool({
-      name: "web_search",
-      description: "Run a grounded Google web search and return a sourced answer. Use for well-defined, searchable questions the user raised.",
-      parameters: z.object({ query: z.string().describe("The search query text") }),
-      execute: async ({ query }) => search(query),
-    }),
-  ];
-}
-
-// ponytail: self-check pins the date-shape logic and the dry-run seam. Run: tsx workspace-tools.ts
-if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
+// ponytail: self-check pins the date-shape logic and the error surface. Run: tsx workspace-tools.ts
+// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   // all-day: end is exclusive, same-day span bumps one day
   assert.deepEqual(
     toGcalDates({ title: "t", start: "2026-07-10T00:00:00Z", allDay: true }),
@@ -141,20 +96,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ error: { message: "Invalid Credentials" } }), { status: 401 })) as any;
     await assert.rejects(gcalCreateEvent("bad", { title: "x", start: "2026-07-10T15:00:00" }), /Invalid Credentials/);
-  } finally {
-    globalThis.fetch = realFetch;
-  }
-
-  // dry-run: no token -> mock ids, fetch never touched
-  globalThis.fetch = (async () => { throw new Error("dry-run must not call fetch"); }) as any;
-  try {
-    const [cal, task, searchTool] = buildWorkspaceTools({ token: null, search: async q => ({ condensed: `c:${q}`, inDepth: "", sources: [] }) });
-    const calRes: any = await cal.runAsync({ args: { title: "t", description: "", start: "2026-07-10T15:00:00", end: "2026-07-10T15:30:00", allDay: false } } as any);
-    assert.ok(calRes.simulated && calRes.eventId.startsWith("mock-evt-"));
-    const taskRes: any = await task.runAsync({ args: { title: "t", notes: "", dueDate: "" } } as any);
-    assert.ok(taskRes.simulated && taskRes.taskId.startsWith("mock-task-"));
-    const searchRes: any = await searchTool.runAsync({ args: { query: "q1" } } as any);
-    assert.equal(searchRes.condensed, "c:q1");
   } finally {
     globalThis.fetch = realFetch;
   }

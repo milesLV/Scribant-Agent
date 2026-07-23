@@ -69,7 +69,7 @@ export default function SessionHistory({
                   {hasAnalysis && run.analysis && (
                     <div className="flex items-center gap-3 pt-2 text-[10px] font-mono text-stone-400 flex-wrap">
                       <span className="bg-amber-500/10 text-amber-800 font-sans px-1.5 py-0.2 rounded text-[9.5px] font-extrabold flex items-center gap-0.5 border border-amber-200/20">
-                        FOLDER: {run.analysis.organizedFolder}
+                        TOPIC: {run.analysis.organizedFolder}
                       </span>
                       <span className="flex items-center gap-0.5">
                         <Calendar className="w-3 h-3 text-stone-300" /> {run.analysis.calendarEvents.length} APPOINTMENTS
