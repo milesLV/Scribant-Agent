@@ -11,7 +11,6 @@ interface ActiveSessionProps {
   onExecuteCalendar: (index: number) => Promise<void>;
   onExecuteTask: (index: number) => Promise<void>;
   onExecuteSearch: (index: number) => Promise<void>;
-  onExecuteDrive: () => Promise<void>;
   onUpdateCalendar: (index: number, updated: CalendarEvent) => void;
   onUpdateTask: (index: number, updated: TaskItem) => void;
   isLiveAnalyzing?: boolean;
@@ -22,7 +21,6 @@ export default function ActiveSession({
   onExecuteCalendar,
   onExecuteTask,
   onExecuteSearch,
-  onExecuteDrive,
   onUpdateCalendar,
   onUpdateTask,
   isLiveAnalyzing = false
@@ -38,7 +36,7 @@ export default function ActiveSession({
       <div className="bg-white border border-stone-200 rounded-2xl p-8 text-center shadow-sm">
         <Sparkles className="w-8 h-8 mx-auto text-stone-300 animate-pulse mb-3" />
         <h3 className="text-sm font-semibold text-stone-700">Analyzing your thoughts...</h3>
-        <p className="text-xs text-stone-400 mt-1 max-w-sm mx-auto">Gemini is structuring your thoughts, detecting appointments, and aligning action folders.</p>
+        <p className="text-xs text-stone-400 mt-1 max-w-sm mx-auto">Gemini is structuring your thoughts — detecting appointments, tasks, and questions worth researching.</p>
       </div>
     );
   }
@@ -370,7 +368,8 @@ export default function ActiveSession({
                         />
                         {item.dueDate && (
                           <span className="inline-block mt-1 text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
-                            Due {new Date(item.dueDate).toLocaleDateString()}
+                            {/* dueDate is date-only ("YYYY-MM-DD"), which parses as UTC midnight; the time suffix forces local so TZs behind UTC don't render a day early. */}
+                            Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
                           </span>
                         )}
                       </div>

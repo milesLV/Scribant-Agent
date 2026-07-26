@@ -86,7 +86,7 @@ export default function Header({
             <div className="space-y-1">
               <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wider font-mono">Workspace Integration Settings</h3>
               <p className="text-xs text-stone-500 leading-relaxed font-sans">
-                By default Scribant runs in <strong>Sandbox Mode (simulated Google APIs)</strong>. Click <strong>Sign in with Google</strong> to use real Calendar, Tasks, and Drive. To sign in against your own Google Cloud project, set its OAuth Web Client ID below — its authorized redirect URI must match the address shown.
+                By default Scribant runs in <strong>Sandbox Mode (simulated Google APIs)</strong>. Click <strong>Sign in with Google</strong> to use real Calendar and Tasks. To sign in against your own Google Cloud project, set its OAuth Web Client ID below — its authorized redirect URI must match the address shown.
               </p>
             </div>
           </div>

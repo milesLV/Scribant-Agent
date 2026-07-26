@@ -44,14 +44,12 @@ interface SearchQueryItem {
   error?: string;
 }
 
-export interface DriveDocItem {
-  name: string;
-  content: string;
-  mimeType: string;
-  type: 'summary' | 'ideas' | 'report';
-  status: 'pending' | 'created' | 'failed';
-  fileId?: string;
-  folderId?: string;
+// The /api/live proofread stage: the exact text that was scored, plus what to do about it. The
+// client (not the server) applies these, so it stays the owner of what's on screen.
+export interface ProofResult {
+  text: string;
+  corrections: { index: number; from: string; to: string }[];
+  words: Word[];
 }
 
 export interface AnalysisResult {
@@ -60,8 +58,7 @@ export interface AnalysisResult {
   calendarEvents: CalendarEvent[];
   tasks: TaskItem[];
   searchQueries: SearchQueryItem[];
-  driveDocs: DriveDocItem[];
-  organizedFolder?: string;
+  organizedFolder?: string; // grouping label for the session (shown in the archive list)
 }
 
 export interface StreamRun {

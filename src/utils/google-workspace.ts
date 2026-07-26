@@ -1,4 +1,4 @@
-import { CalendarEvent, TaskItem, DriveDocItem } from "../types";
+import { CalendarEvent, TaskItem } from "../types";
 
 // In-memory or localStorage cache for sandbox state so it persists across runs
 const SANDBOX_STATE_KEY = "scribant_sandbox";
@@ -6,8 +6,6 @@ const SANDBOX_STATE_KEY = "scribant_sandbox";
 interface SandboxState {
   events: CalendarEvent[];
   tasks: TaskItem[];
-  docs: DriveDocItem[];
-  folders: { id: string; name: string }[];
 }
 
 const DEFAULT_SANDBOX_STATE: SandboxState = {
@@ -30,33 +28,24 @@ const DEFAULT_SANDBOX_STATE: SandboxState = {
       status: "created",
       taskId: "mock-task-1"
     }
-  ],
-  docs: [
-    {
-      name: "Q2 Marketing Brainstorm.md",
-      content: "# Q2 Marketing Brainstorm\n- Launch focus landing pages.\n- Experiment with interactive web applets.",
-      mimeType: "text/markdown",
-      type: "ideas",
-      status: "created",
-      fileId: "mock-doc-1",
-      folderId: "mock-fld-1"
-    }
-  ],
-  folders: [
-    { id: "mock-fld-1", name: "Marketing Brainstorms" }
   ]
 };
+
+// Always hand out a COPY: sandboxAdd pushes into whatever this returns, so returning the shared
+// default would mutate it — and then resetSandboxState() writes back the very items it should drop.
+const freshDefaults = (): SandboxState => structuredClone(DEFAULT_SANDBOX_STATE);
 
 function getSandboxState(): SandboxState {
   const data = localStorage.getItem(SANDBOX_STATE_KEY);
   if (!data) {
-    localStorage.setItem(SANDBOX_STATE_KEY, JSON.stringify(DEFAULT_SANDBOX_STATE));
-    return DEFAULT_SANDBOX_STATE;
+    const seeded = freshDefaults();
+    localStorage.setItem(SANDBOX_STATE_KEY, JSON.stringify(seeded));
+    return seeded;
   }
   try {
     return JSON.parse(data);
   } catch {
-    return DEFAULT_SANDBOX_STATE;
+    return freshDefaults();
   }
 }
 
@@ -71,107 +60,6 @@ function sandboxAdd(prefix: string, push: (state: SandboxState, id: string) => v
   push(state, id);
   saveSandboxState(state);
   return id;
-}
-
-// ==========================================
-// GOOGLE DRIVE SERVICE
-// ==========================================
-
-export async function createDriveFolder(token: string | null, folderName: string): Promise<string> {
-  if (!token) {
-    const existing = getSandboxState().folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
-    if (existing) return existing.id;
-    return sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName }));
-  }
-
-  // Real Integration Mode
-  try {
-    const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${encodeURIComponent(folderName)}'+and+mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id)`;
-    const searchRes = await fetch(searchUrl, {
-      headers: {
-        "Authorization": `Bearer ${token}`
-      }
-    });
-    if (searchRes.ok) {
-      const searchData = await searchRes.json();
-      if (searchData.files && searchData.files.length > 0) {
-        return searchData.files[0].id;
-      }
-    }
-  } catch (searchErr) {
-    console.error("Failed to query existing Drive folders:", searchErr);
-  }
-
-  const res = await fetch("https://www.googleapis.com/drive/v3/files", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      name: folderName,
-      mimeType: "application/vnd.google-apps.folder"
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error?.message || "Failed to create Google Drive folder");
-  }
-
-  const folder = await res.json();
-  return folder.id;
-}
-
-export async function uploadDriveFile(
-  token: string | null,
-  fileName: string,
-  content: string,
-  folderId?: string
-): Promise<string> {
-  if (!token) {
-    return sandboxAdd("mock-doc", (s, id) =>
-      s.docs.push({ name: fileName, content, mimeType: "text/markdown", type: "summary", status: "created", fileId: id, folderId }));
-  }
-
-  // Real Integration Mode: Step 1 Create Metadata
-  const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      name: fileName,
-      mimeType: "text/markdown",
-      parents: folderId ? [folderId] : undefined
-    })
-  });
-
-  if (!createRes.ok) {
-    const err = await createRes.json();
-    throw new Error(err.error?.message || "Failed to initiate Drive file metadata creation");
-  }
-
-  const metadata = await createRes.json();
-  const fileId = metadata.id;
-
-  // Step 2 Upload Content via Media Endpoint
-  const uploadRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-    method: "PATCH",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-      "Content-Type": "text/markdown"
-    },
-    body: content
-  });
-
-  if (!uploadRes.ok) {
-    const err = await uploadRes.json();
-    throw new Error(err.error?.message || "Failed to upload file content directly to Google Drive");
-  }
-
-  return fileId;
 }
 
 // ==========================================
@@ -211,5 +99,5 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
 }
 
 export function resetSandboxState() {
-  localStorage.setItem(SANDBOX_STATE_KEY, JSON.stringify(DEFAULT_SANDBOX_STATE));
+  localStorage.setItem(SANDBOX_STATE_KEY, JSON.stringify(freshDefaults()));
 }

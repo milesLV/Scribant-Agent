@@ -3,16 +3,19 @@ import Header from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
-import { StreamRun, CalendarEvent, TaskItem, DriveDocItem, AnalysisResult } from "./types";
-import { 
-  createDriveFolder, 
-  uploadDriveFile, 
-  createCalendarEvent, 
+import { StreamRun, CalendarEvent, TaskItem, AnalysisResult, ProofResult } from "./types";
+import {
+  createCalendarEvent,
   createGoogleTask,
   resetSandboxState
 } from "./utils/google-workspace";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { itemId } from "./utils/transcript";
+
+// New characters of speech required before the expensive classifier stage re-runs. Below this, the
+// cycle still proofreads and re-summarizes; the previous plan stays on screen. Tune if drafts feel
+// stale (lower) or the free-tier quota bites (higher).
+const PLAN_MIN_GROWTH = 80;
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
@@ -49,11 +52,16 @@ export default function App() {
   const [liveTranscript, setLiveTranscript] = useState("");
   const [liveDraft, setLiveDraft] = useState<AnalysisResult | null>(null);
   const [liveSummary, setLiveSummary] = useState("");
-  const [isLiveAnalyzing, setIsLiveAnalyzing] = useState(false);
-  const isLiveAnalyzingRef = useRef(false);
+  const [autoRun, setAutoRun] = useState(true);
+  // Proofread result handed down for AudioRecorder to splice into the visible transcript.
+  const [proofResult, setProofResult] = useState<ProofResult | null>(null);
+  // Per-stage spinners: the stream resolves them one at a time, not all at the end.
+  const [busy, setBusy] = useState({ proof: false, summary: false, plan: false });
 
-  const lastAnalyzedTextRef = useRef("");
-  const liveAnalysisTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const liveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const inFlightRef = useRef(false);
+  const lastSentTextRef = useRef("");
+  const lastPlannedLenRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const showToast = (msg: string) => {
@@ -61,7 +69,7 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 5000);
   };
 
-  // Build a normalized AnalysisResult from a raw /api/analyze response.
+  // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage).
   const toAnalysisResult = (rawRes: any, rawText: string): AnalysisResult => ({
     summary: rawRes.ideasSummary || "",
     rawText,
@@ -74,17 +82,16 @@ export default function App() {
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
       .map((q: any) => ({ ...q, id: itemId("search", q.sourceText, q.query), status: "pending" as const })),
-    organizedFolder: rawRes.organizedFolderName || "Session Notes",
-    driveDocs: []
+    organizedFolder: rawRes.organizedFolderName || "Session Notes"
   });
 
-  // POST the transcript to the intent classifier. `signal` lets the live-draft path cancel in-flight calls.
-  const postAnalyze = (text: string, signal?: AbortSignal) =>
+  // Finalize: the full classifier pass behind the "Analyze Thoughts" button. The capture loop uses
+  // /api/live instead, so this runs once per session and is never cancelled.
+  const postAnalyze = (text: string) =>
     fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary }),
-      signal,
     });
 
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
@@ -160,76 +167,90 @@ export default function App() {
     }
   }, [clientId]);
 
-  // Debounced and periodic live analysis whenever transcript changes
+  // ONE capture cycle: proofread → summary + plan, streamed back stage by stage. One timer, not one
+  // per stage — independent timers race each other and stack up 429s. Deliberately not keyed on
+  // liveSummary either: an arriving summary would otherwise reset the timer that produced it.
+  const runLive = async (text: string) => {
+    // A cycle is mid-flight. Retry shortly rather than returning: the effect only re-arms on the NEXT
+    // transcript change, so dropping here loses this text outright if the user has stopped talking.
+    if (inFlightRef.current) {
+      if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
+      liveTimerRef.current = setTimeout(() => runLive(text), 1000);
+      return;
+    }
+    inFlightRef.current = true;
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    // The classifier is the expensive stage; only re-plan once enough new speech has landed.
+    const withPlan = !liveDraft || text.length - lastPlannedLenRef.current >= PLAN_MIN_GROWTH;
+    lastSentTextRef.current = text;
+    setBusy({ proof: true, summary: true, plan: withPlan });
+
+    try {
+      const res = await fetch("/api/live", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, withPlan }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(`Live pipeline failed (HTTP ${res.status}).`);
+
+      // NDJSON: one JSON object per line, flushed as each stage finishes.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // trailing partial line waits for the next chunk
+        for (const line of lines) {
+          if (line.trim()) handleStage(JSON.parse(line));
+        }
+      }
+    } catch (error: any) {
+      if (error.name !== "AbortError") console.error("Live pipeline failed:", error);
+    } finally {
+      inFlightRef.current = false;
+      setBusy({ proof: false, summary: false, plan: false });
+    }
+  };
+
+  const handleStage = (msg: any) => {
+    if (msg.error) { console.warn(`[live] ${msg.stage} stage failed:`, msg.error); }
+    else if (msg.stage === "proof") {
+      setProofResult({ text: msg.text, corrections: msg.corrections, words: msg.words });
+      // This cycle already reasoned over the corrected text, so don't let applying the correction
+      // re-arm the debounce and buy the same answer twice.
+      if (msg.corrected) lastSentTextRef.current = msg.corrected;
+    }
+    else if (msg.stage === "summary") setLiveSummary(msg.summary);
+    else if (msg.stage === "plan") {
+      setLiveDraft(toAnalysisResult(msg.plan, msg.text));
+      lastPlannedLenRef.current = (msg.text || "").length;
+    }
+    // "fatal" carries no stage of its own — guard so it can't invent a busy key.
+    if (msg.stage in busy) setBusy(b => ({ ...b, [msg.stage]: false }));
+  };
+
+  // Debounce: one cycle 2s after the transcript stops changing.
   useEffect(() => {
-    const textToAnalyze = liveTranscript.trim();
-
-    // No content — reset state
-    if (!textToAnalyze) {
+    const text = liveTranscript.trim();
+    if (!text) {
       setLiveDraft(null);
-      lastAnalyzedTextRef.current = "";
-      if (liveAnalysisTimerRef.current) {
-        clearTimeout(liveAnalysisTimerRef.current);
-        liveAnalysisTimerRef.current = null;
-      }
+      lastSentTextRef.current = "";
+      lastPlannedLenRef.current = 0;
       return;
     }
+    if (!autoRun || text.length < 15 || text === lastSentTextRef.current) return;
 
-    // Too short to bother analyzing
-    if (textToAnalyze.length < 15) {
-      return;
-    }
-
-    // Text hasn't changed since last completed analysis — nothing to do
-    if (textToAnalyze === lastAnalyzedTextRef.current) {
-      return;
-    }
-
-    if (liveAnalysisTimerRef.current) {
-      clearTimeout(liveAnalysisTimerRef.current);
-      liveAnalysisTimerRef.current = null;
-    }
-
-    const runAnalysis = async () => {
-      if (isLiveAnalyzingRef.current) return;
-      isLiveAnalyzingRef.current = true;
-      setIsLiveAnalyzing(true);
-
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      // Snapshot what we're analyzing so we can mark it done
-      const capturedText = textToAnalyze;
-      lastAnalyzedTextRef.current = capturedText;
-
-      try {
-        const res = await postAnalyze(capturedText, controller.signal);
-        if (res.ok) {
-          const rawRes = await res.json();
-          setLiveDraft(toAnalysisResult(rawRes, capturedText));
-        }
-      } catch (error: any) {
-        if (error.name !== "AbortError") {
-          console.error("Live draft analysis failed:", error);
-        }
-      } finally {
-        isLiveAnalyzingRef.current = false;
-        setIsLiveAnalyzing(false);
-      }
-    };
-
-    // Debounce: run 2s after the transcript stops changing.
-    liveAnalysisTimerRef.current = setTimeout(runAnalysis, 2000);
-
-    return () => {
-      if (liveAnalysisTimerRef.current) {
-        clearTimeout(liveAnalysisTimerRef.current);
-      }
-    };
-  }, [liveTranscript, liveSummary]);
+    if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
+    liveTimerRef.current = setTimeout(() => runLive(text), 2000);
+    return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
+  }, [liveTranscript, autoRun]);
 
   // Sync selectedRunId to live-draft or fallback to archive
   useEffect(() => {
@@ -260,7 +281,7 @@ export default function App() {
       return;
     }
     const redirectUri = window.location.origin;
-    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile";
+    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/userinfo.profile";
 
     // Standard Implicit Grant Flow auth URL
     const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&include_granted_scopes=true&prompt=consent`;
@@ -286,23 +307,6 @@ export default function App() {
       const rawRes = await res.json();
 
       const analysis = toAnalysisResult(rawRes, text);
-
-      analysis.driveDocs = [
-        {
-          name: "1_Stream_Summary.md",
-          content: `# Brain Dump Summary Report\n\nGenerated on: ${new Date().toLocaleString()}\n\n## Summary Bulletin\n${analysis.summary}\n\n## Unfiltered thoughts:\n"${text}"`,
-          mimeType: "text/markdown",
-          type: "summary",
-          status: "pending"
-        },
-        {
-          name: "2_Extracted_Insights.md",
-          content: `# Extracted Ideas & Insights\n\nBelow are summarized thoughts and bullet points captured from your spoken thoughts:\n\n${analysis.summary}`,
-          mimeType: "text/markdown",
-          type: "ideas",
-          status: "pending"
-        }
-      ];
 
       const newRun: StreamRun = {
         id: `run-${Date.now()}`,
@@ -427,46 +431,6 @@ export default function App() {
     }
   };
 
-  const handleExecuteDrive = async () => {
-    if (!activeAnalysis) return;
-
-    const folderName = activeAnalysis.organizedFolder || "Session Notes";
-
-    try {
-      const folderId = await createDriveFolder(token, folderName);
-
-      const actLogsContent = `# Actions & Tasks Log Report\n\nGenerated on: ${new Date().toLocaleString()}\n\n## Actionable checklist saved:\n${
-        activeAnalysis.tasks.map(t => `- [x] ${t.title}: ${t.notes || 'No description'}`).join('\n') || "No tasks recorded."
-      }\n\n## Scheduled Appointments:\n${
-        activeAnalysis.calendarEvents.map(e => `- **${e.title}**: ${e.start} to ${e.end}`).join('\n') || "No appointments registered."
-      }`;
-
-      const documentsToUpload: Omit<DriveDocItem, "status">[] = [
-        ...activeAnalysis.driveDocs.map(d => ({ name: d.name, content: d.content, mimeType: d.mimeType, type: d.type })),
-        { name: "3_Action_Log_Report.md", content: actLogsContent, mimeType: "text/markdown", type: "report" }
-      ];
-
-      const uploadedDocs: DriveDocItem[] = [];
-
-      for (const doc of documentsToUpload) {
-        const fileId = await uploadDriveFile(token, doc.name, doc.content, folderId);
-        uploadedDocs.push({
-          ...doc,
-          status: "created" as const,
-          fileId,
-          folderId
-        });
-      }
-
-      updateActiveAnalysis(a => ({ ...a, driveDocs: uploadedDocs }));
-
-      showToast(`Organized all documents successfully inside Drive folder "${folderName}"!`);
-    } catch (err: any) {
-      console.error(err);
-      showToast(`Drive Organization failed: ${err.message}`);
-    }
-  };
-
   const handleClearAll = () => {
     if (window.confirm("Are you sure you want to clear everything? This will reset the transcript, AI notes, bulletins, calendar events, search queries, and to-dos.")) {
       if (abortControllerRef.current) {
@@ -480,8 +444,11 @@ export default function App() {
       setLiveDraft(null);
       setLiveSummary("");
       setIsProcessing(false);
-      setIsLiveAnalyzing(false);
-      isLiveAnalyzingRef.current = false;
+      setProofResult(null);
+      setBusy({ proof: false, summary: false, plan: false });
+      inFlightRef.current = false;
+      lastSentTextRef.current = "";
+      lastPlannedLenRef.current = 0;
       resetSandboxState();
       showToast("All session data cleared.");
     }
@@ -503,7 +470,7 @@ export default function App() {
         id: "live-draft",
         timestamp: new Date().toISOString(),
         rawText: liveTranscript,
-        status: isLiveAnalyzing ? "processing" : "completed",
+        status: busy.plan ? "processing" : "completed",
         analysis: liveDraft || undefined
       }
     : (selectedRun || null);
@@ -541,7 +508,7 @@ export default function App() {
               <div className="space-y-0.5">
                 <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
                 <p className="text-[11px] text-stone-500 leading-normal font-sans">
-                  No active Google data is modified. Click Google Sync on the right to authorization with real Google Calendar, Tasks, and Keep.
+                  No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
                 </p>
               </div>
             </div>
@@ -562,7 +529,12 @@ export default function App() {
             onShowToast={showToast}
             clearSignal={clearSignal}
             onChangeTranscript={setLiveTranscript}
-            onChangeSummary={setLiveSummary}
+            liveSummary={liveSummary}
+            proofResult={proofResult}
+            busy={busy}
+            autoRun={autoRun}
+            onAutoRunChange={setAutoRun}
+            onRunNow={() => runLive(liveTranscript.trim())}
           />
         </div>
 
@@ -573,10 +545,9 @@ export default function App() {
             onExecuteCalendar={handleExecuteCalendar}
             onExecuteTask={handleExecuteTask}
             onExecuteSearch={handleExecuteSearch}
-            onExecuteDrive={handleExecuteDrive}
             onUpdateCalendar={handleUpdateCalendar}
             onUpdateTask={handleUpdateTask}
-            isLiveAnalyzing={isLiveAnalyzing}
+            isLiveAnalyzing={busy.plan}
           />
         </div>
 
@@ -604,7 +575,7 @@ export default function App() {
             </div>
           ) : (
             <div className="bg-white/40 border border-stone-200/50 rounded-2xl p-5 text-center text-xs text-stone-400 italic">
-              No past sessions found. Record your thoughts to begin compiling folders.
+              No past sessions yet. Record your thoughts to start building an archive.
             </div>
           )}
         </div>

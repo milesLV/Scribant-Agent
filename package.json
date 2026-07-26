@@ -10,7 +10,7 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "eval": "tsx evals/run.ts",
-    "check": "tsc --noEmit && tsx skills.ts && tsx transcriber.ts && tsx server-utils.ts && tsx workspace-tools.ts && tsx evals/run.ts --selfcheck"
+    "check": "tsc --noEmit && tsx skills.ts && tsx transcriber.ts && tsx server-utils.ts && tsx workspace-tools.ts && tsx agents.ts && tsx src/utils/transcript.ts && tsx evals/run.ts --selfcheck"
   },
   "dependencies": {
     "@google/adk": "^1.3.0",
