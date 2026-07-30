@@ -3,14 +3,22 @@ import Header from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
-import { StreamRun, CalendarEvent, TaskItem, AnalysisResult, ProofResult } from "./types";
+import { StreamRun, CalendarEvent, TaskItem, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
   createGoogleTask,
+  deleteCreatedItem,
   resetSandboxState
 } from "./utils/google-workspace";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { itemId } from "./utils/transcript";
+import { isAutoExecutable } from "./utils/autonomy";
+
+// Which analysis list and id field each undoable kind lives in.
+const UNDO = {
+  calendar: { list: "calendarEvents", idKey: "eventId", where: "Google Calendar" },
+  task: { list: "tasks", idKey: "taskId", where: "Google Tasks" },
+} as const;
 
 // New characters of speech required before the expensive classifier stage re-runs. Below this, the
 // cycle still proofreads and re-summarizes; the previous plan stays on screen. Tune if drafts feel
@@ -45,6 +53,10 @@ export default function App() {
     const parsed: StreamRun[] = JSON.parse(data);
     return parsed.length > 0 ? parsed[0].id : null;
   });
+  const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>(() =>
+    (localStorage.getItem("autonomy_mode") as AutonomyMode) || "consent");
+  const [allowUncertain, setAllowUncertain] = useState<boolean>(() =>
+    localStorage.getItem("autonomy_allow_uncertain") === "true");
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -166,6 +178,18 @@ export default function App() {
       localStorage.removeItem("gcp_client_id");
     }
   }, [clientId]);
+
+  useEffect(() => { localStorage.setItem("autonomy_mode", autonomyMode); }, [autonomyMode]);
+  useEffect(() => { localStorage.setItem("autonomy_allow_uncertain", String(allowUncertain)); }, [allowUncertain]);
+
+  // Default the client ID from the server's credentials.json when none is saved.
+  useEffect(() => {
+    if (clientId) return;
+    fetch("/api/config")
+      .then(r => r.json())
+      .then(d => { if (d.googleClientId) setClientId(d.googleClientId); })
+      .catch(() => {});
+  }, []);
 
   // ONE capture cycle: proofread → summary + plan, streamed back stage by stage. One timer, not one
   // per stage — independent timers race each other and stack up 429s. Deliberately not keyed on
@@ -308,6 +332,11 @@ export default function App() {
 
       const analysis = toAnalysisResult(rawRes, text);
 
+      // Consent-gated autonomy. Finalize only — the live draft re-plans continuously, so running
+      // this there would re-fire the same writes every cycle. Mutates the local object before it
+      // enters state, so the index-based handlers below aren't involved.
+      await autoExecute(analysis);
+
       const newRun: StreamRun = {
         id: `run-${Date.now()}`,
         timestamp: new Date().toISOString(),
@@ -330,6 +359,50 @@ export default function App() {
       showToast(`Analyzer Error: ${error.message || "Failed to process speech intents."}`);
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const runSearch = async (query: string) => {
+    const res = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query })
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || `Search failed (HTTP ${res.status}).`);
+    }
+    const data = await res.json();
+    return { condensed: data.condensed, answer: data.inDepth, sources: data.sources };
+  };
+
+  // Execute whatever the current autonomy mode allows (see isAutoExecutable for the gate), mutating
+  // the analysis in place. A failure marks that item failed but never blocks the rest.
+  const autoExecute = async (analysis: AnalysisResult) => {
+    if (autonomyMode === "manual") return;
+    const groups: { list: any[]; exec: (item: any) => Promise<object>; toast: (item: any) => string }[] = [
+      { list: analysis.calendarEvents,
+        exec: async e => ({ status: "scheduled", eventId: await createCalendarEvent(token, e) }),
+        toast: e => `Auto-scheduled "${e.title}" on Google Calendar, as requested.` },
+      { list: analysis.tasks,
+        exec: async t => ({ status: "created", taskId: await createGoogleTask(token, t) }),
+        toast: t => `Auto-logged "${t.title}" to Google Tasks, as requested.` },
+      { list: analysis.searchQueries,
+        exec: async q => ({ status: "completed", ...(await runSearch(q.query)) }),
+        toast: q => `Auto-searched "${q.query}", as requested.` },
+    ];
+
+    for (const { list, exec, toast } of groups) {
+      for (let i = 0; i < list.length; i++) {
+        const item = list[i];
+        if (!isAutoExecutable(item, autonomyMode, allowUncertain)) continue;
+        try {
+          list[i] = { ...item, ...(await exec(item)) };
+          showToast(toast(item));
+        } catch (err: any) {
+          list[i] = { ...item, status: "failed", error: err.message };
+        }
+      }
     }
   };
 
@@ -402,21 +475,10 @@ export default function App() {
     const queryItem = activeAnalysis?.searchQueries[index];
     if (!queryItem) return;
     try {
-      const res = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: queryItem.query })
-      });
-
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        throw new Error(e.error || `Search failed (HTTP ${res.status}).`);
-      }
-
-      const data = await res.json();
+      const result = await runSearch(queryItem.query);
       updateActiveAnalysis(a => {
         const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { ...queryItem, status: "completed", condensed: data.condensed, answer: data.inDepth, sources: data.sources };
+        searchQueries[index] = { ...queryItem, status: "completed", ...result };
         return { ...a, searchQueries };
       });
       showToast(`Researced facts retrieved for query: "${queryItem.query}"`);
@@ -428,6 +490,26 @@ export default function App() {
         return { ...a, searchQueries };
       });
       showToast(`Facts query search failed: ${err.message}`);
+    }
+  };
+
+  // Undo a created calendar event / task: delete by the id the create returned, then reset the item
+  // to pending so its button comes back.
+  const handleUndo = async (kind: "calendar" | "task", index: number) => {
+    const { list, idKey, where } = UNDO[kind];
+    const item: any = (activeAnalysis as any)?.[list]?.[index];
+    if (!item?.[idKey]) return;
+    try {
+      await deleteCreatedItem(token, kind, item[idKey]);
+      updateActiveAnalysis(a => {
+        const next = [...(a as any)[list]];
+        next[index] = { ...item, status: "pending", [idKey]: undefined };
+        return { ...a, [list]: next };
+      });
+      showToast(`Removed "${item.title}" from ${where}.`);
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Undo failed: ${err.message}`);
     }
   };
 
@@ -498,6 +580,10 @@ export default function App() {
           onSignIn={handleGoogleSignIn}
           showConfig={showSettings}
           onShowConfigChange={setShowSettings}
+          autonomyMode={autonomyMode}
+          onSetAutonomyMode={setAutonomyMode}
+          allowUncertain={allowUncertain}
+          onSetAllowUncertain={setAllowUncertain}
         />
 
         {/* Sync Mode Info Header banner */}
@@ -545,6 +631,8 @@ export default function App() {
             onExecuteCalendar={handleExecuteCalendar}
             onExecuteTask={handleExecuteTask}
             onExecuteSearch={handleExecuteSearch}
+            onUndoCalendar={i => handleUndo("calendar", i)}
+            onUndoTask={i => handleUndo("task", i)}
             onUpdateCalendar={handleUpdateCalendar}
             onUpdateTask={handleUpdateTask}
             isLiveAnalyzing={busy.plan}

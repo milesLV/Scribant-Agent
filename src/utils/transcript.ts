@@ -9,7 +9,7 @@ export function applyCorrections(
   base: string,
   words: Span[],
   corrections: { index: number; from: string; to: string }[],
-  strangeThreshold = 0.7,
+  confidenceThreshold = 0.7,
 ): { text: string; words: Span[] } {
   const looseEq = (a: string, b: string) => a.replace(/\W/g, "").toLowerCase() === b.replace(/\W/g, "").toLowerCase();
   const edits = corrections
@@ -35,7 +35,7 @@ export function applyCorrections(
 
   const flags = words
     .map((w, i) => ({ w, i }))
-    .filter(({ w, i }) => !corrected.has(i) && w.confidence < strangeThreshold)
+    .filter(({ w, i }) => !corrected.has(i) && w.confidence < confidenceThreshold)
     .map(({ w }) => {
       const d = deltas.filter(e => e.at <= w.start).reduce((n, e) => n + e.delta, 0);
       return { ...w, start: w.start + d, end: w.end + d };

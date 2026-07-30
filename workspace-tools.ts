@@ -61,6 +61,19 @@ export async function gtasksCreateTask(token: string, task: TaskInput): Promise<
   return data.id;
 }
 
+// Undo path. 404/410 = already gone, which is the outcome the caller wanted — treat as success.
+async function googleDelete(url: string, token: string): Promise<void> {
+  const res = await fetch(url, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  if (res.ok || res.status === 404 || res.status === 410) return;
+  const data = await res.json().catch(() => ({}));
+  throw new Error(data.error?.message || `Google API error ${res.status}`);
+}
+
+export const gcalDeleteEvent = (token: string, eventId: string) =>
+  googleDelete(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`, token);
+export const gtasksDeleteTask = (token: string, taskId: string) =>
+  googleDelete(`https://www.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`, token);
+
 // ponytail: self-check pins the date-shape logic and the error surface. Run: tsx workspace-tools.ts
 // import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
@@ -96,6 +109,21 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ error: { message: "Invalid Credentials" } }), { status: 401 })) as any;
     await assert.rejects(gcalCreateEvent("bad", { title: "x", start: "2026-07-10T15:00:00" }), /Invalid Credentials/);
+
+    // delete: 204 succeeds, 404 is "already gone" (also success), other errors still throw
+    let delUrl = "";
+    globalThis.fetch = (async (url: any, init: any) => {
+      delUrl = `${init.method} ${url}`;
+      return new Response(null, { status: 204 });
+    }) as any;
+    await gcalDeleteEvent("tok", "evt 1");
+    assert.ok(delUrl.startsWith("DELETE "));
+    assert.ok(delUrl.includes("events/evt%201"), "event id must be URL-encoded");
+    globalThis.fetch = (async () => new Response("{}", { status: 404 })) as any;
+    await gtasksDeleteTask("tok", "gone"); // must not throw
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: { message: "Insufficient Permission" } }), { status: 403 })) as any;
+    await assert.rejects(gtasksDeleteTask("tok", "x"), /Insufficient Permission/);
   } finally {
     globalThis.fetch = realFetch;
   }

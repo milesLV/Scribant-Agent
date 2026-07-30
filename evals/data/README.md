@@ -13,14 +13,14 @@ confusion matrix.
 
 ```bash
 npm run eval                     # everything
-npm run eval -- --file intent-classification    # one dataset (use a .jsonl stem: intent-classification | strange-word-detection | correction-routing | output-quality)
+npm run eval -- --file intent-classification    # one dataset (use a .jsonl stem: intent-classification | misheard-word-detection | correction-routing | output-quality)
 npm run eval -- --tags datetime  # only cases carrying a tag
 npm run eval -- --selfcheck      # grader unit tests, no network / no keys
 npm run eval -- --save-baseline  # snapshot metrics as the regression gate (exits 1 on later regress)
 ```
 
 Metrics emitted: `passRate`, `toolSelectionRate` (correct-category recall),
-`strangeRecall` + `cleanFalseFlagRate` (transcriber flag path),
+`catchRate` + `cleanFalseFlagRate` (transcriber flag path),
 `correctionRecall` + `overCorrections` + `avgWER` (correction router).
 
 ## `intent-classification.jsonl` — Intent Classifier (`/api/analyze`)
@@ -68,7 +68,7 @@ Grading rules:
   outputs: every produced item's `sourceText` must resolve via `locateSpan`
   into the transcript (non-null). No dataset field needed.
 
-## `strange-word-detection.jsonl` — wrong-word detection (`/api/transcribe-correct`)
+## `misheard-word-detection.jsonl` — wrong-word detection (`/api/transcribe-correct`)
 
 ```jsonc
 {
@@ -76,7 +76,7 @@ Grading rules:
   "tags": ["happy", "homophone"],
   "note": "...",
   "text": "Call grandma tomorow about the tickets.",
-  "expectStrange": [ { "match": "tomorow", "suggestionIncludes": "tomorrow" } ],
+  "expectCaught": [ { "match": "tomorow", "suggestionIncludes": "tomorrow" } ],
   "expectClean":   ["grandma", "tickets"]
 }
 ```
@@ -88,7 +88,7 @@ recall + precision at a coarser grain than `correction-routing.jsonl`, which
 tests the flag-vs-correct *decision* itself.
 
 Grading rules:
-- **Recall** — each `expectStrange` word must be detected: either a produced
+- **Recall** — each `expectCaught` word must be detected: either a produced
   `Word` with `confidence < 0.7` or a `corrections` entry whose `from` matches
   `match` (punctuation-insensitive). If `suggestionIncludes` is given, it must
   appear in that word's `alternatives` or the correction's `to`.

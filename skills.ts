@@ -27,6 +27,7 @@ const calendarSkill: Skill = {
    - "start": (string) Start as ISO-8601 (use the current local time to resolve "tomorrow", "tonight", "next week"). For all-day events use the date at 00:00.
    - "end": (string) End as ISO-8601. Default to 30 minutes after start when no duration is implied (for all-day, the same day or the stated span).
    - "uncertain": (boolean)
+   - "explicitCommand": (boolean) true ONLY when the speaker directly instructs that this be put on their calendar ("add that to my calendar", "schedule it for 5pm", "put it on Google Calendar"). Merely mentioning a plan or appointment ("I'm seeing the dentist tomorrow at 3") is NOT a command — that is false.
    - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).`,
   itemSchema: z.object({
     title: z.string().describe("Event summary/title"),
@@ -35,6 +36,7 @@ const calendarSkill: Skill = {
     end: z.string().describe("End time as ISO-8601 string"),
     uncertain: z.boolean().describe("Whether there is uncertainty about the event commitment or details"),
     allDay: z.boolean().describe("True if it spans whole day(s) with no specific clock time"),
+    explicitCommand: z.boolean().describe("True only when the speaker directly instructed adding this to their calendar"),
     sourceText: z.string().describe("Verbatim transcript phrase that triggered this event"),
   }),
 };
@@ -47,6 +49,7 @@ const tasksSkill: Skill = {
    - "notes": (string) Any descriptions, sub-items, or context
    - "dueDate": (string) Deadline as an ISO date "YYYY-MM-DD" if the action is bounded ("today", "by Friday", "before the walk-through" — resolve relative to the current local time); empty string "" if open-ended.
    - "uncertain": (boolean) Set to true if the task itself or its details are vague or uncertain, else false.
+   - "explicitCommand": (boolean) true ONLY when the speaker directly instructs that this be logged ("add that to my to-do list", "put sweeping on my tasks", "remind me to..."). A plain statement of intent ("I need to sweep the floor") is NOT a command — that is false. Also false if they say NOT to add it yet ("don't add that yet").
    - "sourceText": (string) The exact words from the transcript that triggered this task, copied verbatim (not paraphrased).
 GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake event time. Only make a calendar event when being there at that specific time matters, or when it occupies whole days. A flexible action with just a deadline (e.g. "hit the gym sometime next week") is a task (uncertain) with a dueDate, NOT an event.`,
   itemSchema: z.object({
@@ -54,6 +57,7 @@ GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake e
     notes: z.string().describe("Any descriptions, sub-items, or context"),
     uncertain: z.boolean().describe("Whether the task itself or its details are vague or uncertain"),
     dueDate: z.string().describe("Deadline as ISO date YYYY-MM-DD if bounded, else empty string"),
+    explicitCommand: z.boolean().describe("True only when the speaker directly instructed logging this to their to-do list"),
     sourceText: z.string().describe("Verbatim transcript phrase that triggered this task"),
   }),
 };
@@ -63,9 +67,11 @@ const searchSkill: Skill = {
   arrayDescription: "Questions or topics they explicitly mentioned searching or finding info on.",
   description: `(array of objects) ONLY include searchable, well-defined questions or queries (e.g. YES to "I wonder what the most efficient gas mileage for my Toyota Sienna is" or "Where is the best place to eat?"). DO NOT include personal, unsearchable thoughts (e.g. NO to "I wonder what I will eat when I get home" or "What do I have in my fridge?"). Each object must have:
    - "query": (string) The search query text
+   - "explicitCommand": (boolean) true ONLY when the speaker directly asks for the search to be run ("look that up for me", "search for it", "find out for me"). A passing curiosity ("I wonder who designed the Concorde") is NOT a command — that is false.
    - "sourceText": (string) The exact words from the transcript that triggered this query, copied verbatim (not paraphrased).`,
   itemSchema: z.object({
     query: z.string(),
+    explicitCommand: z.boolean().describe("True only when the speaker directly asked for this search to be run"),
     sourceText: z.string().describe("Verbatim transcript phrase that triggered this query"),
   }),
 };
@@ -89,7 +95,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   // Zod object fields are required by default — the shape keys ARE the required list.
   assert.deepEqual(
     Object.keys((props.tasks as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element.shape),
-    ["title", "notes", "uncertain", "dueDate", "sourceText"]
+    ["title", "notes", "uncertain", "dueDate", "explicitCommand", "sourceText"]
   );
   // tasks must stay index 3 (calendar=2) so the calendar criteria's "(see #3)" reference holds.
   assert.equal(SKILLS.findIndex(s => s.name === "tasks"), 1);

@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X } from "lucide-react";
+import { AutonomyMode } from "../types";
 
 interface HeaderProps {
   token: string | null;
@@ -9,7 +10,17 @@ interface HeaderProps {
   onSignIn: () => void;
   showConfig: boolean;
   onShowConfigChange: (open: boolean) => void;
+  autonomyMode: AutonomyMode;
+  onSetAutonomyMode: (mode: AutonomyMode) => void;
+  allowUncertain: boolean;
+  onSetAllowUncertain: (allow: boolean) => void;
 }
+
+const AUTONOMY_OPTIONS: { mode: AutonomyMode; label: string; description: string }[] = [
+  { mode: "manual", label: "Completely Manual", description: "Nothing is ever added automatically — you press every button yourself, even when you say so out loud." },
+  { mode: "consent", label: "On Your Command", description: "The agent acts only when you explicitly say so (\"add that to my to-do list\"); everything else waits for a click." },
+  { mode: "auto", label: "Fully Autonomous", description: "Anything confidently identified is added to your workspace on its own; uncertain items still wait for review." },
+];
 
 export default function Header({
   token,
@@ -18,13 +29,26 @@ export default function Header({
   onSetClientId,
   onSignIn,
   showConfig,
-  onShowConfigChange
+  onShowConfigChange,
+  autonomyMode,
+  onSetAutonomyMode,
+  allowUncertain,
+  onSetAllowUncertain
 }: HeaderProps) {
   const [inputClientId, setInputClientId] = useState(clientId || "");
+  const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
     setInputClientId(clientId || "");
   }, [clientId]);
+
+  // <dialog>.showModal() gives Escape-to-close, the backdrop and a focus trap for free.
+  useEffect(() => {
+    const d = dialogRef.current;
+    if (!d) return;
+    if (showConfig && !d.open) d.showModal();
+    if (!showConfig && d.open) d.close();
+  }, [showConfig]);
 
   const handleSaveClientId = () => {
     onSetClientId(inputClientId.trim());
@@ -77,21 +101,81 @@ export default function Header({
         </div>
       </header>
 
-      {showConfig && (
-        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
-          <div className="flex items-start gap-2.5">
-            <div className="p-1.5 bg-stone-100 border border-stone-200 rounded-lg text-stone-600 mt-0.5">
-              <Info className="w-4 h-4" />
+      <dialog
+        ref={dialogRef}
+        aria-label="Settings"
+        onClose={() => onShowConfigChange(false)}
+        onMouseDown={(e) => { if (e.target === e.currentTarget) onShowConfigChange(false); }}
+        // m-auto: Tailwind's preflight zeroes margins, which kills <dialog>'s default centering.
+        className="w-full max-w-2xl m-auto rounded-2xl bg-transparent p-0 backdrop:bg-stone-900/40 backdrop:backdrop-blur-[2px]"
+      >
+        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-xl space-y-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <div className="p-1.5 bg-stone-100 border border-stone-200 rounded-lg text-stone-600 mt-0.5">
+                <Info className="w-4 h-4" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wider font-mono">Workspace Integration Settings</h3>
+                <p className="text-xs text-stone-500 leading-relaxed font-sans">
+                  By default Scribant runs in <strong>Sandbox Mode (simulated Google APIs)</strong>. Click <strong>Sign in with Google</strong> to use real Calendar and Tasks. To sign in against your own Google Cloud project, set its OAuth Web Client ID below — its authorized redirect URI must match the address shown.
+                </p>
+              </div>
             </div>
-            <div className="space-y-1">
-              <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wider font-mono">Workspace Integration Settings</h3>
-              <p className="text-xs text-stone-500 leading-relaxed font-sans">
-                By default Scribant runs in <strong>Sandbox Mode (simulated Google APIs)</strong>. Click <strong>Sign in with Google</strong> to use real Calendar and Tasks. To sign in against your own Google Cloud project, set its OAuth Web Client ID below — its authorized redirect URI must match the address shown.
-              </p>
+            <button
+              type="button"
+              onClick={() => onShowConfigChange(false)}
+              aria-label="Close settings"
+              className="p-1.5 text-stone-400 hover:text-stone-700 hover:bg-stone-100 rounded-lg transition-colors shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-stone-600 font-sans block">Consent &amp; Autonomy:</label>
+            <div className="flex items-start gap-4">
+              <div className="flex-1 grid grid-cols-3">
+                {AUTONOMY_OPTIONS.map(opt => (
+                  <label
+                    key={opt.mode}
+                    className={`border border-stone-200 px-3 py-2.5 cursor-pointer transition-colors ${
+                      autonomyMode === opt.mode ? "bg-amber-50/40" : "hover:bg-stone-50"
+                    }`}
+                  >
+                    <span className={`block -mx-3 -mt-2.5 mb-2 px-3 py-2 border-b border-stone-200 text-[11px] font-bold font-sans ${
+                      autonomyMode === opt.mode ? "bg-amber-50 text-amber-900" : "bg-stone-50 text-stone-700"
+                    }`}>
+                      {opt.label}
+                    </span>
+                    <span className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="autonomy-mode"
+                        checked={autonomyMode === opt.mode}
+                        onChange={() => onSetAutonomyMode(opt.mode)}
+                        className="mt-0.5 accent-amber-600 shrink-0"
+                      />
+                      <span className="text-[10.5px] text-stone-500 leading-relaxed font-sans">{opt.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {autonomyMode === "auto" && (
+                <label className="flex flex-col items-end gap-2 pt-2 cursor-pointer shrink-0 w-40">
+                  <input
+                    type="checkbox"
+                    checked={allowUncertain}
+                    onChange={(e) => onSetAllowUncertain(e.target.checked)}
+                    className="accent-amber-600"
+                  />
+                  <span className="text-[10.5px] font-semibold text-stone-600 font-sans text-right">Include uncertain items</span>
+                </label>
+              )}
             </div>
           </div>
 
-          <div className="pt-2">
+          <div className="pt-1">
             <div className="space-y-1.5 max-w-md">
               <label className="text-xs font-bold text-stone-600 font-sans block">Google OAuth Client ID:</label>
               <input
@@ -132,7 +216,7 @@ export default function Header({
             </div>
           </div>
         </div>
-      )}
+      </dialog>
 
     </div>
   );

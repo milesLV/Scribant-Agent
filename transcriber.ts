@@ -21,18 +21,18 @@ type Generate = (params: { model: string; contents: string; config?: any }) => P
 // ---- Provider A: obvious correction vs ambiguous flag (the proofread router) ------
 // One LLM pass that ROUTES each suspect word to one of two actions instead of flagging everything:
 //   corrections — obvious typo/grammar with a single unambiguous fix, safe to auto-apply.
-//   strange     — real word likely misheard/wrong-in-context, where the fix is a judgement call -> flag.
+//   flagged     — real word likely misheard/wrong-in-context, where the fix is a judgement call -> flag.
 // Self-corrected phrases ("write, actually written-down") are left alone. Same Word[] seam as above.
 interface Correction { index: number; from: string; to: string; }
 
 const PROOFREAD_CORRECT_INSTRUCTION = `You are a transcription proofreader for spoken brain-dumps. Each word is indexed from 0.
 Route each suspect word to EXACTLY ONE of two actions:
 1. CORRECT — an OBVIOUS error with a single unambiguous fix: a clear misspelling/typo ("tomorow"->"tomorrow") or a clear grammatical slip ("she dont"->"she doesn't"). Put these in "corrections".
-2. FLAG — a real, correctly-spelled word that is likely MISHEARD or wrong in context, where the intended word is a judgement call ("peer" vs "pier", "bored" vs "board"). Put these in "strange" with low confidence + suggestions. Do NOT auto-correct these.
+2. FLAG — a real, correctly-spelled word that is likely MISHEARD or wrong in context, where the intended word is a judgement call ("peer" vs "pier", "bored" vs "board"). Put these in "flagged" with low confidence + suggestions. Do NOT auto-correct these.
 If the speaker already corrected themselves in-line ("write, actually written-down"), leave both words alone.
 Return ONLY JSON:
 { "corrections": [ { "index": <int>, "from": "<as transcribed>", "to": "<corrected>" } ],
-  "strange":     [ { "index": <int>, "word": "<as transcribed>", "confidence": <0..1 how likely CORRECT>, "suggestions": ["<intended>", ...] } ] }
+  "flagged":     [ { "index": <int>, "word": "<as transcribed>", "confidence": <0..1 how likely CORRECT>, "suggestions": ["<intended>", ...] } ] }
 Return empty arrays if the transcript reads fine. Never rewrite clean text.
 For a multi-word PHRASE fix ("frozen cons" -> "pros and cons"), put the WHOLE intended phrase as one string ("to" for a correction, or one "suggestions" entry for a flag) — never split it word-by-word.`;
 
@@ -62,7 +62,7 @@ export async function proofreadAndCorrect(
     if (i >= 0 && tokens[i] && c.to) corrections.push({ index: i, from: tokens[i].text, to: String(c.to) });
   }
 
-  for (const s of parsed.strange || []) {
+  for (const s of parsed.flagged || []) {
     let i = s.index;
     if (!(words[i] && looseEq(words[i].text, s.word))) i = words.findIndex(w => looseEq(w.text, s.word));
     if (i >= 0 && words[i]) {
@@ -92,7 +92,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     const routerGen: Generate = async () => ({
       text: JSON.stringify({
         corrections: [{ index: 2, from: "tomorow", to: "tomorrow" }],
-        strange: [{ index: 1, word: "peer", confidence: 0.4, suggestions: ["pier"] }],
+        flagged: [{ index: 1, word: "peer", confidence: 0.4, suggestions: ["pier"] }],
       }),
     });
     const routed = await proofreadAndCorrect("meet peer tomorow", routerGen);
@@ -104,7 +104,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
 
     // index drift -> both loops fall back to matching by word text
     const driftGen: Generate = async () => ({
-      text: JSON.stringify({ corrections: [{ index: 9, from: "tomorow", to: "tomorrow" }], strange: [{ index: 9, word: "peer", confidence: 0.3 }] }),
+      text: JSON.stringify({ corrections: [{ index: 9, from: "tomorow", to: "tomorrow" }], flagged: [{ index: 9, word: "peer", confidence: 0.3 }] }),
     });
     const drifted = await proofreadAndCorrect("meet peer tomorow", driftGen);
     assert.deepEqual(drifted.corrections, [{ index: 2, from: "tomorow", to: "tomorrow" }]);
