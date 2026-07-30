@@ -1,11 +1,14 @@
-// Transcriber output: one word with a confidence score. confidence < 0.7 = "strange".
+// Transcriber output: one word with a confidence score. confidence < 0.7 = flagged as misheard.
 export interface Word {
   text: string;
   start: number;            // char offset into the transcript text
   end: number;
   confidence: number;       // 0..1
-  alternatives?: string[];  // likely intended words, best first (for strange words)
+  alternatives?: string[];  // likely intended words, best first (for flagged words)
 }
+
+// How much the agent may do on its own: never / only on explicit spoken consent / whenever confident.
+export type AutonomyMode = "manual" | "consent" | "auto";
 
 export interface CalendarEvent {
   id: string;
@@ -19,6 +22,7 @@ export interface CalendarEvent {
   eventId?: string;
   error?: string;
   uncertain?: boolean;
+  explicitCommand?: boolean; // speaker directly instructed this action -> eligible for auto-execute
 }
 
 export interface TaskItem {
@@ -31,6 +35,7 @@ export interface TaskItem {
   taskId?: string;
   error?: string;
   uncertain?: boolean;
+  explicitCommand?: boolean;
 }
 
 interface SearchQueryItem {
@@ -42,6 +47,7 @@ interface SearchQueryItem {
   sources?: { uri: string; title: string }[];
   status: 'pending' | 'completed' | 'failed' | 'skipped';
   error?: string;
+  explicitCommand?: boolean;
 }
 
 // The /api/live proofread stage: the exact text that was scored, plus what to do about it. The

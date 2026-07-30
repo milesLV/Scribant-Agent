@@ -2,15 +2,35 @@ import { useState } from "react";
 import { StreamRun, CalendarEvent, TaskItem } from "../types";
 import {
   Calendar, CheckSquare, Search, FileText, Check,
-  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown
+  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown, Undo2
 } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
+
+// Completed-state chip ("Marked"/"Logged") that turns into an Undo button on hover. Undo deletes
+// exactly the resource this chip's create returned the id for.
+function UndoChip({ label, color, onUndo }: { label: string; color: "emerald" | "purple"; onUndo: () => Promise<void> }) {
+  const palette = {
+    emerald: "text-emerald-700 bg-emerald-100/50 border-emerald-200",
+    purple: "text-purple-700 bg-purple-100/30 border-purple-200/50",
+  }[color];
+  return (
+    <button
+      onClick={onUndo}
+      className={`group/chip text-[11px] font-bold border px-2.5 py-1 rounded-md flex items-center gap-1 transition-colors hover:text-red-700 hover:bg-red-50 hover:border-red-200 ${palette}`}
+    >
+      <span className="flex items-center gap-1 group-hover/chip:hidden"><Check className="w-3.5 h-3.5" /> {label}</span>
+      <span className="hidden items-center gap-1 group-hover/chip:flex"><Undo2 className="w-3.5 h-3.5" /> Undo</span>
+    </button>
+  );
+}
 
 interface ActiveSessionProps {
   run: StreamRun | null;
   onExecuteCalendar: (index: number) => Promise<void>;
   onExecuteTask: (index: number) => Promise<void>;
   onExecuteSearch: (index: number) => Promise<void>;
+  onUndoCalendar: (index: number) => Promise<void>;
+  onUndoTask: (index: number) => Promise<void>;
   onUpdateCalendar: (index: number, updated: CalendarEvent) => void;
   onUpdateTask: (index: number, updated: TaskItem) => void;
   isLiveAnalyzing?: boolean;
@@ -21,6 +41,8 @@ export default function ActiveSession({
   onExecuteCalendar,
   onExecuteTask,
   onExecuteSearch,
+  onUndoCalendar,
+  onUndoTask,
   onUpdateCalendar,
   onUpdateTask,
   isLiveAnalyzing = false
@@ -41,50 +63,37 @@ export default function ActiveSession({
     );
   }
 
-  const handleCalClick = async (idx: number, event: CalendarEvent) => {
-    const confirmed = window.confirm(
-      `Confirm Action: Double-check schedule details.\n\nEvent: ${event.title}\nStarts: ${new Date(event.start).toLocaleString()}\nEnds: ${new Date(event.end).toLocaleString()}\n\nDo you want to confirm and schedule this event on Google Calendar?`
-    );
-    if (!confirmed) return;
-
-    setExecutingCal(idx);
+  // Spinner-on-the-clicked-row for a write: optional confirm, mark the row busy, always clear it.
+  const runOnRow = async (
+    setBusy: (idx: number | null) => void,
+    idx: number,
+    exec: () => Promise<void>,
+    confirmMsg?: string,
+  ) => {
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    setBusy(idx);
     try {
-      await onExecuteCalendar(idx);
+      await exec();
     } finally {
-      setExecutingCal(null);
+      setBusy(null);
     }
   };
 
-  const handleTaskClick = async (idx: number, task: TaskItem) => {
-    const confirmed = window.confirm(
-      `Confirm Action: Log to-do task.\n\nTask: ${task.title}\nNotes: ${task.notes || "None"}\n\nDo you want to push this to Google Tasks?`
-    );
-    if (!confirmed) return;
+  const handleCalClick = (idx: number, event: CalendarEvent) =>
+    runOnRow(setExecutingCal, idx, () => onExecuteCalendar(idx),
+      `Confirm Action: Double-check schedule details.\n\nEvent: ${event.title}\nStarts: ${new Date(event.start).toLocaleString()}\nEnds: ${new Date(event.end).toLocaleString()}\n\nDo you want to confirm and schedule this event on Google Calendar?`);
 
-    setExecutingTask(idx);
-    try {
-      await onExecuteTask(idx);
-    } finally {
-      setExecutingTask(null);
-    }
-  };
+  const handleTaskClick = (idx: number, task: TaskItem) =>
+    runOnRow(setExecutingTask, idx, () => onExecuteTask(idx),
+      `Confirm Action: Log to-do task.\n\nTask: ${task.title}\nNotes: ${task.notes || "None"}\n\nDo you want to push this to Google Tasks?`);
 
-  const handleSearchClick = async (idx: number) => {
-    setExecutingSearch(idx);
-    try {
-      await onExecuteSearch(idx);
-    } finally {
-      setExecutingSearch(null);
-    }
-  };
+  const handleSearchClick = (idx: number) =>
+    runOnRow(setExecutingSearch, idx, () => onExecuteSearch(idx));
 
   const toDatetimeLocalString = (isoString: string): string => {
-    if (!isoString) return "";
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return "";
-    const offset = date.getTimezoneOffset();
-    const localDate = new Date(date.getTime() - offset * 60 * 1000);
-    return localDate.toISOString().slice(0, 16);
+    const d = new Date(isoString);
+    if (!isoString || isNaN(d.getTime())) return "";
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   };
 
   return (
@@ -290,9 +299,7 @@ export default function ActiveSession({
 
                     <div className="shrink-0">
                       {item.status === 'scheduled' ? (
-                        <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100/50 border border-emerald-200 align-center px-2.5 py-1 rounded-md flex items-center gap-1">
-                          <Check className="w-3.5 h-3.5" /> Hooked
-                        </span>
+                        <UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />
                       ) : (
                         <button
                           onClick={() => handleCalClick(idx, item)}
@@ -376,9 +383,7 @@ export default function ActiveSession({
 
                     <div className="shrink-0">
                       {item.status === 'created' ? (
-                        <span className="text-[11px] font-bold text-purple-700 bg-purple-100/30 border border-purple-200/50 align-center px-2.5 py-1 rounded-md flex items-center gap-1">
-                          <Check className="w-3.5 h-3.5" /> Logged
-                        </span>
+                        <UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />
                       ) : (
                         <button
                           onClick={() => handleTaskClick(idx, item)}

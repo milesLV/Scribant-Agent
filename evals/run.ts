@@ -19,7 +19,7 @@ import { GoogleGenAI } from "@google/genai";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(HERE, "data");
 const BASE = process.env.EVAL_BASE_URL || "http://localhost:3000";
-const STRANGE_THRESHOLD = 0.7;
+const CONFIDENCE_THRESHOLD = 0.7;
 
 // ---- tiny helpers ----------------------------------------------------------
 const norm = (s: string) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -100,6 +100,9 @@ function checkItemFields(item: any, raw: any, fails: string[]) {
     const d = String(raw.dueDate || "").slice(0, 10);
     if (d !== item.dueDate) fails.push(`dueDate '${item.match}': want ${item.dueDate} got ${d || "(empty)"}`);
   }
+  // Consent is the gate on auto-execution, so claiming it when the speaker never gave it is a fail.
+  if (item.explicitCommand !== undefined && !!raw.explicitCommand !== !!item.explicitCommand)
+    fails.push(`explicitCommand '${item.match}': want ${item.explicitCommand} got ${!!raw.explicitCommand}`);
 }
 function gradeIntent(c: any, out: any, mat: Record<string, Record<string, number>>) {
   const fails: string[] = [];
@@ -142,16 +145,16 @@ function gradeTranscriber(c: any, out: any) {
   const fails: string[] = [];
   // The router "notices" a wrong word two ways: it FLAGS the ambiguous ones (low-confidence words)
   // or AUTO-CORRECTS the obvious typos. Either counts as detection; clean words must get neither.
-  const flagged = (out.words || []).filter((w: any) => w.confidence < STRANGE_THRESHOLD);
+  const flagged = (out.words || []).filter((w: any) => w.confidence < CONFIDENCE_THRESHOLD);
   const corrections = out.corrections || [];
   const noticed = new Set<string>([...flagged.map((w: any) => tok(w.text)[0]), ...corrections.map((cc: any) => tok(cc.from)[0])]);
-  let strangeHit = 0;
-  for (const es of c.expectStrange || []) {
+  let caughtHit = 0;
+  for (const es of c.expectCaught || []) {
     const mtokens = tok(es.match);
     const fHits = flagged.filter((w: any) => mtokens.includes(tok(w.text)[0]));
     const cHits = corrections.filter((cc: any) => mtokens.includes(tok(cc.from)[0]));
     if (fHits.length === 0 && cHits.length === 0) { fails.push(`not detected: '${es.match}'`); continue; }
-    strangeHit++;
+    caughtHit++;
     if (es.suggestionIncludes) {
       const alts = [...fHits.flatMap((h: any) => h.alternatives || []), ...cHits.map((cc: any) => cc.to)].join(" | ").toLowerCase();
       if (!alts.includes(es.suggestionIncludes.toLowerCase()))
@@ -164,7 +167,7 @@ function gradeTranscriber(c: any, out: any) {
   }
   return {
     kind: "transcriber", id: c.id, note: c.note, pass: fails.length === 0, fails,
-    strangeExpected: (c.expectStrange || []).length, strangeHit,
+    caughtExpected: (c.expectCaught || []).length, caughtHit,
     cleanTotal: (c.expectClean || []).length, cleanFalse,
   };
 }
@@ -173,7 +176,7 @@ function gradeTranscriber(c: any, out: any) {
 function gradeCorrection(c: any, out: any) {
   const fails: string[] = [];
   const corrections = out.corrections || [];
-  const flagged = (out.words || []).filter((w: any) => w.confidence < STRANGE_THRESHOLD);
+  const flagged = (out.words || []).filter((w: any) => w.confidence < CONFIDENCE_THRESHOLD);
 
   let correctHit = 0;
   for (const ec of c.expect.correct || []) {
@@ -283,8 +286,9 @@ async function runLive(filter: { file?: string; tags?: string[] }) {
   // One row per dataset: which file, its result `kind`, and how to run+grade a case. The per-suite
   // variance (endpoint, request shape, grader) lives in `run`; the loop is shared.
   const suites: { file: string; kind: string; run: (c: any) => Promise<any> }[] = [
-    { file: "intent-classification.jsonl", kind: "intent", run: async c => gradeIntent(c, await analyze(c), mat) },
-    { file: "strange-word-detection.jsonl", kind: "transcriber", run: async c => gradeTranscriber(c, await post("/api/transcribe-correct", { text: c.text })) },
+    ...["intent-classification.jsonl", "explicit-consent.jsonl"].map(file => ({
+      file, kind: "intent", run: async (c: any) => gradeIntent(c, await analyze(c), mat) })),
+    { file: "misheard-word-detection.jsonl", kind: "transcriber", run: async c => gradeTranscriber(c, await post("/api/transcribe-correct", { text: c.text })) },
     { file: "correction-routing.jsonl", kind: "correction", run: async c => gradeCorrection(c, await post("/api/transcribe-correct", { text: c.text })) },
     { file: "output-quality.jsonl", kind: "tooloutput", run: async c => {
       const out = c.query ? await post("/api/search", { query: c.query }) : await analyze(c);
@@ -318,7 +322,7 @@ async function runLive(filter: { file?: string; tags?: string[] }) {
     cases: results.length,
     passRate: results.length ? results.filter(r => r.pass).length / results.length : 1,
     toolSelectionRate: sum(intent, "expectedCount") ? sum(intent, "correct") / sum(intent, "expectedCount") : 1,
-    strangeRecall: sum(tr, "strangeExpected") ? sum(tr, "strangeHit") / sum(tr, "strangeExpected") : 1,
+    catchRate: sum(tr, "caughtExpected") ? sum(tr, "caughtHit") / sum(tr, "caughtExpected") : 1,
     cleanFalseFlagRate: sum(tr, "cleanTotal") ? sum(tr, "cleanFalse") / sum(tr, "cleanTotal") : 0,
     correctionRecall: sum(cor, "correctExpected") ? sum(cor, "correctHit") / sum(cor, "correctExpected") : 1,
     overCorrections: sum(cor, "overCorrect"),
@@ -337,7 +341,7 @@ async function runLive(filter: { file?: string; tags?: string[] }) {
     const base = JSON.parse(readFileSync(baseFile, "utf8"));
     let regressed = false;
     console.log("\nvs baseline:");
-    for (const k of ["passRate", "toolSelectionRate", "strangeRecall"]) {
+    for (const k of ["passRate", "toolSelectionRate", "catchRate"]) {
       const d = metrics[k] - (base[k] ?? 0);
       if (d < -0.001) regressed = true;
       console.log(`  ${k.padEnd(20)} ${d >= 0 ? "+" : ""}${d.toFixed(3)}`);
@@ -379,18 +383,30 @@ function selfCheck() {
     { calendarEvents: [], tasks: [{ title: "Buy milk", sourceText: "purchase dairy products", uncertain: false }], searchQueries: [] }, m4);
   assert.ok(fabricated.fails.some(f => f.includes("sourceText not in transcript")), "catches fabricated sourceText");
 
+  // explicitCommand: claiming consent the speaker never gave must fail the case
+  const m5 = emptyMatrix();
+  const ec = gradeIntent(
+    { id: "e", transcript: "I need to sweep the floor.", expect: { calendar: [], tasks: [{ match: "sweep", explicitCommand: false }], search: [] } },
+    { calendarEvents: [], tasks: [{ title: "Sweep the floor", sourceText: "I need to sweep the floor", uncertain: false, explicitCommand: true }], searchQueries: [] }, m5);
+  assert.equal(ec.pass, false, "unconsented explicitCommand should fail");
+  const m6 = emptyMatrix();
+  const ec2 = gradeIntent(
+    { id: "e2", transcript: "I need to sweep the floor, add that to my to do list.", expect: { calendar: [], tasks: [{ match: "sweep", explicitCommand: true }], search: [] } },
+    { calendarEvents: [], tasks: [{ title: "Sweep the floor", sourceText: "add that to my to do list", uncertain: false, explicitCommand: true }], searchQueries: [] }, m6);
+  assert.equal(ec2.pass, true, "consented explicitCommand should pass");
+
   const g = gradeTranscriber(
-    { expectStrange: [{ match: "tomorow", suggestionIncludes: "tomorrow" }], expectClean: ["grandma"] },
+    { expectCaught: [{ match: "tomorow", suggestionIncludes: "tomorrow" }], expectClean: ["grandma"] },
     { words: [{ text: "grandma", confidence: 1 }, { text: "tomorow", confidence: 0.3, alternatives: ["tomorrow"] }] });
-  assert.equal(g.pass, true, "flagged strange word should pass");
+  assert.equal(g.pass, true, "flagged word should pass");
 
   // obvious typo arrives as a correction (not a flag) -> still counts as detected
   const gc = gradeTranscriber(
-    { expectStrange: [{ match: "tomorow", suggestionIncludes: "tomorrow" }], expectClean: ["grandma"] },
+    { expectCaught: [{ match: "tomorow", suggestionIncludes: "tomorrow" }], expectClean: ["grandma"] },
     { words: [{ text: "grandma", confidence: 1 }, { text: "tomorow", confidence: 1 }], corrections: [{ index: 1, from: "tomorow", to: "tomorrow" }] });
   assert.equal(gc.pass, true, "auto-corrected word counts as detected");
 
-  const gp = gradeTranscriber({ expectStrange: [], expectClean: ["Kubernetes"] }, { words: [{ text: "Kubernetes", confidence: 0.4 }] });
+  const gp = gradeTranscriber({ expectCaught: [], expectClean: ["Kubernetes"] }, { words: [{ text: "Kubernetes", confidence: 0.4 }] });
   assert.equal(gp.pass, false, "false positive on clean word should fail");
   assert.equal(gp.cleanFalse, 1);
 

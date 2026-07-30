@@ -4,9 +4,9 @@ import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
 import { applyCorrections } from "../utils/transcript";
 
-// confidence below this = "strange" (misheard). Same value as applyCorrections' strangeThreshold
+// confidence below this = misheard. Same value as applyCorrections' confidenceThreshold
 // default in utils/transcript.ts and the eval grader.
-const STRANGE_THRESHOLD = 0.7;
+const CONFIDENCE_THRESHOLD = 0.7;
 
 // The capture cycle lives in App (one debounce timer → /api/live). This component owns the
 // transcript and the correction-splicing that keeps highlight offsets valid; it receives finished
@@ -59,10 +59,10 @@ export default function AudioRecorder({
 
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
 
-  // Strange-word proofread state. `words` are scored against the exact text in proofedTextRef
+  // Misheard-word proofread state. `words` are scored against the exact text in proofedTextRef
   // (offsets index into it), so corrections splice safely even as the live transcript moves on.
   const [words, setWords] = useState<Word[] | null>(null);
-  const [activeStrange, setActiveStrange] = useState<number | null>(null);
+  const [activeChip, setActiveChip] = useState<number | null>(null);
   const proofedTextRef = useRef("");
 
   const recognitionRef = useRef<any>(null);
@@ -91,10 +91,10 @@ export default function AudioRecorder({
     proofedTextRef.current = corrected;
     if (corrected !== base) setTranscript(corrected + current.slice(base.length));
     setWords(flags.length ? flags : null);
-    setActiveStrange(null);
+    setActiveChip(null);
   }, [proofResult]);
 
-  // Swap a strange word for one of its suggestions. Splice into the proofed text and shift every
+  // Swap a misheard word for one of its suggestions. Splice into the proofed text and shift every
   // later word's offsets by the length delta, so the OTHER highlights survive the edit intact.
   const correctWord = (i: number, replacement: string) => {
     if (!words) return;
@@ -111,13 +111,13 @@ export default function AudioRecorder({
     proofedTextRef.current = newBase;
     setWords(newWords);
     setTranscript(newBase + tail);
-    setActiveStrange(null);
+    setActiveChip(null);
   };
 
   // "It's fine" — keep the word as transcribed and clear its highlight.
   const keepWord = (i: number) => {
     setWords(ws => ws ? ws.map((w, j) => j === i ? { ...w, confidence: 1 } : w) : ws);
-    setActiveStrange(null);
+    setActiveChip(null);
   };
 
   // Scores stay valid as long as the proofed text is still the HEAD of the transcript — appends
@@ -125,7 +125,7 @@ export default function AudioRecorder({
   useEffect(() => {
     if (words && proofedTextRef.current && !transcript.startsWith(proofedTextRef.current)) {
       setWords(null);
-      setActiveStrange(null);
+      setActiveChip(null);
     }
   }, [transcript, words]);
 
@@ -149,7 +149,7 @@ export default function AudioRecorder({
       setInterimTranscript("");
       setIsEditingTranscript(false);
       setWords(null);
-      setActiveStrange(null);
+      setActiveChip(null);
       proofedTextRef.current = "";
     }
   }, [clearSignal]);
@@ -279,13 +279,13 @@ export default function AudioRecorder({
     setInterimTranscript("");
     setIsEditingTranscript(false);
     setWords(null);
-    setActiveStrange(null);
+    setActiveChip(null);
     proofedTextRef.current = "";
   };
 
-  const strangeCount = words ? words.filter(w => w.confidence < STRANGE_THRESHOLD).length : 0;
+  const flagCount = words ? words.filter(w => w.confidence < CONFIDENCE_THRESHOLD).length : 0;
 
-  // Render the proofed transcript with strange words as clickable correction chips.
+  // Render the proofed transcript with misheard words as clickable correction chips.
   const renderProofed = () => {
     const base = proofedTextRef.current;
     const out: React.ReactNode[] = [];
@@ -293,7 +293,7 @@ export default function AudioRecorder({
     words!.forEach((w, i) => {
       if (w.start > cursor) out.push(<span key={`g${i}`}>{base.slice(cursor, w.start)}</span>);
       cursor = w.end;
-      if (w.confidence >= STRANGE_THRESHOLD) {
+      if (w.confidence >= CONFIDENCE_THRESHOLD) {
         out.push(<span key={`w${i}`}>{base.slice(w.start, w.end)}</span>);
         return;
       }
@@ -302,13 +302,13 @@ export default function AudioRecorder({
         <span key={`w${i}`} className="relative inline-block">
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); setActiveStrange(activeStrange === i ? null : i); }}
+            onClick={(e) => { e.stopPropagation(); setActiveChip(activeChip === i ? null : i); }}
             title="Possibly misheard — click to correct"
             className="bg-amber-100 text-amber-900 rounded px-0.5 underline decoration-wavy decoration-amber-400 decoration-1 cursor-pointer hover:bg-amber-200 transition-colors"
           >
             {base.slice(w.start, w.end)}
           </button>
-          {activeStrange === i && (
+          {activeChip === i && (
             <span
               onClick={(e) => e.stopPropagation()}
               className="absolute z-20 left-0 top-full mt-1 min-w-[120px] bg-white border border-stone-200 rounded-lg shadow-lg p-1 flex flex-col text-left"
@@ -426,9 +426,9 @@ export default function AudioRecorder({
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {strangeCount > 0 && !isEditingTranscript && (
+              {flagCount > 0 && !isEditingTranscript && (
                 <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
-                  {strangeCount} strange
+                  {flagCount} misheard
                 </span>
               )}
               {!useKeyboard && (

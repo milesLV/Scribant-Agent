@@ -1,12 +1,13 @@
 import express from "express";
 import path from "path";
+import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
 import "dotenv/config";
 import { proofreadAndCorrect } from "./transcriber";
 import { cleanJsonString, splitTiers, resolvePlanDates } from "./server-utils";
 import { applyCorrections } from "./src/utils/transcript";
-import { gcalCreateEvent, gtasksCreateTask } from "./workspace-tools";
+import { gcalCreateEvent, gtasksCreateTask, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { KEYS, askAgent, intentClassifier, liveSummarizer, proofreader, groundedSearcher } from "./agents";
 
 const app = express();
@@ -33,6 +34,17 @@ const runClassifier = async (text: string, liveSummary: string, refISO: string) 
     )).text || "{}")),
     refISO,
   );
+
+// Saves the user pasting their own client ID: serve the one already in credentials.json. client_id
+// only — it is public by design in the implicit flow, and the secret never leaves the server.
+app.get("/api/config", async (_req, res) => {
+  try {
+    const creds = JSON.parse(await fs.readFile(path.join(process.cwd(), "credentials.json"), "utf-8"));
+    res.json({ googleClientId: (creds.installed ?? creds.web)?.client_id ?? null });
+  } catch {
+    res.json({ googleClientId: null });
+  }
+});
 
 app.post("/api/analyze", async (req, res) => {
   try {
@@ -159,9 +171,24 @@ app.post("/api/search", async (req, res) => {
 // reaches here (the client simulates locally when signed out).
 app.post("/api/execute", async (req, res) => {
   try {
-    const { kind, item, accessToken } = req.body;
+    const { kind, item, accessToken, action, id } = req.body;
     if (!accessToken || typeof accessToken !== "string") {
       res.status(400).json({ error: "accessToken is required (sandbox mode executes client-side)." });
+      return;
+    }
+    // Undo: delete exactly the resource a previous create returned the id for.
+    if (action === "delete") {
+      const del = { calendar: gcalDeleteEvent, task: gtasksDeleteTask }[kind as string];
+      if (!del) {
+        res.status(400).json({ error: `Unknown kind "${kind}" (expected "calendar" or "task").` });
+        return;
+      }
+      if (!id || typeof id !== "string") {
+        res.status(400).json({ error: "delete requires the created resource id." });
+        return;
+      }
+      await del(accessToken, id);
+      res.json({ ok: true });
       return;
     }
     if (!item || typeof item !== "object" || typeof item.title !== "string" || !item.title) {
