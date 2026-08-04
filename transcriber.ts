@@ -26,13 +26,17 @@ type Generate = (params: { model: string; contents: string; config?: any }) => P
 interface Correction { index: number; from: string; to: string; }
 
 const PROOFREAD_CORRECT_INSTRUCTION = `You are a transcription proofreader for spoken brain-dumps. Each word is indexed from 0.
-Route each suspect word to EXACTLY ONE of two actions:
+Route each suspect word to EXACTLY ONE of three actions:
 1. CORRECT — an OBVIOUS error with a single unambiguous fix: a clear misspelling/typo ("tomorow"->"tomorrow") or a clear grammatical slip ("she dont"->"she doesn't"). Put these in "corrections".
 2. FLAG — a real, correctly-spelled word that is likely MISHEARD or wrong in context, where the intended word is a judgement call ("peer" vs "pier", "bored" vs "board"). Put these in "flagged" with low confidence + suggestions. Do NOT auto-correct these.
+3. DELETE — a STRAY word the speech recogniser invented next to the word it garbled, so the sentence reads correctly only once it is removed: a false start ("I went to the stork store" -> drop "stork"), a phonetic near-duplicate ("I am reeling reading a book" -> drop "reeling"), a partial word ("the caf- cafe" -> drop "caf-"), or an accidental stutter ("I need to to go" -> drop one "to"). Put these in "deletions".
+   DELETE IS DESTRUCTIVE — only use it when the neighbouring word is clearly the intended one and the stray word contributes NOTHING. When in doubt, FLAG instead.
+   NEVER delete a deliberate repetition or a word that carries meaning: "it was very very cold" (emphasis), "I had had enough" (grammar), "New York, New York" (a real name), "it is what it is" — all of these must be left completely alone.
 If the speaker already corrected themselves in-line ("write, actually written-down"), leave both words alone.
 Return ONLY JSON:
 { "corrections": [ { "index": <int>, "from": "<as transcribed>", "to": "<corrected>" } ],
-  "flagged":     [ { "index": <int>, "word": "<as transcribed>", "confidence": <0..1 how likely CORRECT>, "suggestions": ["<intended>", ...] } ] }
+  "flagged":     [ { "index": <int>, "word": "<as transcribed>", "confidence": <0..1 how likely CORRECT>, "suggestions": ["<intended>", ...] } ],
+  "deletions":   [ { "index": <int>, "word": "<as transcribed>" } ] }
 Return empty arrays if the transcript reads fine. Never rewrite clean text.
 For a multi-word PHRASE fix ("frozen cons" -> "pros and cons"), put the WHOLE intended phrase as one string ("to" for a correction, or one "suggestions" entry for a flag) — never split it word-by-word.`;
 
@@ -62,6 +66,20 @@ export async function proofreadAndCorrect(
     if (i >= 0 && tokens[i] && c.to) corrections.push({ index: i, from: tokens[i].text, to: String(c.to) });
   }
 
+  // Deletions fold into `corrections` as an empty `to`, so every downstream consumer keeps iterating
+  // ONE array. The model proposing a delete is not enough — isDisfluency has to agree the token looks
+  // like an artifact of a neighbour. Note the `c.to` truthiness guard above stays intact: a malformed
+  // correction with a blank `to` is still dropped rather than being read as "delete this".
+  for (const d of parsed.deletions || []) {
+    let i = d.index;
+    if (!(tokens[i] && looseEq(tokens[i].text, d.word))) i = tokens.findIndex(t => looseEq(t.text, d.word));
+    if (i < 0 || !tokens[i]) continue;
+    if (corrections.some(c => c.index === i)) continue;   // already being rewritten; two edits would corrupt offsets
+    const neighbours = [tokens[i - 1]?.text, tokens[i + 1]?.text].filter(Boolean) as string[];
+    if (!isDisfluency(tokens[i].text, neighbours)) continue;
+    corrections.push({ index: i, from: tokens[i].text, to: "" });
+  }
+
   for (const s of parsed.flagged || []) {
     let i = s.index;
     if (!(words[i] && looseEq(words[i].text, s.word))) i = words.findIndex(w => looseEq(w.text, s.word));
@@ -76,6 +94,39 @@ export async function proofreadAndCorrect(
 // ---- helpers ----
 function looseEq(a: string, b: string): boolean {
   return a.replace(/\W/g, "").toLowerCase() === b.replace(/\W/g, "").toLowerCase();
+}
+
+// Levenshtein, char-level. Small inputs (single words), so the plain O(n*m) table is fine.
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++)
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j], cur[j - 1], prev[j - 1]);
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// Deleting a word is destructive and irreversible from the user's side, so a RULE — not the model —
+// decides what may be deleted at all: a token only qualifies as a transcription artifact when a
+// neighbour looks like the word it garbled ("stork store", "reeling reading", "to to").
+//
+// This bounds the blast radius to "adjacent to something similar"; it is deliberately NOT sufficient
+// on its own. An intentional repeat ("very very cold") passes this guard by design — rejecting THAT
+// is the prompt's job. Guard limits the damage, prompt handles the intent; both are load-bearing.
+export function isDisfluency(word: string, neighbours: string[]): boolean {
+  const a = word.replace(/\W/g, "").toLowerCase();
+  if (!a) return false;
+  return neighbours.some(raw => {
+    const b = raw.replace(/\W/g, "").toLowerCase();
+    if (!b) return false;
+    if (a === b) return true;                                     // exact accidental repeat
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    if (p < 2) return false;                                      // must share a real prefix
+    return editDistance(a, b) <= Math.floor(Math.min(a.length, b.length) / 2);
+  });
 }
 function clamp(n: number): number {
   return Math.max(0, Math.min(1, n));
@@ -109,6 +160,45 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     const drifted = await proofreadAndCorrect("meet peer tomorow", driftGen);
     assert.deepEqual(drifted.corrections, [{ index: 2, from: "tomorow", to: "tomorrow" }]);
     assert.equal(drifted.words[1].confidence, 0.3);
+
+    // --- disfluency guard: what the model is ALLOWED to delete, independent of what it asks for ---
+    assert.equal(isDisfluency("stork", ["the", "store"]), true, "false start vs its target");
+    assert.equal(isDisfluency("reeling", ["am", "reading"]), true, "phonetic near-duplicate");
+    assert.equal(isDisfluency("caf-", ["the", "cafe"]), true, "partial word");
+    assert.equal(isDisfluency("to", ["to", "go"]), true, "exact stutter");
+    assert.equal(isDisfluency("elephant", ["the", "store"]), false, "unrelated word is not an artifact");
+    assert.equal(isDisfluency("very", ["was", "very"]), true, "intentional repeat PASSES the guard by design");
+
+    // deletions fold into corrections as an empty `to`
+    const delGen: Generate = async () => ({
+      text: JSON.stringify({ corrections: [], flagged: [], deletions: [{ index: 4, word: "stork" }] }),
+    });
+    const deleted = await proofreadAndCorrect("I went to the stork store", delGen);
+    assert.deepEqual(deleted.corrections, [{ index: 4, from: "stork", to: "" }]);
+
+    // the guard overrides the model: deleting an unrelated word is refused
+    const badGen: Generate = async () => ({
+      text: JSON.stringify({ corrections: [], flagged: [], deletions: [{ index: 4, word: "elephant" }] }),
+    });
+    const refused = await proofreadAndCorrect("I went to the elephant store", badGen);
+    assert.deepEqual(refused.corrections, [], "guard refuses to delete a real word");
+
+    // a blank `to` on a CORRECTION is still malformed input, not a delete
+    const blankGen: Generate = async () => ({
+      text: JSON.stringify({ corrections: [{ index: 4, from: "stork", to: "" }], flagged: [] }),
+    });
+    const blank = await proofreadAndCorrect("I went to the stork store", blankGen);
+    assert.deepEqual(blank.corrections, [], "blank `to` on a correction is dropped, not treated as delete");
+
+    // same token both corrected and deleted -> the correction wins, one edit only
+    const clashGen: Generate = async () => ({
+      text: JSON.stringify({
+        corrections: [{ index: 4, from: "stork", to: "stock" }], flagged: [],
+        deletions: [{ index: 4, word: "stork" }],
+      }),
+    });
+    const clash = await proofreadAndCorrect("I went to the stork store", clashGen);
+    assert.deepEqual(clash.corrections, [{ index: 4, from: "stork", to: "stock" }], "no double edit on one token");
 
     console.log("transcriber self-check ✓");
   })();

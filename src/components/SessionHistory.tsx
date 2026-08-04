@@ -38,7 +38,6 @@ export default function SessionHistory({
         <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
           {runs.map((run) => {
             const isSelected = run.id === selectedRunId;
-            const hasAnalysis = !!run.analysis;
 
             return (
               <button
@@ -66,7 +65,7 @@ export default function SessionHistory({
                     {run.rawText}
                   </p>
 
-                  {hasAnalysis && run.analysis && (
+                  {run.analysis && (
                     <div className="flex items-center gap-3 pt-2 text-[10px] font-mono text-stone-400 flex-wrap">
                       <span className="bg-amber-500/10 text-amber-800 font-sans px-1.5 py-0.2 rounded text-[9.5px] font-extrabold flex items-center gap-0.5 border border-amber-200/20">
                         TOPIC: {run.analysis.organizedFolder}

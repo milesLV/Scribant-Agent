@@ -3,15 +3,13 @@
 // self-check — a wrong operator here schedules things nobody consented to.
 import { AutonomyMode } from "../types";
 
-interface Executable {
-  status: string;
-  uncertain?: boolean;
-  explicitCommand?: boolean;
-}
-
 // manual: nothing, ever. consent: only what the speaker explicitly commanded, and only if the model
 // was confident about it. auto: anything confident, or literally everything when allowUncertain.
-export function isAutoExecutable(item: Executable, mode: AutonomyMode, allowUncertain: boolean): boolean {
+export function isAutoExecutable(
+  item: { status: string; uncertain?: boolean; explicitCommand?: boolean },
+  mode: AutonomyMode,
+  allowUncertain: boolean,
+): boolean {
   if (mode === "manual") return false;
   if (item.status !== "pending") return false;
   if (mode === "auto") return allowUncertain || !item.uncertain;

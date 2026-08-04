@@ -97,15 +97,6 @@ export default function App() {
     organizedFolder: rawRes.organizedFolderName || "Session Notes"
   });
 
-  // Finalize: the full classifier pass behind the "Analyze Thoughts" button. The capture loop uses
-  // /api/live instead, so this runs once per session and is never cancelled.
-  const postAnalyze = (text: string) =>
-    fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary }),
-    });
-
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
   const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) => {
     if (selectedRunId === "live-draft") {
@@ -322,7 +313,13 @@ export default function App() {
     }
 
     try {
-      const res = await postAnalyze(text);
+      // Finalize: the full classifier pass behind the "Analyze Thoughts" button. The capture loop
+      // uses /api/live instead, so this runs once per session and is never cancelled.
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary }),
+      });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || "Brain dump categorization failed.");
@@ -536,15 +533,6 @@ export default function App() {
     }
   };
 
-  const handleClearSandbox = () => {
-    if (window.confirm("Are you sure you want to completely reset the Offline Sandbox database (clears mockup files, events & tasks)?")) {
-      resetSandboxState();
-      setRuns([]);
-      setSelectedRunId(null);
-      showToast("Offline Sandbox data database reset successfully.");
-    }
-  };
-
   const selectedRun = runs.find(r => r.id === selectedRunId);
 
   const displayedRun: StreamRun | null = selectedRunId === "live-draft"
@@ -642,25 +630,11 @@ export default function App() {
         {/* Brain Dump Archive: moved all the way to the bottom of the screen */}
         <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
           {runs.length > 0 ? (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              <div className="lg:col-span-9">
-                <SessionHistory 
-                  runs={runs} 
-                  selectedRunId={selectedRunId} 
-                  onSelectRun={setSelectedRunId} 
-                />
-              </div>
-              <div className="lg:col-span-3">
-                {!token && (
-                  <button
-                    onClick={handleClearSandbox}
-                    className="w-full py-3 text-[11px] font-bold text-stone-400 hover:text-stone-650 hover:bg-stone-50 hover:border-stone-300 border border-dashed border-stone-200 rounded-xl transition-all cursor-pointer text-center"
-                  >
-                    Reset Offline Sandbox databases
-                  </button>
-                )}
-              </div>
-            </div>
+            <SessionHistory
+              runs={runs}
+              selectedRunId={selectedRunId}
+              onSelectRun={setSelectedRunId}
+            />
           ) : (
             <div className="bg-white/40 border border-stone-200/50 rounded-2xl p-5 text-center text-xs text-stone-400 italic">
               No past sessions yet. Record your thoughts to start building an archive.

@@ -98,17 +98,11 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
   return executeOnServer("task", { title, notes, dueDate }, token);
 }
 
-// Which sandbox list + id field each undoable kind lives in.
-const SANDBOX_KEYS = {
-  calendar: ["events", "eventId"],
-  task: ["tasks", "taskId"],
-} as const;
-
 // Undo a create: real mode deletes via /api/execute by the exact id the create returned; sandbox
 // drops the matching entry from local state.
 export async function deleteCreatedItem(token: string | null, kind: "calendar" | "task", id: string): Promise<void> {
   if (!token) {
-    const [list, idKey] = SANDBOX_KEYS[kind];
+    const [list, idKey] = kind === "calendar" ? ["events", "eventId"] as const : ["tasks", "taskId"] as const;
     const state = getSandboxState();
     state[list] = (state[list] as any[]).filter(x => x[idKey] !== id);
     saveSandboxState(state);
