@@ -98,7 +98,21 @@ Grading rules:
 ## `correction-routing.jsonl` — correct-vs-flag router (`/api/transcribe-correct`)
 
 Tests the routing decision: obvious typo/grammar → **auto-correct**; ambiguous
-mishearing → **flag** (low-confidence); already self-corrected → **do nothing**.
+mishearing → **flag** (low-confidence); recogniser disfluency → **delete**;
+already self-corrected → **do nothing**.
+
+A **deletion** is written as a correction with an empty `to` — the same shape the
+pipeline uses internally, where deletions fold into the one `corrections` array
+(see `isDisfluency` in `transcriber.ts`):
+
+```jsonc
+"expect": { "correct": [ { "from": "stork", "to": "" } ], "flag": [] }
+```
+
+Deletion is destructive, so the `disfluency` cases are half true-positives
+(`stork store`, `reeling reading`, doubled `to`, partial `caf-`) and half
+**precision traps** tagged `precision` (`very very`, `had had`, `New York, New
+York`) where any deletion at all is a failure via the over-correction rule.
 
 ```jsonc
 {

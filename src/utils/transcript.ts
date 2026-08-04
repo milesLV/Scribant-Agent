@@ -24,10 +24,19 @@ export function applyCorrections(
   for (const { c, w } of edits) {
     const lead = w.text.match(/^[^0-9A-Za-z]+/)?.[0] ?? "";
     const trail = w.text.match(/[^0-9A-Za-z]+$/)?.[0] ?? "";
-    const replacement = lead + c.to + trail;
-    const start = w.start + shift, end = w.end + shift;
-    text = text.slice(0, start) + replacement + text.slice(end);
-    const delta = replacement.length - (w.end - w.start);
+    // Removal range in ORIGINAL coordinates; `shift` maps it onto the text edited so far.
+    let from = w.start, to = w.end, replacement = lead + c.to + trail;
+    if (c.to === "") {
+      // A deletion drops the word AND one adjacent space, else "the stork store" leaves "the  store".
+      // Punctuation-bearing tokens are never deleted: removing "stork." from "I saw the stork." would
+      // take the period with it and leave "I saw the".
+      if (lead || trail) continue;
+      if (base[from - 1] === " ") from -= 1;
+      else if (base[to] === " ") to += 1;
+      replacement = "";
+    }
+    text = text.slice(0, from + shift) + replacement + text.slice(to + shift);
+    const delta = replacement.length - (to - from);
     deltas.push({ at: w.end, delta });
     shift += delta;
     corrected.add(c.index);
@@ -82,6 +91,37 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("transcript.ts")
   const r2 = applyCorrections("bye pier", w2, [{ index: 0, from: "bye", to: "goodbye" }]);
   eq(r2.text, "goodbye pier", "correction lengthened text");
   eq(r2.words, [{ text: "pier", start: 8, end: 12, confidence: 0.4, alternatives: ["peer"] }], "flag offset shifted +4");
+
+  // --- deletions (to: "") drop a disfluency token and exactly one adjacent space ---
+  const del = (base: string) => {
+    const w: Span[] = [];
+    const re = /\S+/g; let m: RegExpExecArray | null;
+    while ((m = re.exec(base))) w.push({ text: m[0], start: m.index, end: m.index + m[0].length, confidence: 1 });
+    return w;
+  };
+
+  // mid-sentence: the LEADING space goes with the word, so no double space is left behind
+  const b3 = "I went to the stork store.";
+  eq(applyCorrections(b3, del(b3), [{ index: 4, from: "stork", to: "" }]).text,
+    "I went to the store.", "deletes token + leading space");
+
+  // first token has no leading space -> the TRAILING one is consumed instead
+  const b4 = "stork store";
+  eq(applyCorrections(b4, del(b4), [{ index: 0, from: "stork", to: "" }]).text,
+    "store", "deletes leading token + trailing space");
+
+  // punctuation-bearing token is never deleted (would strip the period too)
+  const b5 = "I saw the stork.";
+  eq(applyCorrections(b5, del(b5), [{ index: 3, from: "stork.", to: "" }]).text,
+    b5, "refuses to delete a token carrying punctuation");
+
+  // a flag AFTER a deletion shifts LEFT by the removed length
+  const b6 = "the stork store pier";
+  const w6 = del(b6); w6[3].confidence = 0.4;
+  const r6 = applyCorrections(b6, w6, [{ index: 1, from: "stork", to: "" }]);
+  eq(r6.text, "the store pier", "deletion mid-string");
+  eq(r6.words, [{ text: "pier", start: 10, end: 14, confidence: 0.4 }], "flag offset shifted -6");
+  eq(r6.text.slice(10, 14), "pier", "shifted flag span still lands on the word");
 
   console.log("transcript self-check ✓");
 }

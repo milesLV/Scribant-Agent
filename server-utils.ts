@@ -35,7 +35,7 @@ export function splitTiers(raw: string): { condensed: string; inDepth: string } 
 }
 
 // Drop calendar events with a missing/blank/placeholder start (the client only filters on title).
-export function filterValidCalendarEvents(events: any): any[] {
+function filterValidCalendarEvents(events: any): any[] {
   if (!Array.isArray(events)) return [];
   return events.filter(evt =>
     evt?.start && String(evt.start).trim() !== "" && !String(evt.start).includes("undefined")
@@ -48,7 +48,7 @@ export function filterValidCalendarEvents(events: any): any[] {
 // forwardDate:true pushes bare weekdays into the future. hour/minute are null unless the phrase
 // stated a time, so callers keep the model's time-of-day otherwise. Returns null when no date found.
 interface ResolvedDate { date: string; hour: number | null; minute: number | null; }
-export function resolveDate(phrase: string, referenceISO: string): ResolvedDate | null {
+function resolveDate(phrase: string, referenceISO: string): ResolvedDate | null {
   if (!phrase) return null;
   const ref = new Date(referenceISO);
   const c = chrono.parse(phrase, isNaN(ref.getTime()) ? new Date() : ref, { forwardDate: true })[0]?.start;

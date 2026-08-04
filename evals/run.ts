@@ -59,12 +59,17 @@ function werWord(hyp: string, ref: string): number {
 // Apply {index,from,to} corrections back onto whitespace tokens (index-then-text fallback) to score WER.
 function applyCorrections(text: string, corrections: any[]): string {
   const w = text.split(/\s+/);
+  // Deletions (empty `to`) are collected and dropped at the END: splicing mid-loop would shift the
+  // indices the remaining corrections are still addressing. Assigning "" instead would leave an
+  // empty token and join() would emit a double space, quietly inflating WER.
+  const drop = new Set<number>();
   for (const c of corrections) {
     let i = c.index;
     if (!(w[i] !== undefined && norm(w[i]).includes(norm(c.from)))) i = w.findIndex(x => norm(x).includes(norm(c.from)));
-    if (i >= 0 && w[i] !== undefined) w[i] = c.to;
+    if (i < 0 || w[i] === undefined) continue;
+    if (c.to === "") drop.add(i); else w[i] = c.to;
   }
-  return w.join(" ");
+  return w.filter((_, i) => !drop.has(i)).join(" ");
 }
 
 type Cat = "calendar" | "task" | "search" | "none";
@@ -180,7 +185,10 @@ function gradeCorrection(c: any, out: any) {
 
   let correctHit = 0;
   for (const ec of c.expect.correct || []) {
-    const hit = corrections.find((cc: any) => tok(cc.from)[0] === tok(ec.from)[0] && norm(cc.to).includes(norm(ec.to)));
+    // An expected DELETE ("to": "") must match an actual delete — not just any edit of that word.
+    // norm("") is "", and "anything".includes("") is true, so the empty case needs an exact test.
+    const hit = corrections.find((cc: any) => tok(cc.from)[0] === tok(ec.from)[0]
+      && (ec.to === "" ? cc.to === "" : norm(cc.to).includes(norm(ec.to))));
     if (hit) correctHit++; else fails.push(`not corrected: '${ec.from}'->'${ec.to}'`);
   }
   const expFroms = new Set((c.expect.correct || []).map((e: any) => tok(e.from)[0]));
@@ -440,6 +448,31 @@ function selfCheck() {
     { id: "oc", transcript: "Lunch with Sam.", tags: ["calendar"], judge: { titleMentions: ["Sam"], detailMentions: ["merger"] } },
     { calendarEvents: [{ title: "Lunch with Sam", description: "Discuss the merger", start: "2026-06-30T12:00:00" }], tasks: [], searchQueries: [] });
   assert.equal(tc.pass, true, "good calendar content should pass");
+
+  // --- deletions: WER must see the token removed, not blanked ---
+  assert.equal(
+    applyCorrections("I went to the stork store", [{ index: 4, from: "stork", to: "" }]),
+    "I went to the store", "deletion removes the token (no double space)");
+  assert.equal(
+    werWord(applyCorrections("I went to the stork store", [{ index: 4, from: "stork", to: "" }]), "I went to the store"),
+    0, "deleted disfluency scores WER 0 against gold");
+
+  // an expected delete is not satisfied by some other edit of the same word
+  const dc = gradeCorrection(
+    { id: "d", text: "I went to the stork store", expect: { correct: [{ from: "stork", to: "" }], flag: [] } },
+    { corrections: [{ index: 4, from: "stork", to: "stock" }], words: [] });
+  assert.equal(dc.pass, false, "substitution must not satisfy an expected deletion");
+
+  const dc2 = gradeCorrection(
+    { id: "d2", text: "I went to the stork store", expect: { correct: [{ from: "stork", to: "" }], flag: [] } },
+    { corrections: [{ index: 4, from: "stork", to: "" }], words: [] });
+  assert.equal(dc2.pass, true, "actual deletion satisfies an expected deletion");
+
+  // precision trap: deleting a word nobody asked to remove is an over-correction
+  const dc3 = gradeCorrection(
+    { id: "d3", text: "It was very very cold", expect: { correct: [], flag: [] } },
+    { corrections: [{ index: 3, from: "very", to: "" }], words: [] });
+  assert.equal(dc3.pass, false, "unrequested deletion fails as an over-correction");
 
   console.log("eval graders self-check ✓");
 }
