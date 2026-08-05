@@ -2,7 +2,7 @@ import { useState } from "react";
 import { StreamRun, CalendarEvent, TaskItem } from "../types";
 import {
   Calendar, CheckSquare, Search, FileText, Check,
-  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown, Undo2
+  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown, Undo2, FolderPlus
 } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 
@@ -24,6 +24,122 @@ function UndoChip({ label, color, onUndo }: { label: string; color: "emerald" | 
   );
 }
 
+// Per-kind literal class strings — Tailwind only ships classes it can see in the source, so these
+// can never be built by interpolating a colour name.
+const TONE = {
+  emerald: {
+    uncertainCard: "opacity-65 border-dashed border-amber-300 bg-amber-50/5",
+    uncertainBadge: "text-amber-700 bg-amber-100 border-amber-250/30",
+    doneCard: "border-emerald-100 bg-emerald-50/20",
+    focus: "focus:border-amber-500",
+  },
+  purple: {
+    uncertainCard: "opacity-65 border-dashed border-purple-300 bg-purple-50/5",
+    uncertainBadge: "text-purple-700 bg-purple-100 border-purple-200/50",
+    doneCard: "border-purple-100 bg-purple-50/10",
+    focus: "focus:border-purple-500",
+  },
+} as const;
+
+// One proposed item: two editable text fields, an approve button that becomes an Undo chip once the
+// item exists in Google, and whatever kind-specific controls the caller passes as children.
+function ItemCard({
+  tone, uncertain, uncertainLabel, badge, isDone, error, chip, button, children,
+  title, onTitle, titlePlaceholder, subtitle, onSubtitle, subtitlePlaceholder,
+}: {
+  tone: keyof typeof TONE;
+  uncertain: boolean;
+  uncertainLabel: string;
+  badge?: React.ReactNode;
+  isDone: boolean;
+  error?: string;
+  chip: React.ReactNode;
+  button: React.ReactNode;
+  children?: React.ReactNode;
+  title: string;
+  onTitle: (v: string) => void;
+  titlePlaceholder: string;
+  subtitle: string;
+  onSubtitle: (v: string) => void;
+  subtitlePlaceholder: string;
+}) {
+  const t = TONE[tone];
+  const field = `font-sans bg-transparent border-b border-transparent hover:border-stone-200 outline-none w-full py-0.5 ${t.focus}`;
+  return (
+    <div className={`border rounded-xl p-4 transition-all ${
+      uncertain ? t.uncertainCard : isDone ? t.doneCard : "border-stone-150 bg-white"
+    }`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1.5 flex-1 min-w-0">
+          {uncertain && (
+            <span className={`inline-block text-[9px] font-bold border px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 font-mono ${t.uncertainBadge}`}>
+              {uncertainLabel}
+            </span>
+          )}
+          {badge}
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => onTitle(e.target.value)}
+            placeholder={titlePlaceholder}
+            className={`text-xs font-bold text-stone-850 ${field}`}
+          />
+          <input
+            type="text"
+            value={subtitle}
+            onChange={(e) => onSubtitle(e.target.value)}
+            placeholder={subtitlePlaceholder}
+            className={`text-[11px] text-stone-500 ${field}`}
+          />
+          {children}
+        </div>
+
+        <div className="shrink-0">{isDone ? chip : button}</div>
+      </div>
+
+      {error && (
+        <p className="text-[10px] text-red-600 bg-red-50 p-2 rounded mt-2 flex items-center gap-1">
+          <AlertCircle className="w-3.5 h-3.5" /> Integration issue: {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// The approve button, spinner-while-running.
+function ActionButton({ busy, disabled, onClick, icon: Icon, label }: {
+  busy: boolean; disabled: boolean; onClick: () => void; icon: typeof Calendar; label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="text-[11px] font-bold text-stone-700 hover:text-stone-900 bg-stone-50 hover:bg-stone-100 border border-stone-300 rounded-md px-2.5 py-1 flex items-center gap-1.5"
+    >
+      {busy ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Icon className="w-3.5 h-3.5 text-stone-500" />}
+      {label}
+    </button>
+  );
+}
+
+// The card shell every panel shares — also used by SessionHistory, which is why it's exported.
+export function Panel({ icon: Icon, iconClass, title, action, children }: {
+  icon: typeof Calendar; iconClass: string; title: React.ReactNode; action?: React.ReactNode; children: React.ReactNode;
+}) {
+  return (
+    <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
+      <h3 className="text-sm font-bold text-stone-800 flex items-center justify-between gap-2 border-b border-stone-100 pb-3">
+        <span className="flex items-center gap-2">
+          <Icon className={`w-4 h-4 ${iconClass}`} />
+          {title}
+        </span>
+        {action}
+      </h3>
+      {children}
+    </div>
+  );
+}
+
 interface ActiveSessionProps {
   run: StreamRun | null;
   onExecuteCalendar: (index: number) => Promise<void>;
@@ -33,6 +149,8 @@ interface ActiveSessionProps {
   onUndoTask: (index: number) => Promise<void>;
   onUpdateCalendar: (index: number, updated: CalendarEvent) => void;
   onUpdateTask: (index: number, updated: TaskItem) => void;
+  onSaveToDrive: () => void;  // saves this session's summary into its Drive folder
+  savingDrive: boolean;
   isLiveAnalyzing?: boolean;
 }
 
@@ -45,6 +163,8 @@ export default function ActiveSession({
   onUndoTask,
   onUpdateCalendar,
   onUpdateTask,
+  onSaveToDrive,
+  savingDrive,
   isLiveAnalyzing = false
 }: ActiveSessionProps) {
   const [executingCal, setExecutingCal] = useState<number | null>(null);
@@ -110,11 +230,27 @@ export default function ActiveSession({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         
         {/* General Summary / Bulletin */}
-        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
-          <h3 className="text-sm font-bold text-stone-800 flex items-center gap-2 border-b border-stone-100 pb-3">
-            <FileText className="w-4 h-4 text-amber-600" />
-            Bulletins &amp; General Ideas
-          </h3>
+        <Panel
+          icon={FileText}
+          iconClass="text-amber-600"
+          title={<>Bulletins &amp; General Ideas</>}
+          action={
+            <button
+              type="button"
+              onClick={onSaveToDrive}
+              disabled={savingDrive || !analysis?.summary?.trim()}
+              title="Save this summary to a Google Drive folder for the session"
+              className="text-[11px] font-semibold text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 disabled:opacity-40 transition-colors"
+            >
+              {savingDrive ? (
+                <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
+              ) : (
+                <FolderPlus className="w-3.5 h-3.5" />
+              )}
+              Save to Drive
+            </button>
+          }
+        >
           <div className="prose prose-sm text-stone-600 leading-relaxed text-sm font-sans max-h-[300px] overflow-y-auto pr-1">
             {analysis ? (
               <MarkdownBullets text={analysis.summary} />
@@ -122,15 +258,10 @@ export default function ActiveSession({
               <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No bulletin ideas generated yet. Speak or type your thoughts to see summarized ideas.</p>
             )}
           </div>
-        </div>
+        </Panel>
 
         {/* Web query searches */}
-        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
-          <h3 className="text-sm font-bold text-stone-800 flex items-center gap-2 border-b border-stone-100 pb-3">
-            <Search className="w-4 h-4 text-blue-600" />
-            Real-time Info Queries
-          </h3>
-          
+        <Panel icon={Search} iconClass="text-blue-600" title="Real-time Info Queries">
           {!analysis ? (
             <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No search queries identified yet. Ask questions in your thoughts (e.g. &ldquo;I wonder who designed the Concorde&rdquo;) to trigger research actions.</p>
           ) : analysis.searchQueries.length === 0 ? (
@@ -215,19 +346,14 @@ export default function ActiveSession({
               })}
             </div>
           )}
-        </div>
+        </Panel>
 
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
         {/* Schedule Calendar appointments */}
-        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
-          <h3 className="text-sm font-bold text-stone-800 flex items-center gap-2 border-b border-stone-100 pb-3">
-            <Calendar className="w-4 h-4 text-emerald-600" />
-            Detected Calendar Schedules
-          </h3>
-
+        <Panel icon={Calendar} iconClass="text-emerald-600" title="Detected Calendar Schedules">
           {!analysis ? (
             <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No calendar events scheduled yet. Say things like &ldquo;Let's meet tomorrow at 3pm&rdquo; to suggest calendar actions.</p>
           ) : analysis.calendarEvents.length === 0 ? (
@@ -235,183 +361,89 @@ export default function ActiveSession({
           ) : (
             <div className="space-y-3.5 max-h-[350px] overflow-y-auto pr-1">
               {analysis.calendarEvents.map((item, idx) => {
-                const isUncertain = !!item.uncertain;
+                const setDate = (field: "start" | "end") => (e: React.ChangeEvent<HTMLInputElement>) => {
+                  try {
+                    onUpdateCalendar(idx, { ...item, [field]: e.target.value ? new Date(e.target.value).toISOString() : "" });
+                  } catch {}
+                };
                 return (
-                  <div key={idx} className={`border rounded-xl p-4 transition-all ${
-                    isUncertain
-                      ? 'opacity-65 border-dashed border-amber-300 bg-amber-50/5'
-                      : item.status === 'scheduled'
-                        ? 'border-emerald-100 bg-emerald-50/20'
-                        : 'border-stone-150 bg-white'
-                  }`}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-1.5 flex-1 min-w-0">
-                        {isUncertain && (
-                          <span className="inline-block text-[9px] font-bold text-amber-700 bg-amber-100 border border-amber-250/30 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 font-mono">
-                            Uncertain Draft
-                          </span>
-                        )}
-                        {item.allDay && (
-                          <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
-                            All-day
-                          </span>
-                        )}
+                  <ItemCard
+                    key={idx}
+                    tone="emerald"
+                    uncertain={!!item.uncertain}
+                    uncertainLabel="Uncertain Draft"
+                    badge={item.allDay && (
+                      <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
+                        All-day
+                      </span>
+                    )}
+                    isDone={item.status === 'scheduled'}
+                    error={item.status === 'failed' ? item.error : undefined}
+                    title={item.title}
+                    onTitle={v => onUpdateCalendar(idx, { ...item, title: v })}
+                    titlePlaceholder="Configure title..."
+                    subtitle={item.description}
+                    onSubtitle={v => onUpdateCalendar(idx, { ...item, description: v })}
+                    subtitlePlaceholder="Configure description..."
+                    chip={<UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />}
+                    button={<ActionButton busy={executingCal === idx} disabled={executingCal !== null}
+                      onClick={() => handleCalClick(idx, item)} icon={Calendar} label="Add Event" />}
+                  >
+                    <div className="grid grid-cols-2 gap-2 text-[10px] font-sans pt-1 w-full">
+                      {(["start", "end"] as const).map(field => (
                         <input
-                          type="text"
-                          value={item.title}
-                          onChange={(e) => onUpdateCalendar(idx, { ...item, title: e.target.value })}
-                          className="text-xs font-bold text-stone-850 font-sans bg-transparent border-b border-transparent hover:border-stone-200 focus:border-amber-500 outline-none w-full py-0.5"
-                          placeholder="Configure title..."
+                          key={field}
+                          type="datetime-local"
+                          value={toDatetimeLocalString(item[field])}
+                          onChange={setDate(field)}
+                          className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded px-1.5 py-1 focus:border-amber-500 focus:bg-white outline-none font-mono text-[10px] text-stone-600 w-full min-w-0"
                         />
-                        <input
-                          type="text"
-                          value={item.description}
-                          onChange={(e) => onUpdateCalendar(idx, { ...item, description: e.target.value })}
-                          className="text-[11px] text-stone-500 font-sans bg-transparent border-b border-transparent hover:border-stone-200 focus:border-amber-500 outline-none w-full py-0.5"
-                          placeholder="Configure description..."
-                        />
-                        
-                        <div className="grid grid-cols-2 gap-2 text-[10px] font-sans pt-1 w-full">
-                          <input
-                            type="datetime-local"
-                            value={toDatetimeLocalString(item.start)}
-                            onChange={(e) => {
-                              try {
-                                const iso = e.target.value ? new Date(e.target.value).toISOString() : "";
-                                onUpdateCalendar(idx, { ...item, start: iso });
-                              } catch {}
-                            }}
-                            className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded px-1.5 py-1 focus:border-amber-500 focus:bg-white outline-none font-mono text-[10px] text-stone-600 w-full min-w-0"
-                          />
-                          <input
-                            type="datetime-local"
-                            value={toDatetimeLocalString(item.end)}
-                            onChange={(e) => {
-                              try {
-                                const iso = e.target.value ? new Date(e.target.value).toISOString() : "";
-                                onUpdateCalendar(idx, { ...item, end: iso });
-                              } catch {}
-                            }}
-                            className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded px-1.5 py-1 focus:border-amber-500 focus:bg-white outline-none font-mono text-[10px] text-stone-600 w-full min-w-0"
-                          />
-                        </div>
-                      </div>
-
-                    <div className="shrink-0">
-                      {item.status === 'scheduled' ? (
-                        <UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />
-                      ) : (
-                        <button
-                          onClick={() => handleCalClick(idx, item)}
-                          disabled={executingCal !== null}
-                          className="text-[11px] font-bold text-stone-700 hover:text-stone-900 bg-stone-50 hover:bg-stone-100 border border-stone-300 rounded-md px-2.5 py-1 flex items-center gap-1.5"
-                        >
-                          {executingCal === idx ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Calendar className="w-3.5 h-3.5 text-stone-500" />
-                          )}
-                          Add Event
-                        </button>
-                      )}
+                      ))}
                     </div>
-                  </div>
-
-                  {item.status === 'failed' && (
-                    <p className="text-[10px] text-red-600 bg-red-50 p-2 rounded mt-2 flex items-center gap-1">
-                      <AlertCircle className="w-3.5 h-3.5" /> Integration issue: {item.error}
-                    </p>
-                  )}
-                </div>
+                  </ItemCard>
                 );
               })}
             </div>
           )}
-        </div>
+        </Panel>
 
         {/* Actionable Tasks to Google Tasks */}
-        <div className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
-          <h3 className="text-sm font-bold text-stone-800 flex items-center gap-2 border-b border-stone-100 pb-3">
-            <CheckSquare className="w-4 h-4 text-purple-600" />
-            Identified Actions &amp; To-Dos
-          </h3>
-
+        <Panel icon={CheckSquare} iconClass="text-purple-600" title={<>Identified Actions &amp; To-Dos</>}>
           {!analysis ? (
             <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No checklist actions logged yet. State tasks in your thoughts (e.g. &ldquo;Pick up groceries on the way home&rdquo;, &ldquo;Drop package off at the post office&rdquo;, &rdquo;Water plants in the garden&rdquo;) to see todo suggestions.</p>
           ) : analysis.tasks.length === 0 ? (
             <p className="text-xs text-stone-400 italic py-2">No checklist elements identified.</p>
           ) : (
             <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
-              {analysis.tasks.map((item, idx) => {
-                const isUncertain = !!item.uncertain;
-                return (
-                  <div key={idx} className={`border rounded-xl p-4 transition-all ${
-                    isUncertain
-                      ? 'opacity-65 border-dashed border-purple-300 bg-purple-50/5'
-                      : item.status === 'created'
-                        ? 'border-purple-100 bg-purple-50/10'
-                        : 'border-stone-150 bg-white'
-                  }`}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-1.5 flex-1 min-w-0">
-                        {isUncertain && (
-                          <span className="inline-block text-[9px] font-bold text-purple-700 bg-purple-100 border border-purple-200/50 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 font-mono">
-                            Uncertain To-Do
-                          </span>
-                        )}
-                        <input
-                          type="text"
-                          value={item.title}
-                          onChange={(e) => onUpdateTask(idx, { ...item, title: e.target.value })}
-                          className="text-xs font-bold text-stone-850 font-sans bg-transparent border-b border-transparent hover:border-stone-200 focus:border-purple-500 outline-none w-full py-0.5"
-                          placeholder="Configure task..."
-                        />
-                        <input
-                          type="text"
-                          value={item.notes}
-                          onChange={(e) => onUpdateTask(idx, { ...item, notes: e.target.value })}
-                          className="text-[11px] text-stone-500 font-sans bg-transparent border-b border-transparent hover:border-stone-200 focus:border-purple-500 outline-none w-full py-0.5"
-                          placeholder="Add notes..."
-                        />
-                        {item.dueDate && (
-                          <span className="inline-block mt-1 text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
-                            {/* dueDate is date-only ("YYYY-MM-DD"), which parses as UTC midnight; the time suffix forces local so TZs behind UTC don't render a day early. */}
-                            Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
-                          </span>
-                        )}
-                      </div>
-
-                    <div className="shrink-0">
-                      {item.status === 'created' ? (
-                        <UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />
-                      ) : (
-                        <button
-                          onClick={() => handleTaskClick(idx, item)}
-                          disabled={executingTask !== null}
-                          className="text-[11px] font-bold text-stone-700 hover:text-stone-900 bg-stone-50 hover:bg-stone-100 border border-stone-300 rounded-md px-2.5 py-1 flex items-center gap-1.5"
-                        >
-                          {executingTask === idx ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <CheckSquare className="w-3.5 h-3.5 text-stone-500" />
-                          )}
-                          Log To-Do
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {item.status === 'failed' && (
-                    <p className="text-[10px] text-red-600 bg-red-50 p-2 rounded mt-2 flex items-center gap-1">
-                      <AlertCircle className="w-3.5 h-3.5" /> Integration issue: {item.error}
-                    </p>
+              {analysis.tasks.map((item, idx) => (
+                <ItemCard
+                  key={idx}
+                  tone="purple"
+                  uncertain={!!item.uncertain}
+                  uncertainLabel="Uncertain To-Do"
+                  isDone={item.status === 'created'}
+                  error={item.status === 'failed' ? item.error : undefined}
+                  title={item.title}
+                  onTitle={v => onUpdateTask(idx, { ...item, title: v })}
+                  titlePlaceholder="Configure task..."
+                  subtitle={item.notes}
+                  onSubtitle={v => onUpdateTask(idx, { ...item, notes: v })}
+                  subtitlePlaceholder="Add notes..."
+                  chip={<UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />}
+                  button={<ActionButton busy={executingTask === idx} disabled={executingTask !== null}
+                    onClick={() => handleTaskClick(idx, item)} icon={CheckSquare} label="Log To-Do" />}
+                >
+                  {item.dueDate && (
+                    <span className="inline-block mt-1 text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
+                      {/* dueDate is date-only ("YYYY-MM-DD"), which parses as UTC midnight; the time suffix forces local so TZs behind UTC don't render a day early. */}
+                      Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
+                    </span>
                   )}
-                </div>
-                );
-              })}
+                </ItemCard>
+              ))}
             </div>
           )}
-        </div>
+        </Panel>
 
       </div>
 

@@ -1,12 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck } from "lucide-react";
+import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
-import { applyCorrections } from "../utils/transcript";
-
-// confidence below this = misheard. Same value as applyCorrections' confidenceThreshold
-// default in utils/transcript.ts and the eval grader.
-const CONFIDENCE_THRESHOLD = 0.7;
+import { applyCorrections, CONFIDENCE_THRESHOLD } from "../utils/transcript";
 
 // The capture cycle lives in App (one debounce timer → /api/live). This component owns the
 // transcript and the correction-splicing that keeps highlight offsets valid; it receives finished
@@ -14,15 +10,14 @@ const CONFIDENCE_THRESHOLD = 0.7;
 interface AudioRecorderProps {
   onAnalyze: (text: string) => void;
   isProcessing: boolean;
-  onShowToast?: (msg: string) => void;
-  clearSignal?: number;
-  onChangeTranscript?: (text: string) => void;
+  onShowToast: (msg: string) => void;
+  onChangeTranscript: (text: string) => void;
   liveSummary: string;
   proofResult: ProofResult | null;
   busy: { proof: boolean; summary: boolean; plan: boolean };
-  autoRun: boolean;
-  onAutoRunChange: (on: boolean) => void;
   onRunNow: () => void;
+  onSaveToDrive: () => void;  // saves the live notes into this session's Drive folder
+  savingDrive: boolean;
 }
 
 declare global {
@@ -36,14 +31,13 @@ export default function AudioRecorder({
   onAnalyze,
   isProcessing,
   onShowToast,
-  clearSignal,
   onChangeTranscript,
   liveSummary,
   proofResult,
   busy,
-  autoRun,
-  onAutoRunChange,
-  onRunNow
+  onRunNow,
+  onSaveToDrive,
+  savingDrive
 }: AudioRecorderProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
@@ -131,28 +125,8 @@ export default function AudioRecorder({
 
   // Notify parent of transcript modifications (include interim text for real-time live analysis)
   useEffect(() => {
-    if (onChangeTranscript) {
-      onChangeTranscript((transcript + " " + interimTranscript).trim());
-    }
+    onChangeTranscript((transcript + " " + interimTranscript).trim());
   }, [transcript, interimTranscript, onChangeTranscript]);
-
-  // External clear signal from parent (Clear All button)
-  useEffect(() => {
-    if (clearSignal && clearSignal > 0) {
-      ignoreSpeechResultsRef.current = true;
-      if (isListening) {
-        manualStopRef.current = true;
-        recognitionRef.current?.stop();
-        setIsListening(false);
-      }
-      setTranscript("");
-      setInterimTranscript("");
-      setIsEditingTranscript(false);
-      setWords(null);
-      setActiveChip(null);
-      proofedTextRef.current = "";
-    }
-  }, [clearSignal]);
 
   useEffect(() => {
     // Check for browser support
@@ -506,15 +480,19 @@ export default function AudioRecorder({
             </div>
             
             <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1 cursor-pointer" title="Auto-run the live pipeline (proofread, summary, draft actions) as you type or speak">
-                <input
-                  type="checkbox"
-                  checked={autoRun}
-                  onChange={(e) => onAutoRunChange(e.target.checked)}
-                  className="rounded text-amber-600 focus:ring-amber-500 w-3 h-3 border-stone-300"
-                />
-                <span className="text-[9px] text-stone-500 select-none">Auto</span>
-              </label>
+              <button
+                type="button"
+                onClick={onSaveToDrive}
+                disabled={savingDrive || !liveSummary.trim()}
+                title="Save these live notes to a Google Drive folder for this session"
+                className="p-1 text-stone-500 hover:text-amber-700 hover:bg-stone-100 rounded transition-colors disabled:opacity-40 cursor-pointer"
+              >
+                {savingDrive ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
+                ) : (
+                  <FolderPlus className="w-3.5 h-3.5" />
+                )}
+              </button>
 
               <button
                 type="button"
@@ -561,11 +539,7 @@ export default function AudioRecorder({
                 type="button"
                 onClick={() => {
                   navigator.clipboard.writeText(liveSummary);
-                  if (onShowToast) {
-                    onShowToast("Summarized live notes copied to clipboard!");
-                  } else {
-                    alert("Summarized live notes copied to clipboard!");
-                  }
+                  onShowToast("Summarized live notes copied to clipboard!");
                 }}
                 className="hover:text-stone-700 hover:underline cursor-pointer"
               >

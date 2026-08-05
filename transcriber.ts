@@ -1,5 +1,6 @@
-// Transcriber agent — turns Web Speech text into Word[] with a per-word confidence score via
-// proofreadAndCorrect: an LLM pass that auto-corrects obvious typos and flags ambiguous mishearings.
+// The proofread pass, in two halves the orchestrator drives around its proofreader sub-agent:
+// buildProofreadPrompt indexes the transcript for the model, parseProofread turns the reply into
+// auto-corrections plus flagged mishearings (Word[] with a per-word confidence score).
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
 import { Word } from "./src/types";
@@ -14,10 +15,6 @@ function tokenize(text: string): { text: string; start: number; end: number }[] 
   return out;
 }
 
-// `generate` is the server's LLM gateway (an ADK agent call in production), injected so this
-// module stays model-agnostic and its self-check can run with a stub.
-type Generate = (params: { model: string; contents: string; config?: any }) => Promise<{ text?: string }>;
-
 // ---- Provider A: obvious correction vs ambiguous flag (the proofread router) ------
 // One LLM pass that ROUTES each suspect word to one of two actions instead of flagging everything:
 //   corrections — obvious typo/grammar with a single unambiguous fix, safe to auto-apply.
@@ -25,7 +22,7 @@ type Generate = (params: { model: string; contents: string; config?: any }) => P
 // Self-corrected phrases ("write, actually written-down") are left alone. Same Word[] seam as above.
 interface Correction { index: number; from: string; to: string; }
 
-const PROOFREAD_CORRECT_INSTRUCTION = `You are a transcription proofreader for spoken brain-dumps. Each word is indexed from 0.
+export const PROOFREAD_CORRECT_INSTRUCTION = `You are a transcription proofreader for spoken brain-dumps. Each word is indexed from 0.
 Route each suspect word to EXACTLY ONE of three actions:
 1. CORRECT — an OBVIOUS error with a single unambiguous fix: a clear misspelling/typo ("tomorow"->"tomorrow") or a clear grammatical slip ("she dont"->"she doesn't"). Put these in "corrections".
 2. FLAG — a real, correctly-spelled word that is likely MISHEARD or wrong in context, where the intended word is a judgement call ("peer" vs "pier", "bored" vs "board"). Put these in "flagged" with low confidence + suggestions. Do NOT auto-correct these.
@@ -40,23 +37,26 @@ Return ONLY JSON:
 Return empty arrays if the transcript reads fine. Never rewrite clean text.
 For a multi-word PHRASE fix ("frozen cons" -> "pros and cons"), put the WHOLE intended phrase as one string ("to" for a correction, or one "suggestions" entry for a flag) — never split it word-by-word.`;
 
-export async function proofreadAndCorrect(
-  text: string,
-  generate: Generate,
-  model = "gemini-2.5-flash"
-): Promise<{ corrections: Correction[]; words: Word[] }> {
+// The two halves of the proofread pass, split so the caller can own the model call in between:
+// the orchestrator's proofreader sub-agent is an ADK LlmAgent, so ADK makes the request and this
+// module only builds the prompt and reads the answer.
+type ProofPrompt = { tokens: { text: string; start: number; end: number }[]; words: Word[]; contents: string };
+
+export function buildProofreadPrompt(text: string): ProofPrompt {
   const tokens = tokenize(text);
-  const words: Word[] = tokens.map(t => ({ ...t, confidence: 1 }));
+  return {
+    tokens,
+    words: tokens.map(t => ({ ...t, confidence: 1 })),
+    contents: `Indexed transcript:\n${tokens.map((t, i) => `${i}:${t.text}`).join(" ")}`,
+  };
+}
+
+export function parseProofread(rawText: string, prompt: ProofPrompt): { corrections: Correction[]; words: Word[] } {
+  const { tokens, words } = prompt;
   if (tokens.length === 0) return { corrections: [], words };
 
-  const res = await generate({
-    model,
-    contents: `Indexed transcript:\n${tokens.map((t, i) => `${i}:${t.text}`).join(" ")}`,
-    config: { systemInstruction: PROOFREAD_CORRECT_INSTRUCTION, responseMimeType: "application/json" },
-  });
-
   let parsed: any = {};
-  try { parsed = JSON.parse(cleanJsonString(res.text || "")); } catch { /* leave everything clean */ }
+  try { parsed = JSON.parse(cleanJsonString(rawText || "")); } catch { /* leave everything clean */ }
 
   const corrections: Correction[] = [];
   for (const c of parsed.corrections || []) {
@@ -139,14 +139,18 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     assert.equal(toks.length, 3);
     assert.deepEqual(toks[2], { text: "tomorow", start: 13, end: 20 });
 
+    // The model's reply, run back through the parse half — the orchestrator's proofreader sub-agent
+    // makes the request in between, so a stub for it would only be testing ADK.
+    const proofread = (text: string, reply: object) => parseProofread(JSON.stringify(reply), buildProofreadPrompt(text));
+
+    // The indexed prompt the model is given.
+    assert.match(buildProofreadPrompt("meet peer tomorow").contents, /0:meet 1:peer 2:tomorow/);
+
     // router: obvious typo -> correction (not a flag); ambiguous stays a flag; clean words untouched.
-    const routerGen: Generate = async () => ({
-      text: JSON.stringify({
-        corrections: [{ index: 2, from: "tomorow", to: "tomorrow" }],
-        flagged: [{ index: 1, word: "peer", confidence: 0.4, suggestions: ["pier"] }],
-      }),
+    const routed = proofread("meet peer tomorow", {
+      corrections: [{ index: 2, from: "tomorow", to: "tomorrow" }],
+      flagged: [{ index: 1, word: "peer", confidence: 0.4, suggestions: ["pier"] }],
     });
-    const routed = await proofreadAndCorrect("meet peer tomorow", routerGen);
     assert.deepEqual(routed.corrections, [{ index: 2, from: "tomorow", to: "tomorrow" }]);
     assert.equal(routed.words[1].confidence, 0.4);          // ambiguous -> flagged
     assert.deepEqual(routed.words[1].alternatives, ["pier"]);
@@ -154,10 +158,10 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     assert.equal(routed.words[0].confidence, 1);            // clean word untouched
 
     // index drift -> both loops fall back to matching by word text
-    const driftGen: Generate = async () => ({
-      text: JSON.stringify({ corrections: [{ index: 9, from: "tomorow", to: "tomorrow" }], flagged: [{ index: 9, word: "peer", confidence: 0.3 }] }),
+    const drifted = proofread("meet peer tomorow", {
+      corrections: [{ index: 9, from: "tomorow", to: "tomorrow" }],
+      flagged: [{ index: 9, word: "peer", confidence: 0.3 }],
     });
-    const drifted = await proofreadAndCorrect("meet peer tomorow", driftGen);
     assert.deepEqual(drifted.corrections, [{ index: 2, from: "tomorow", to: "tomorrow" }]);
     assert.equal(drifted.words[1].confidence, 0.3);
 
@@ -170,34 +174,22 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     assert.equal(isDisfluency("very", ["was", "very"]), true, "intentional repeat PASSES the guard by design");
 
     // deletions fold into corrections as an empty `to`
-    const delGen: Generate = async () => ({
-      text: JSON.stringify({ corrections: [], flagged: [], deletions: [{ index: 4, word: "stork" }] }),
-    });
-    const deleted = await proofreadAndCorrect("I went to the stork store", delGen);
+    const deleted = proofread("I went to the stork store", { corrections: [], flagged: [], deletions: [{ index: 4, word: "stork" }] });
     assert.deepEqual(deleted.corrections, [{ index: 4, from: "stork", to: "" }]);
 
     // the guard overrides the model: deleting an unrelated word is refused
-    const badGen: Generate = async () => ({
-      text: JSON.stringify({ corrections: [], flagged: [], deletions: [{ index: 4, word: "elephant" }] }),
-    });
-    const refused = await proofreadAndCorrect("I went to the elephant store", badGen);
+    const refused = proofread("I went to the elephant store", { corrections: [], flagged: [], deletions: [{ index: 4, word: "elephant" }] });
     assert.deepEqual(refused.corrections, [], "guard refuses to delete a real word");
 
     // a blank `to` on a CORRECTION is still malformed input, not a delete
-    const blankGen: Generate = async () => ({
-      text: JSON.stringify({ corrections: [{ index: 4, from: "stork", to: "" }], flagged: [] }),
-    });
-    const blank = await proofreadAndCorrect("I went to the stork store", blankGen);
+    const blank = proofread("I went to the stork store", { corrections: [{ index: 4, from: "stork", to: "" }], flagged: [] });
     assert.deepEqual(blank.corrections, [], "blank `to` on a correction is dropped, not treated as delete");
 
     // same token both corrected and deleted -> the correction wins, one edit only
-    const clashGen: Generate = async () => ({
-      text: JSON.stringify({
-        corrections: [{ index: 4, from: "stork", to: "stock" }], flagged: [],
-        deletions: [{ index: 4, word: "stork" }],
-      }),
+    const clash = proofread("I went to the stork store", {
+      corrections: [{ index: 4, from: "stork", to: "stock" }], flagged: [],
+      deletions: [{ index: 4, word: "stork" }],
     });
-    const clash = await proofreadAndCorrect("I went to the stork store", clashGen);
     assert.deepEqual(clash.corrections, [{ index: 4, from: "stork", to: "stock" }], "no double edit on one token");
 
     console.log("transcriber self-check ✓");

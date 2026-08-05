@@ -3,27 +3,33 @@ import Header from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
-import { StreamRun, CalendarEvent, TaskItem, AnalysisResult, ProofResult, AutonomyMode } from "./types";
+import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
   createGoogleTask,
+  createDriveFolder,
+  uploadDriveFile,
   deleteCreatedItem,
   resetSandboxState
 } from "./utils/google-workspace";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
-import { itemId } from "./utils/transcript";
 import { isAutoExecutable } from "./utils/autonomy";
-
-// Which analysis list and id field each undoable kind lives in.
-const UNDO = {
-  calendar: { list: "calendarEvents", idKey: "eventId", where: "Google Calendar" },
-  task: { list: "tasks", idKey: "taskId", where: "Google Tasks" },
-} as const;
 
 // New characters of speech required before the expensive classifier stage re-runs. Below this, the
 // cycle still proofreads and re-summarizes; the previous plan stays on screen. Tune if drafts feel
 // stale (lower) or the free-tier quota bites (higher).
 const PLAN_MIN_GROWTH = 80;
+
+// Who the server files transcripts under. The Google account id once signed in; otherwise a
+// per-browser uuid so sandbox sessions still land in their own folder instead of one shared heap.
+const localUserId = () => {
+  let id = localStorage.getItem("scribant_local_user_id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("scribant_local_user_id", id);
+  }
+  return id;
+};
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
@@ -57,10 +63,14 @@ export default function App() {
     (localStorage.getItem("autonomy_mode") as AutonomyMode) || "consent");
   const [allowUncertain, setAllowUncertain] = useState<boolean>(() =>
     localStorage.getItem("autonomy_allow_uncertain") === "true");
+  const [userId, setUserId] = useState<string>(() => localStorage.getItem("gcp_user_id") || localUserId());
+  const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [clearSignal, setClearSignal] = useState(0);
+  // Bumped on Clear All and used as AudioRecorder's `key` — remounting is the reset, so the
+  // component's own mic/recognizer/proofread state never needs a second reset path to keep in sync.
+  const [recorderKey, setRecorderKey] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [liveDraft, setLiveDraft] = useState<AnalysisResult | null>(null);
   const [liveSummary, setLiveSummary] = useState("");
@@ -87,13 +97,13 @@ export default function App() {
     rawText,
     calendarEvents: (rawRes.calendarEvents || [])
       .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-      .map((evt: any) => ({ ...evt, id: itemId("cal", evt.sourceText, evt.title), status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay })),
+      .map((evt: any) => ({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay })),
     tasks: (rawRes.tasks || [])
       .filter((t: any) => t && t.title && t.title.trim() !== "")
-      .map((t: any) => ({ ...t, id: itemId("task", t.sourceText, t.title), status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined })),
+      .map((t: any) => ({ ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined })),
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
-      .map((q: any) => ({ ...q, id: itemId("search", q.sourceText, q.query), status: "pending" as const })),
+      .map((q: any) => ({ ...q, status: "pending" as const })),
     organizedFolder: rawRes.organizedFolderName || "Session Notes"
   });
 
@@ -140,6 +150,24 @@ export default function App() {
       }
     }
   }, []);
+
+  // Resolve the Google account id once per token (the userinfo.profile scope is already requested),
+  // and fall back to the local uuid when signed out. Only `sub` is kept — no profile data.
+  useEffect(() => {
+    if (!token) {
+      localStorage.removeItem("gcp_user_id");
+      setUserId(localUserId());
+      return;
+    }
+    fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!d?.sub) return;
+        localStorage.setItem("gcp_user_id", d.sub);
+        setUserId(d.sub);
+      })
+      .catch(() => {});
+  }, [token]);
 
   // Monitor token expiration periodically
   useEffect(() => {
@@ -296,7 +324,8 @@ export default function App() {
       return;
     }
     const redirectUri = window.location.origin;
-    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/userinfo.profile";
+    // drive.file is least privilege: this app only ever sees the files it created itself.
+    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile";
 
     // Standard Implicit Grant Flow auth URL
     const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&include_granted_scopes=true&prompt=consent`;
@@ -306,6 +335,9 @@ export default function App() {
 
   const handleAnalyzeStream = async (text: string) => {
     setIsProcessing(true);
+    // Minted before the request so the server files the transcript under the same id the archived
+    // run gets — one JSONL file per session, matching what the user sees in their history.
+    const runId = `run-${Date.now()}`;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -318,7 +350,7 @@ export default function App() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary }),
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, userId, sessionId: runId }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -335,7 +367,7 @@ export default function App() {
       await autoExecute(analysis);
 
       const newRun: StreamRun = {
-        id: `run-${Date.now()}`,
+        id: runId,
         timestamp: new Date().toISOString(),
         rawText: text,
         status: "completed",
@@ -373,33 +405,101 @@ export default function App() {
     return { condensed: data.condensed, answer: data.inDepth, sources: data.sources };
   };
 
+  // One row per executable item kind: which analysis list it lives in, how to run it, and what to
+  // say afterwards. The approve buttons and the autonomy pass both read this table, so a manual
+  // execution and an automatic one can never drift apart.
+  const KINDS = {
+    calendar: {
+      list: "calendarEvents",
+      exec: async (e: any) => ({ status: "scheduled", eventId: await createCalendarEvent(token, e) }),
+      done: (e: any) => `Successfully scheduled "${e.title}" on Google Calendar!`,
+      auto: (e: any) => `Auto-scheduled "${e.title}" on Google Calendar, as requested.`,
+      failed: (msg: string) => `Calendar Integration Failed: ${msg}`,
+      undo: { idKey: "eventId", where: "Google Calendar", action: "create_calendar_event" },
+    },
+    task: {
+      list: "tasks",
+      exec: async (t: any) => ({ status: "created", taskId: await createGoogleTask(token, t) }),
+      done: (t: any) => `Successfully logged task "${t.title}" to Google Tasks list!`,
+      auto: (t: any) => `Auto-logged "${t.title}" to Google Tasks, as requested.`,
+      failed: (msg: string) => `Tasks Integration Failed: ${msg}`,
+      undo: { idKey: "taskId", where: "Google Tasks", action: "create_task" },
+    },
+    search: {
+      list: "searchQueries",
+      exec: async (q: any) => ({ status: "completed", ...(await runSearch(q.query)) }),
+      done: (q: any) => `Researced facts retrieved for query: "${q.query}"`,
+      auto: (q: any) => `Auto-searched "${q.query}", as requested.`,
+      failed: (msg: string) => `Facts query search failed: ${msg}`,
+      undo: null, // a search wrote nothing to undo
+    },
+  } as const;
+  type Kind = keyof typeof KINDS;
+
+  // Replace one item in one of the analysis lists, leaving everything else untouched.
+  const patchAt = (a: AnalysisResult, list: string, index: number, value: any): AnalysisResult => {
+    const next = [...(a as any)[list]];
+    next[index] = value;
+    return { ...a, [list]: next };
+  };
+
+  // Execute ONE reviewed item, then fold the result — or the failure — back into what's on screen.
+  const executeItem = async (kind: Kind, index: number) => {
+    const { list, exec, done, failed } = KINDS[kind];
+    const item: any = (activeAnalysis as any)?.[list]?.[index];
+    if (!item) return;
+    try {
+      const patch = await exec(item);
+      updateActiveAnalysis(a => patchAt(a, list, index, { ...item, ...patch }));
+      showToast(done(item));
+    } catch (err: any) {
+      console.error(err);
+      updateActiveAnalysis(a => patchAt(a, list, index, { ...item, status: "failed", error: err.message }));
+      showToast(failed(err.message));
+    }
+  };
+
   // Execute whatever the current autonomy mode allows (see isAutoExecutable for the gate), mutating
   // the analysis in place. A failure marks that item failed but never blocks the rest.
   const autoExecute = async (analysis: AnalysisResult) => {
     if (autonomyMode === "manual") return;
-    const groups: { list: any[]; exec: (item: any) => Promise<object>; toast: (item: any) => string }[] = [
-      { list: analysis.calendarEvents,
-        exec: async e => ({ status: "scheduled", eventId: await createCalendarEvent(token, e) }),
-        toast: e => `Auto-scheduled "${e.title}" on Google Calendar, as requested.` },
-      { list: analysis.tasks,
-        exec: async t => ({ status: "created", taskId: await createGoogleTask(token, t) }),
-        toast: t => `Auto-logged "${t.title}" to Google Tasks, as requested.` },
-      { list: analysis.searchQueries,
-        exec: async q => ({ status: "completed", ...(await runSearch(q.query)) }),
-        toast: q => `Auto-searched "${q.query}", as requested.` },
-    ];
-
-    for (const { list, exec, toast } of groups) {
-      for (let i = 0; i < list.length; i++) {
-        const item = list[i];
+    for (const { list, exec, auto } of Object.values(KINDS)) {
+      const items: any[] = (analysis as any)[list];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         if (!isAutoExecutable(item, autonomyMode, allowUncertain)) continue;
         try {
-          list[i] = { ...item, ...(await exec(item)) };
-          showToast(toast(item));
+          items[i] = { ...item, ...(await exec(item)) };
+          showToast(auto(item));
         } catch (err: any) {
-          list[i] = { ...item, status: "failed", error: err.message };
+          items[i] = { ...item, status: "failed", error: err.message };
         }
       }
+    }
+  };
+
+  // Save a markdown report into this session's Drive folder (created on first save, reused after).
+  // Two tool calls behind one approval — the button IS the consent, same as every other write here.
+  const handleSaveToDrive = async (folderName: string, fileName: string, markdown: string) => {
+    if (!markdown.trim()) {
+      showToast("Nothing to save yet — no notes have been generated.");
+      return;
+    }
+    setSavingDrive(true);
+    try {
+      const folderId = await createDriveFolder(token, folderName || "Scribant Session");
+      await uploadDriveFile(token, fileName, markdown, folderId);
+      showToast(token
+        ? `Saved "${fileName}" to Google Drive → ${folderName}.`
+        : `Sandbox: "${fileName}" saved to a simulated Drive folder.`);
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      // Tokens issued before the drive.file scope existed come back 403 — say what to do about it.
+      showToast(/permission|insufficient|unauthorized|403/i.test(msg)
+        ? "Drive access not granted — sign in with Google again to authorize Drive."
+        : `Drive save failed: ${msg}`);
+    } finally {
+      setSavingDrive(false);
     }
   };
 
@@ -408,102 +508,16 @@ export default function App() {
     ? liveDraft
     : runs.find(r => r.id === selectedRunId)?.analysis ?? null;
 
-  const handleExecuteCalendar = async (index: number) => {
-    const event = activeAnalysis?.calendarEvents[index];
-    if (!event) return;
-    try {
-      const eventId = await createCalendarEvent(token, event);
-      updateActiveAnalysis(a => {
-        const calendarEvents = [...a.calendarEvents];
-        calendarEvents[index] = { ...event, status: "scheduled", eventId };
-        return { ...a, calendarEvents };
-      });
-      showToast(`Successfully scheduled "${event.title}" on Google Calendar!`);
-    } catch (err: any) {
-      console.error(err);
-      updateActiveAnalysis(a => {
-        const calendarEvents = [...a.calendarEvents];
-        calendarEvents[index] = { ...event, status: "failed", error: err.message };
-        return { ...a, calendarEvents };
-      });
-      showToast(`Calendar Integration Failed: ${err.message}`);
-    }
-  };
-
-  const handleUpdateCalendar = (index: number, updated: CalendarEvent) => {
-    updateActiveAnalysis(a => {
-      const calendarEvents = [...a.calendarEvents];
-      calendarEvents[index] = updated;
-      return { ...a, calendarEvents };
-    });
-  };
-
-  const handleUpdateTask = (index: number, updated: TaskItem) => {
-    updateActiveAnalysis(a => {
-      const tasks = [...a.tasks];
-      tasks[index] = updated;
-      return { ...a, tasks };
-    });
-  };
-
-  const handleExecuteTask = async (index: number) => {
-    const task = activeAnalysis?.tasks[index];
-    if (!task) return;
-    try {
-      const taskId = await createGoogleTask(token, task);
-      updateActiveAnalysis(a => {
-        const tasks = [...a.tasks];
-        tasks[index] = { ...task, status: "created", taskId };
-        return { ...a, tasks };
-      });
-      showToast(`Successfully logged task "${task.title}" to Google Tasks list!`);
-    } catch (err: any) {
-      console.error(err);
-      updateActiveAnalysis(a => {
-        const tasks = [...a.tasks];
-        tasks[index] = { ...task, status: "failed", error: err.message };
-        return { ...a, tasks };
-      });
-      showToast(`Tasks Integration Failed: ${err.message}`);
-    }
-  };
-
-  const handleExecuteSearch = async (index: number) => {
-    const queryItem = activeAnalysis?.searchQueries[index];
-    if (!queryItem) return;
-    try {
-      const result = await runSearch(queryItem.query);
-      updateActiveAnalysis(a => {
-        const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { ...queryItem, status: "completed", ...result };
-        return { ...a, searchQueries };
-      });
-      showToast(`Researced facts retrieved for query: "${queryItem.query}"`);
-    } catch (err: any) {
-      console.error(err);
-      updateActiveAnalysis(a => {
-        const searchQueries = [...a.searchQueries];
-        searchQueries[index] = { ...queryItem, status: "failed", error: err.message };
-        return { ...a, searchQueries };
-      });
-      showToast(`Facts query search failed: ${err.message}`);
-    }
-  };
-
   // Undo a created calendar event / task: delete by the id the create returned, then reset the item
   // to pending so its button comes back.
-  const handleUndo = async (kind: "calendar" | "task", index: number) => {
-    const { list, idKey, where } = UNDO[kind];
+  const handleUndo = async (kind: Exclude<Kind, "search">, index: number) => {
+    const { list, undo } = KINDS[kind];
     const item: any = (activeAnalysis as any)?.[list]?.[index];
-    if (!item?.[idKey]) return;
+    if (!item?.[undo.idKey]) return;
     try {
-      await deleteCreatedItem(token, kind, item[idKey]);
-      updateActiveAnalysis(a => {
-        const next = [...(a as any)[list]];
-        next[index] = { ...item, status: "pending", [idKey]: undefined };
-        return { ...a, [list]: next };
-      });
-      showToast(`Removed "${item.title}" from ${where}.`);
+      await deleteCreatedItem(token, undo.action, item[undo.idKey]);
+      updateActiveAnalysis(a => patchAt(a, list, index, { ...item, status: "pending", [undo.idKey]: undefined }));
+      showToast(`Removed "${item.title}" from ${undo.where}.`);
     } catch (err: any) {
       console.error(err);
       showToast(`Undo failed: ${err.message}`);
@@ -518,7 +532,7 @@ export default function App() {
       }
       setRuns([]);
       setSelectedRunId(null);
-      setClearSignal(prev => prev + 1);
+      setRecorderKey(k => k + 1);
       setLiveTranscript("");
       setLiveDraft(null);
       setLiveSummary("");
@@ -572,6 +586,8 @@ export default function App() {
           onSetAutonomyMode={setAutonomyMode}
           allowUncertain={allowUncertain}
           onSetAllowUncertain={setAllowUncertain}
+          autoRun={autoRun}
+          onAutoRunChange={setAutoRun}
         />
 
         {/* Sync Mode Info Header banner */}
@@ -597,18 +613,22 @@ export default function App() {
 
         {/* Content layout: Top Row (Microphone) */}
         <div className="w-full">
-          <AudioRecorder 
-            onAnalyze={handleAnalyzeStream} 
-            isProcessing={isProcessing} 
+          <AudioRecorder
+            key={recorderKey}
+            onAnalyze={handleAnalyzeStream}
+            isProcessing={isProcessing}
             onShowToast={showToast}
-            clearSignal={clearSignal}
             onChangeTranscript={setLiveTranscript}
             liveSummary={liveSummary}
             proofResult={proofResult}
             busy={busy}
-            autoRun={autoRun}
-            onAutoRunChange={setAutoRun}
             onRunNow={() => runLive(liveTranscript.trim())}
+            onSaveToDrive={() => handleSaveToDrive(
+              liveDraft?.organizedFolder || "Scribant Session",
+              "Live Notes.md",
+              liveSummary,
+            )}
+            savingDrive={savingDrive}
           />
         </div>
 
@@ -616,13 +636,19 @@ export default function App() {
         <div className="pt-2">
           <ActiveSession
             run={displayedRun}
-            onExecuteCalendar={handleExecuteCalendar}
-            onExecuteTask={handleExecuteTask}
-            onExecuteSearch={handleExecuteSearch}
+            onExecuteCalendar={i => executeItem("calendar", i)}
+            onExecuteTask={i => executeItem("task", i)}
+            onExecuteSearch={i => executeItem("search", i)}
             onUndoCalendar={i => handleUndo("calendar", i)}
             onUndoTask={i => handleUndo("task", i)}
-            onUpdateCalendar={handleUpdateCalendar}
-            onUpdateTask={handleUpdateTask}
+            onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
+            onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
+            onSaveToDrive={() => handleSaveToDrive(
+              activeAnalysis?.organizedFolder || "Scribant Session",
+              "Session Summary.md",
+              activeAnalysis?.summary || "",
+            )}
+            savingDrive={savingDrive}
             isLiveAnalyzing={busy.plan}
           />
         </div>

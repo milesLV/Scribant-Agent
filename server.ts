@@ -3,12 +3,10 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import "dotenv/config";
-import { proofreadAndCorrect } from "./transcriber";
-import { cleanJsonString, splitTiers, resolvePlanDates } from "./server-utils";
-import { applyCorrections } from "./src/utils/transcript";
-import { gcalCreateEvent, gtasksCreateTask, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, askAgent, intentClassifier, liveSummarizer, proofreader, groundedSearcher } from "./agents";
+import { splitTiers, logUserTranscript } from "./server-utils";
+import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
+import { KEYS, askAgent, groundedSearcher } from "./agents";
+import { runOrchestrator, type Stage } from "./orchestrator";
 
 const app = express();
 app.use(express.json());
@@ -18,22 +16,8 @@ const PORT = Number(process.env.PORT) || 3000;
 
 setLogLevel(LogLevel.WARN); // silence ADK's per-event INFO logging
 
-// An agent plus the parsing its answer needs. The one-shot routes below and the /api/live pipeline
-// are two callers of the same two functions, so neither can drift from the other.
-
-// Obvious typos → auto-corrections, ambiguous mishearings → low-confidence flags.
-const runProofread = (text: string) =>
-  proofreadAndCorrect(text, async (p) => ({ text: (await askAgent(proofreader(p), p.contents)).text }));
-
-// Transcript → calendar/task/search items, with chrono overriding the model's date arithmetic.
-const runClassifier = async (text: string, liveSummary: string, refISO: string) =>
-  resolvePlanDates(
-    JSON.parse(cleanJsonString((await askAgent(
-      intentClassifier(liveSummary),
-      `Current Time context: ${refISO}\n\nStream of thoughts:\n"${text}"`,
-    )).text || "{}")),
-    refISO,
-  );
+// Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
+// so no two of them can drift apart the way four hand-wired agent calls did.
 
 // Saves the user pasting their own client ID: serve the one already in credentials.json. client_id
 // only — it is public by design in the implicit flow, and the secret never leaves the server.
@@ -48,13 +32,28 @@ app.get("/api/config", async (_req, res) => {
 
 app.post("/api/analyze", async (req, res) => {
   try {
-    const { text, currentLocalTime, liveSummary } = req.body;
+    const { text, currentLocalTime, liveSummary, userId, sessionId } = req.body;
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
 
-    const parsed = await runClassifier(text, liveSummary, currentLocalTime || new Date().toISOString());
+    // Archive the raw transcript per user. Finalize only — /api/live fires every couple of seconds
+    // with the same growing text and would write the session hundreds of times. A disk failure must
+    // not 500 an analysis the user already spent tokens on.
+    try {
+      logUserTranscript(userId, sessionId, text);
+    } catch (e: any) {
+      console.warn("[analyze] transcript log failed:", e?.message || e);
+    }
+
+    const { plan } = await runOrchestrator({
+      stages: new Set<Stage>(["plan"]),
+      text,
+      refISO: currentLocalTime || new Date().toISOString(),
+      liveSummary,
+    });
+    const parsed = plan ?? {};
     console.log(`[analyze] text=${text.length}ch → events=${parsed.calendarEvents?.length ?? 0} tasks=${parsed.tasks?.length ?? 0} queries=${parsed.searchQueries?.length ?? 0}`);
     res.json(parsed);
   } catch (error: any) {
@@ -70,7 +69,12 @@ app.post("/api/transcribe-correct", async (req, res) => {
       res.status(400).json({ error: "Text is required and must be a string." });
       return;
     }
-    res.json(await runProofread(text));
+    const { proof } = await runOrchestrator({
+      stages: new Set<Stage>(["proof"]),
+      text,
+      refISO: new Date().toISOString(),
+    });
+    res.json({ corrections: proof?.corrections ?? [], words: proof?.words ?? [] });
   } catch (error: any) {
     console.error("Transcribe-correct failed:", error);
     res.status(500).json({ error: error.message || "Failed to proofread transcript." });
@@ -78,9 +82,9 @@ app.post("/api/transcribe-correct", async (req, res) => {
 });
 
 // One request per capture tick, never three: separate per-stage requests race each other and
-// multiply 429s. Proofread runs FIRST, then summarize + classify in parallel over the corrected
-// text. Stages stream back as newline-delimited JSON the moment each finishes, so the fast
-// proofread lands without waiting on the slow classifier.
+// multiply 429s. The orchestrator runs proofread FIRST, then summarize + classify in parallel over
+// the corrected text; this route forwards each stage as newline-delimited JSON the moment it lands,
+// so the fast proofread doesn't wait on the slow classifier.
 //
 // Additive by design: /api/analyze, /api/transcribe-correct and /api/search keep their contracts
 // (the evals and the "Analyze Thoughts" finalize button still use them).
@@ -95,35 +99,19 @@ app.post("/api/live", async (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.flushHeaders();
   const send = (obj: unknown) => { if (!res.writableEnded) res.write(JSON.stringify(obj) + "\n"); };
-  // One stage failing must not sink the others — a 429 on the classifier shouldn't lose the proofread.
-  const stage = async (name: string, run: () => Promise<object>) => {
-    try { send({ stage: name, ...(await run()) }); }
-    catch (e: any) { send({ stage: name, error: e?.message || `${name} failed` }); }
-  };
 
-  const refISO = currentLocalTime || new Date().toISOString();
   try {
-    // Stage 1 gates the other two: they should reason over corrected text, not raw speech. The
-    // corrections themselves still go to the client, which owns applying them to what's on screen.
-    let corrected = text;
-    await stage("proof", async () => {
-      const { corrections, words } = await runProofread(text);
-      corrected = applyCorrections(text, words, corrections).text;
-      // Echoing `corrected` lets the client mark it as already-processed — otherwise applying the
-      // correction edits the transcript and re-arms the debounce, costing a whole second cycle.
-      return { text, corrected, corrections, words };
+    // Skip the expensive classifier when the client says this tick added too little to re-plan.
+    const stages = new Set<Stage>(withPlan === false ? ["proof", "summary"] : ["proof", "summary", "plan"]);
+    await runOrchestrator({
+      stages,
+      text,
+      refISO: currentLocalTime || new Date().toISOString(),
+      liveSummary,
+      // One stage failing must not sink the others — the orchestrator reports each stage
+      // independently, error included, so a 429 on the classifier still ships the proofread.
+      onStage: (stage, payload) => send({ stage, ...payload }),
     });
-
-    await Promise.all([
-      stage("summary", async () => ({
-        summary: (await askAgent(liveSummarizer, `Raw draft thoughts:\n"${corrected}"`)).text.trim(),
-      })),
-      // Skipped when the client says this tick added too little to be worth re-planning.
-      withPlan === false ? Promise.resolve() : stage("plan", async () => ({
-        text: corrected,
-        plan: await runClassifier(corrected, liveSummary, refISO),
-      })),
-    ]);
     console.log(`[live] text=${text.length}ch plan=${withPlan === false ? "skipped" : "ran"}`);
   } catch (error: any) {
     console.error("Live API failed:", error);
@@ -176,11 +164,12 @@ app.post("/api/execute", async (req, res) => {
       res.status(400).json({ error: "accessToken is required (sandbox mode executes client-side)." });
       return;
     }
-    // Undo: delete exactly the resource a previous create returned the id for.
+    // Undo: delete exactly the resource a previous create returned the id for. Keyed by the action
+    // being undone; Drive saves have no undo.
     if (action === "delete") {
-      const del = { calendar: gcalDeleteEvent, task: gtasksDeleteTask }[kind as string];
+      const del = { create_calendar_event: gcalDeleteEvent, create_task: gtasksDeleteTask }[kind as string];
       if (!del) {
-        res.status(400).json({ error: `Unknown kind "${kind}" (expected "calendar" or "task").` });
+        res.status(400).json({ error: `Unknown kind "${kind}" (expected "create_calendar_event" or "create_task").` });
         return;
       }
       if (!id || typeof id !== "string") {
@@ -191,21 +180,26 @@ app.post("/api/execute", async (req, res) => {
       res.json({ ok: true });
       return;
     }
-    if (!item || typeof item !== "object" || typeof item.title !== "string" || !item.title) {
-      res.status(400).json({ error: "item with a string title is required." });
+    if (!item || typeof item !== "object") {
+      res.status(400).json({ error: "item is required." });
       return;
     }
-    if (kind === "calendar") {
-      if (typeof item.start !== "string" || !item.start) {
-        res.status(400).json({ error: "calendar item requires a start time." });
-        return;
-      }
-      res.json({ id: await gcalCreateEvent(accessToken, item) });
-    } else if (kind === "task") {
-      res.json({ id: await gtasksCreateTask(accessToken, item) });
-    } else {
-      res.status(400).json({ error: `Unknown kind "${kind}" (expected "calendar" or "task").` });
+    // `kind` IS the registry action name — the client sends what the agent would call.
+    const workspaceAction = WORKSPACE_ACTIONS[kind as string];
+    if (!workspaceAction) {
+      res.status(400).json({ error: `Unknown kind "${kind}" (expected ${Object.keys(WORKSPACE_ACTIONS).map(k => `"${k}"`).join(", ")}).` });
+      return;
     }
+    // The action's own schema is the request validation: an item shape the model could not have
+    // proposed is one this endpoint will not execute either.
+    const parsed = workspaceAction.parameters.safeParse(item);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      res.status(400).json({ error: `${kind} item is invalid: ${issue.path.join(".") || "item"} — ${issue.message}.` });
+      return;
+    }
+    const result = await workspaceAction.run(accessToken, parsed.data);
+    res.json({ id: result.eventId ?? result.taskId ?? result.folderId ?? result.fileId });
   } catch (error: any) {
     console.error("Execute API failed:", error);
     res.status(500).json({ error: error.message || "Failed to execute action." });

@@ -1,6 +1,9 @@
-// Pure, deterministic helpers pulled out of server.ts so they can be unit-tested without
-// booting the HTTP server. No LLM, no network — run the self-check with: tsx server-utils.ts
+// Deterministic helpers pulled out of server.ts so they can be unit-tested without booting the
+// HTTP server. No LLM, no network — run the self-check with: tsx server-utils.ts
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as chrono from "chrono-node";
 
@@ -32,6 +35,27 @@ export function splitTiers(raw: string): { condensed: string; inDepth: string } 
   const condensed = (cond?.[1]?.trim()) || text.split(/(?<=[.!?])\s+/)[0] || text;
   const inDepth = (det?.[1]?.trim()) || text;
   return { condensed, inDepth };
+}
+
+// Both ids arrive in an unauthenticated request body and become path segments, so anything that
+// isn't [A-Za-z0-9_-] is stripped — "../../etc" must not escape the transcripts directory.
+const safeSeg = (s: unknown, fallback: string) =>
+  (typeof s === "string" ? s : "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || fallback;
+
+// Append one raw transcript to ./data/transcripts/{userId}/{sessionId}.jsonl. `root` exists so the
+// self-check can write to a temp dir instead of the repo.
+// ponytail: sync append — one write per finalize. Move to fs.promises if it ever blocks a request.
+export function logUserTranscript(
+  userId: unknown,
+  sessionId: unknown,
+  text: string,
+  root = path.join(process.cwd(), "data", "transcripts"),
+): string {
+  const dir = path.join(root, safeSeg(userId, "default_user"));
+  fs.mkdirSync(dir, { recursive: true });
+  const logFile = path.join(dir, `${safeSeg(sessionId, "session")}.jsonl`);
+  fs.appendFileSync(logFile, JSON.stringify({ timestamp: new Date().toISOString(), text }) + "\n", "utf8");
+  return logFile;
 }
 
 // Drop calendar events with a missing/blank/placeholder start (the client only filters on title).
@@ -146,6 +170,25 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(plan.tasks[0].dueDate, "2026-07-03");                    // "by Friday" re-resolved
   assert.equal(plan.tasks[1].dueDate, "");                              // no deadline -> not invented
   assert.deepEqual(resolvePlanDates({}, R), {});                        // empty plan is a no-op
+
+  // logUserTranscript — the ids are attacker-controlled path segments, so this is the check that matters.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "scribant-log-"));
+  try {
+    const escaped = logUserTranscript("../../etc", "../session", "hi", root);
+    assert.ok(escaped.startsWith(root + path.sep), `traversal escaped the root: ${escaped}`);
+    assert.equal(path.basename(escaped), "session.jsonl");
+
+    const file = logUserTranscript("user-1", "run-99", "lunch tomorrow at noon", root);
+    logUserTranscript("user-1", "run-99", "and call mom", root);          // appends, never overwrites
+    const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2);
+    assert.equal(JSON.parse(lines[0]).text, "lunch tomorrow at noon");
+    assert.ok(!isNaN(Date.parse(JSON.parse(lines[1]).timestamp)));
+    assert.ok(fs.readFileSync(logUserTranscript("", "", "x", root), "utf8").length > 0); // blank ids -> defaults
+    assert.ok(fs.existsSync(path.join(root, "default_user", "session.jsonl")));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 
   console.log("server-utils self-check ✓");
 })();

@@ -1,15 +1,20 @@
-// Provenance helpers shared by the UI and reconciliation. Pure + browser-safe (no node imports).
+// Provenance helpers shared by the UI. Pure + browser-safe (no node imports).
+
+// Below this, a transcribed word is flagged as a likely mishearing rather than trusted outright.
+// The one place this is defined — AudioRecorder and the eval grader import it rather than each
+// carrying their own copy, so retuning it can't silently drift out of sync between them.
+export const CONFIDENCE_THRESHOLD = 0.7;
 
 // Auto-apply the router's obvious corrections to `base`, returning the corrected text and the
-// surviving FLAG words (confidence < 0.7) with offsets shifted to match. Corrected words drop out
-// of the flag list. Edits use each word's char span; trailing/leading punctuation the tokenizer
-// glued on ("tomorow." -> "tomorrow.") is preserved. Offset-safe via a running left-to-right shift.
+// surviving FLAG words (confidence < CONFIDENCE_THRESHOLD) with offsets shifted to match. Corrected
+// words drop out of the flag list. Edits use each word's char span; trailing/leading punctuation the
+// tokenizer glued on ("tomorow." -> "tomorrow.") is preserved. Offset-safe via a running left-to-right shift.
 interface Span { text: string; start: number; end: number; confidence: number; alternatives?: string[]; }
 export function applyCorrections(
   base: string,
   words: Span[],
   corrections: { index: number; from: string; to: string }[],
-  confidenceThreshold = 0.7,
+  confidenceThreshold = CONFIDENCE_THRESHOLD,
 ): { text: string; words: Span[] } {
   const looseEq = (a: string, b: string) => a.replace(/\W/g, "").toLowerCase() === b.replace(/\W/g, "").toLowerCase();
   const edits = corrections
@@ -53,19 +58,10 @@ export function applyCorrections(
   return { text, words: flags };
 }
 
-// Stable id so the same trigger phrase maps to the same item across re-analyses (lets reconciliation
-// switch to a hash only if items ever clash.
-export function itemId(prefix: string, ...keys: (string | undefined)[]): string {
-  const key = keys.find(k => k && k.trim()) || "x";
-  const slug = key.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
-  return `${prefix}-${slug}`;
-}
-
 if (typeof process !== "undefined" && process.argv[1]?.endsWith("transcript.ts")) {
   const eq = (a: unknown, b: unknown, m: string) => {
     if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
   };
-  eq(itemId("cal", undefined, "Paint Room!"), "cal-paint-room", "id slug + fallback");
 
   // applyCorrections: two edits, trailing period preserved, no leftover flags
   const w1 = [

@@ -13,13 +13,13 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import assert from "node:assert/strict";
-import "dotenv/config";
-import { GoogleGenAI } from "@google/genai";
+import { LlmAgent, Gemini } from "@google/adk";
+import { askAgent, KEYS } from "../agents";
+import { applyCorrections, CONFIDENCE_THRESHOLD } from "../src/utils/transcript";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA = path.join(HERE, "data");
 const BASE = process.env.EVAL_BASE_URL || "http://localhost:3000";
-const CONFIDENCE_THRESHOLD = 0.7;
 
 // ---- tiny helpers ----------------------------------------------------------
 const norm = (s: string) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -56,21 +56,16 @@ function werWord(hyp: string, ref: string): number {
       d[i][j] = a[i - 1] === b[j - 1] ? d[i - 1][j - 1] : 1 + Math.min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1]);
   return d[a.length][b.length] / b.length;
 }
-// Apply {index,from,to} corrections back onto whitespace tokens (index-then-text fallback) to score WER.
-function applyCorrections(text: string, corrections: any[]): string {
-  const w = text.split(/\s+/);
-  // Deletions (empty `to`) are collected and dropped at the END: splicing mid-loop would shift the
-  // indices the remaining corrections are still addressing. Assigning "" instead would leave an
-  // empty token and join() would emit a double space, quietly inflating WER.
-  const drop = new Set<number>();
-  for (const c of corrections) {
-    let i = c.index;
-    if (!(w[i] !== undefined && norm(w[i]).includes(norm(c.from)))) i = w.findIndex(x => norm(x).includes(norm(c.from)));
-    if (i < 0 || w[i] === undefined) continue;
-    if (c.to === "") drop.add(i); else w[i] = c.to;
-  }
-  return w.filter((_, i) => !drop.has(i)).join(" ");
-}
+// Score WER against the text the CLIENT would end up showing — so the eval grades the same
+// application the app performs (src/utils/transcript.ts), not a second implementation of it.
+const correctedText = (text: string, words: any[], corrections: any[]) =>
+  applyCorrections(text, words, corrections).text;
+
+// The word spans /api/transcribe-correct returns, for self-check fixtures that stand in for it.
+const spansOf = (text: string) => {
+  let at = 0;
+  return text.split(" ").map(t => { const start = at; at += t.length + 1; return { text: t, start, end: start + t.length, confidence: 1 }; });
+};
 
 type Cat = "calendar" | "task" | "search" | "none";
 const CATS: Cat[] = ["calendar", "task", "search"];
@@ -210,7 +205,7 @@ function gradeCorrection(c: any, out: any) {
   let overFlag = 0;
   for (const w of flagged) if (!expFlagTokens.has(tok(w.text)[0])) { overFlag++; fails.push(`over-flag: '${w.text}'`); }
 
-  const wer = c.gold ? werWord(applyCorrections(c.text, corrections), c.gold) : undefined;
+  const wer = c.gold ? werWord(correctedText(c.text, out.words || [], corrections), c.gold) : undefined;
   return {
     kind: "correction", id: c.id, note: c.note, pass: fails.length === 0, fails,
     correctExpected: (c.expect.correct || []).length, correctHit, overCorrect,
@@ -231,22 +226,18 @@ async function post(pathname: string, body: any): Promise<any> {
 // ---- LLM judge (eval-only, gated behind --judge) ---------------------------
 // Deterministic checks cover structure/facts (sentence counts, mentions, source count).
 // The judge grades only the SUBJECTIVE `judge.quality` rubric. Kept in eval-land, not prod.
-let _judgeClient: GoogleGenAI | null = null;
-function judgeClient(): GoogleGenAI {
-  if (_judgeClient) return _judgeClient;
-  const key = ["GEMINI_API_KEY", "GEMINI_API_KEY1", "GEMINI_API_KEY2", "GEMINI_API_KEY3"]
-    .map(n => process.env[n]).find(k => k && k.trim());
-  if (!key) throw new Error("--judge needs a GEMINI_API_KEY in .env");
-  _judgeClient = new GoogleGenAI({ apiKey: key.trim() });
-  return _judgeClient;
-}
+// Built on the same askAgent the app uses, so the judge gets key rotation for free instead of a
+// second Gemini SDK with its own key lookup.
+const judgeAgent = (apiKey: string) => new LlmAgent({
+  name: "eval_judge",
+  model: new Gemini({ model: "gemini-2.5-flash", apiKey }),
+  instruction: `You are grading an AI answer. Reply ONLY JSON: {"pass": <boolean>, "reason": "<one short sentence>"}`,
+  generateContentConfig: { responseMimeType: "application/json" },
+});
 async function judge(rubric: string, content: string): Promise<{ pass: boolean; reason: string }> {
-  const r = await judgeClient().models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: `You are grading an AI answer.\nRUBRIC: ${rubric}\n\nCONTENT:\n${content}\n\nReply ONLY JSON: {"pass": <boolean>, "reason": "<one short sentence>"}`,
-    config: { responseMimeType: "application/json" },
-  });
-  try { return JSON.parse((r.text || "{}").replace(/```json?|```/g, "").trim()); }
+  if (!KEYS.length) throw new Error("--judge needs a GEMINI_API_KEY in .env");
+  const { text } = await askAgent(judgeAgent, `RUBRIC: ${rubric}\n\nCONTENT:\n${content}`);
+  try { return JSON.parse((text || "{}").replace(/```json?|```/g, "").trim()); }
   catch { return { pass: false, reason: "judge output unparseable" }; }
 }
 
@@ -422,14 +413,14 @@ function selfCheck() {
   const cg = gradeCorrection(
     { id: "c", text: "I need to bye a knew phone.", gold: "I need to buy a new phone.",
       expect: { correct: [{ from: "bye", to: "buy" }, { from: "knew", to: "new" }], flag: [] } },
-    { corrections: [{ index: 3, from: "bye", to: "buy" }, { index: 5, from: "knew", to: "new" }], words: [] });
+    { corrections: [{ index: 3, from: "bye", to: "buy" }, { index: 5, from: "knew", to: "new" }], words: spansOf("I need to bye a knew phone.") });
   assert.equal(cg.pass, true, "clean correction case should pass");
   assert.equal(cg.wer, 0, "corrected text should match gold -> WER 0");
 
   // over-correction: touching a clean sentence must fail
   const oc = gradeCorrection(
     { id: "o", text: "Deploy the cluster tonight.", expect: { correct: [], flag: [] } },
-    { corrections: [{ index: 1, from: "the", to: "a" }], words: [] });
+    { corrections: [{ index: 1, from: "the", to: "a" }], words: spansOf("Deploy the cluster tonight.") });
   assert.equal(oc.pass, false, "over-correction should fail");
   assert.equal(oc.overCorrect, 1);
 
@@ -450,28 +441,30 @@ function selfCheck() {
   assert.equal(tc.pass, true, "good calendar content should pass");
 
   // --- deletions: WER must see the token removed, not blanked ---
-  assert.equal(
-    applyCorrections("I went to the stork store", [{ index: 4, from: "stork", to: "" }]),
-    "I went to the store", "deletion removes the token (no double space)");
-  assert.equal(
-    werWord(applyCorrections("I went to the stork store", [{ index: 4, from: "stork", to: "" }]), "I went to the store"),
-    0, "deleted disfluency scores WER 0 against gold");
+  const storkText = "I went to the stork store";
+  const storkWords = storkText.split(" ").reduce((acc: any[], t) => {
+    const start = acc.length ? acc[acc.length - 1].end + 1 : 0;
+    return [...acc, { text: t, start, end: start + t.length, confidence: 1 }];
+  }, []);
+  const storkFix = correctedText(storkText, storkWords, [{ index: 4, from: "stork", to: "" }]);
+  assert.equal(storkFix, "I went to the store", "deletion removes the token (no double space)");
+  assert.equal(werWord(storkFix, "I went to the store"), 0, "deleted disfluency scores WER 0 against gold");
 
   // an expected delete is not satisfied by some other edit of the same word
   const dc = gradeCorrection(
     { id: "d", text: "I went to the stork store", expect: { correct: [{ from: "stork", to: "" }], flag: [] } },
-    { corrections: [{ index: 4, from: "stork", to: "stock" }], words: [] });
+    { corrections: [{ index: 4, from: "stork", to: "stock" }], words: spansOf("I went to the stork store") });
   assert.equal(dc.pass, false, "substitution must not satisfy an expected deletion");
 
   const dc2 = gradeCorrection(
     { id: "d2", text: "I went to the stork store", expect: { correct: [{ from: "stork", to: "" }], flag: [] } },
-    { corrections: [{ index: 4, from: "stork", to: "" }], words: [] });
+    { corrections: [{ index: 4, from: "stork", to: "" }], words: spansOf("I went to the stork store") });
   assert.equal(dc2.pass, true, "actual deletion satisfies an expected deletion");
 
   // precision trap: deleting a word nobody asked to remove is an over-correction
   const dc3 = gradeCorrection(
     { id: "d3", text: "It was very very cold", expect: { correct: [], flag: [] } },
-    { corrections: [{ index: 3, from: "very", to: "" }], words: [] });
+    { corrections: [{ index: 3, from: "very", to: "" }], words: spansOf("It was very very cold") });
   assert.equal(dc3.pass, false, "unrequested deletion fails as an over-correction");
 
   console.log("eval graders self-check ✓");

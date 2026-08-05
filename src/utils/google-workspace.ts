@@ -1,4 +1,7 @@
-import { CalendarEvent, TaskItem } from "../types";
+import { CalendarEvent, TaskItem, DriveDocItem } from "../types";
+// Type-only: erased at build, so the server-only module (zod, REST calls) never enters the client
+// bundle — only the shape of its action-name keys does.
+import type { WORKSPACE_ACTIONS } from "../../workspace-tools";
 
 // In-memory or localStorage cache for sandbox state so it persists across runs
 const SANDBOX_STATE_KEY = "scribant_sandbox";
@@ -6,44 +9,21 @@ const SANDBOX_STATE_KEY = "scribant_sandbox";
 interface SandboxState {
   events: CalendarEvent[];
   tasks: TaskItem[];
+  docs: DriveDocItem[];
+  folders: { id: string; name: string }[];
 }
 
-const DEFAULT_SANDBOX_STATE: SandboxState = {
-  events: [
-    {
-      id: "cal-weekly-planning-sync",
-      title: "Weekly Planning Sync",
-      description: "Brainstorming and alignment session with the engineering team.",
-      start: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Tomorrow
-      end: new Date(Date.now() + 25 * 60 * 60 * 1000).toISOString(),
-      status: "scheduled",
-      eventId: "mock-evt-1"
-    }
-  ],
-  tasks: [
-    {
-      id: "task-consolidate-q2-feedback",
-      title: "Consolidate Q2 feedback document",
-      notes: "Pull notes from the shared drive and compile bullet points.",
-      status: "created",
-      taskId: "mock-task-1"
-    }
-  ]
-};
-
-// Always hand out a COPY: sandboxAdd pushes into whatever this returns, so returning the shared
-// default would mutate it — and then resetSandboxState() writes back the very items it should drop.
-const freshDefaults = (): SandboxState => structuredClone(DEFAULT_SANDBOX_STATE);
+// Starts empty: nothing renders sandbox state, so seeded demo items were only ever visible to
+// whoever opened localStorage.
+const freshDefaults = (): SandboxState => ({ events: [], tasks: [], docs: [], folders: [] });
 
 function getSandboxState(): SandboxState {
   const data = localStorage.getItem(SANDBOX_STATE_KEY);
-  if (!data) {
-    const seeded = freshDefaults();
-    localStorage.setItem(SANDBOX_STATE_KEY, JSON.stringify(seeded));
-    return seeded;
-  }
+  if (!data) return freshDefaults();
   try {
-    return JSON.parse(data);
+    // Sandbox state saved before Drive existed has no docs/folders — fill them in rather than
+    // letting the Drive paths read undefined.
+    return { docs: [], folders: [], ...JSON.parse(data) };
   } catch {
     return freshDefaults();
   }
@@ -66,8 +46,12 @@ function sandboxAdd(prefix: string, push: (state: SandboxState, id: string) => v
 // GOOGLE CALENDAR SERVICE
 // ==========================================
 
+// The client asks for exactly what an agent would call, so /api/execute needs no vocabulary of its
+// own to translate — this is the registry's own key set, not a hand-copied list that could drift.
+type ExecKind = keyof typeof WORKSPACE_ACTIONS;
+
 // Real mode executes server-side: the item + OAuth token go to /api/execute. Sandbox stays local.
-async function executeOnServer(kind: "calendar" | "task", item: object, token: string): Promise<string> {
+async function executeOnServer(kind: ExecKind, item: object, token: string): Promise<string> {
   const res = await fetch("/api/execute", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -83,7 +67,7 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
     return sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, status: "scheduled", eventId: id }));
   }
   const { title, description, start, end, allDay } = event;
-  return executeOnServer("calendar", { title, description, start, end, allDay }, token);
+  return executeOnServer("create_calendar_event", { title, description, start, end, allDay }, token);
 }
 
 // ==========================================
@@ -95,14 +79,44 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
     return sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id }));
   }
   const { title, notes, dueDate } = task;
-  return executeOnServer("task", { title, notes, dueDate }, token);
+  return executeOnServer("create_task", { title, notes, dueDate }, token);
+}
+
+// ==========================================
+// GOOGLE DRIVE SERVICE
+// ==========================================
+
+// Reuse the folder when this session already has one, so repeated saves land in one place.
+export async function createDriveFolder(token: string | null, folderName: string): Promise<string> {
+  if (!token) {
+    const existing = getSandboxState().folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
+    if (existing) return existing.id;
+    return sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName }));
+  }
+  return executeOnServer("create_drive_folder", { folderName }, token);
+}
+
+export async function uploadDriveFile(
+  token: string | null,
+  fileName: string,
+  content: string,
+  folderId?: string
+): Promise<string> {
+  if (!token) {
+    return sandboxAdd("mock-doc", (s, id) => s.docs.push({ name: fileName, fileId: id, folderId }));
+  }
+  return executeOnServer("create_drive_doc", { fileName, content, folderId }, token);
 }
 
 // Undo a create: real mode deletes via /api/execute by the exact id the create returned; sandbox
 // drops the matching entry from local state.
-export async function deleteCreatedItem(token: string | null, kind: "calendar" | "task", id: string): Promise<void> {
+export async function deleteCreatedItem(
+  token: string | null,
+  kind: "create_calendar_event" | "create_task",
+  id: string,
+): Promise<void> {
   if (!token) {
-    const [list, idKey] = kind === "calendar" ? ["events", "eventId"] as const : ["tasks", "taskId"] as const;
+    const [list, idKey] = kind === "create_calendar_event" ? ["events", "eventId"] as const : ["tasks", "taskId"] as const;
     const state = getSandboxState();
     state[list] = (state[list] as any[]).filter(x => x[idKey] !== id);
     saveSandboxState(state);

@@ -14,6 +14,8 @@ interface HeaderProps {
   onSetAutonomyMode: (mode: AutonomyMode) => void;
   allowUncertain: boolean;
   onSetAllowUncertain: (allow: boolean) => void;
+  autoRun: boolean;
+  onAutoRunChange: (on: boolean) => void;
 }
 
 const AUTONOMY_OPTIONS: { mode: AutonomyMode; label: string; description: string }[] = [
@@ -33,7 +35,9 @@ export default function Header({
   autonomyMode,
   onSetAutonomyMode,
   allowUncertain,
-  onSetAllowUncertain
+  onSetAllowUncertain,
+  autoRun,
+  onAutoRunChange
 }: HeaderProps) {
   const [inputClientId, setInputClientId] = useState(clientId || "");
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -173,6 +177,20 @@ export default function Header({
                 </label>
               )}
             </div>
+            {/* Lives here rather than above the live notes so that panel's header can hold the
+                Drive button. It is the only brake on the live pipeline's token spend. */}
+            <label className="flex items-center gap-2 pt-1 cursor-pointer w-fit">
+              <input
+                type="checkbox"
+                checked={autoRun}
+                onChange={(e) => onAutoRunChange(e.target.checked)}
+                className="accent-amber-600"
+              />
+              <span className="text-[10.5px] font-semibold text-stone-600 font-sans">
+                Auto-run live notes while you speak
+                <span className="font-normal text-stone-400"> — off means the sparkles button runs it on demand</span>
+              </span>
+            </label>
           </div>
 
           <div className="pt-1">

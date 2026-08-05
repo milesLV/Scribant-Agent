@@ -3,14 +3,21 @@
 // Factories, not singletons: Gemini captures the API key when the INSTANCE is constructed, so
 // rotating onto a fresh key means building a fresh agent. Any agent cached across requests would
 // pin the first key forever and silently defeat the rotation in askAgent.
-import "dotenv/config";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { LlmAgent, Gemini, Runner, InMemorySessionService, GOOGLE_SEARCH } from "@google/adk";
+import type { ReadonlyContext } from "@google/adk";
 import { z } from "zod";
 import { SKILLS, skillSchemaProperties } from "./skills";
+import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcriber";
 
 const MODEL = "gemini-2.5-flash";
+
+// Sub-agents read their input from session state rather than the user message: inside the
+// orchestrator the message is the raw transcript, but everything downstream of the proofreader must
+// reason over the CORRECTED text. `corrected` is seeded by the orchestrator for callers that skip
+// the proofread stage, so this key is always populated.
+const corrected = (ctx: ReadonlyContext) => ctx.state.get<string>("corrected") ?? "";
 
 // Every Gemini key in .env, primary first. Free-tier keys exhaust after a run or two, so askAgent
 // rotates through them on 429 before it resorts to waiting.
@@ -30,10 +37,29 @@ type AgentFactory = (apiKey: string) => LlmAgent;
 export const liveSummarizer: AgentFactory = (apiKey) => new LlmAgent({
   name: "live_summarizer",
   model: new Gemini({ model: MODEL, apiKey }),
-  instruction: `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
+  instruction: (ctx) => `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
 The user is speaking or typing their thoughts live.
 Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
-Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points. Highlight key terms or entities in bold format (e.g., **Key Term**).`,
+Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points. Highlight key terms or entities in bold format (e.g., **Key Term**).
+
+Raw draft thoughts:
+"${corrected(ctx)}"`,
+  outputKey: "summary",
+  // The transcript arrives via state, so peer/user turns in the session add nothing but tokens —
+  // and inside a ParallelAgent they would leak the classifier's JSON into this prompt.
+  includeContents: "none",
+});
+
+// Obvious typos → auto-corrections, ambiguous mishearings → low-confidence flags. transcriber.ts
+// owns the instruction, the indexed-token prompt and the parsing of the reply.
+export const proofreader: AgentFactory = (apiKey) => new LlmAgent({
+  name: "proofreader",
+  model: new Gemini({ model: MODEL, apiKey }),
+  instruction: (ctx) =>
+    `${PROOFREAD_CORRECT_INSTRUCTION}\n\n${buildProofreadPrompt(ctx.state.get<string>("rawText") ?? "").contents}`,
+  generateContentConfig: { responseMimeType: "application/json" },
+  outputKey: "proofRaw",
+  includeContents: "none",
 });
 
 // Grounded search. Grounding can't be combined with a JSON outputSchema, so the answer stays
@@ -43,17 +69,6 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
   model: new Gemini({ model: MODEL, apiKey }),
   instruction: "You are a research assistant. Use Google Search to ground your answer, then respond in exactly the format the user requests.",
   tools: [GOOGLE_SEARCH],
-});
-
-// Obvious typos → auto-corrections, ambiguous mishearings → low-confidence flags. transcriber.ts
-// owns the prompt and parsing and hands us the model params per call.
-export const proofreader = (p: { model?: string; config?: any }): AgentFactory => (apiKey) => new LlmAgent({
-  name: "proofreader",
-  model: new Gemini({ model: p.model || MODEL, apiKey }),
-  instruction: p.config?.systemInstruction ?? "",
-  generateContentConfig: p.config?.responseMimeType
-    ? { responseMimeType: p.config.responseMimeType }
-    : undefined,
 });
 
 // Prompt criteria + schema are generated once from the skill registry (skills.ts). Order is fixed:
@@ -71,25 +86,30 @@ const analyzeOutputSchema = z.object({
   organizedFolderName: z.string().describe("Descriptive 2-4 word label for this session."),
 });
 
-// Turn the transcript into calendar/task/search items. Curried on liveSummary because the
-// instruction embeds the request's live summary.
-export const intentClassifier = (liveSummary: string): AgentFactory => (apiKey) => new LlmAgent({
+// Turn the transcript into calendar/task/search items. Transcript, reference time and the live
+// summary all come from session state, so the same agent serves the live pipeline and finalize.
+export const intentClassifier: AgentFactory = (apiKey) => new LlmAgent({
   name: "intent_classifier",
   model: new Gemini({ model: MODEL, apiKey }),
-  // Transcript + time arrive in the user message; the instruction carries only the criteria
-  // and the live-summary context (referenced by the ideasSummary criteria).
-  instruction: `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
+  instruction: (ctx) => `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
 The user is speaking or writing their thoughts in an unfiltered "brain dump" format.
 Analyze the provided stream of thoughts and categorize segments into different structured action buckets.
 
-AI Live Notes Summary: "${liveSummary || ""}"
+AI Live Notes Summary: "${ctx.state.get<string>("liveSummary") ?? ""}"
 
 You MUST output strictly a JSON object with the following keys and criteria:
 
 ${analyzeCriteriaText}
 
-CRITICAL: If there are no items matching a category's strict criteria, you MUST return an empty array [] for that field. Do not generate empty or placeholder objects. Return ONLY the valid JSON object.`,
+CRITICAL: If there are no items matching a category's strict criteria, you MUST return an empty array [] for that field. Do not generate empty or placeholder objects. Return ONLY the valid JSON object.
+
+Current Time context: ${ctx.state.get<string>("refISO") ?? ""}
+
+Stream of thoughts:
+"${corrected(ctx)}"`,
   outputSchema: analyzeOutputSchema,
+  outputKey: "planRaw",
+  includeContents: "none",
   disallowTransferToParent: true,
   disallowTransferToPeers: true,
 });
@@ -101,7 +121,7 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
 // is not key-specific: no key helps, so it goes straight to backoff rather than hammering a struggling
 // backend with instant retries. Returns null when there's no road left and the caller should throw.
 // Pure so the branching is checkable without burning a request.
-function nextAttempt(
+export function nextAttempt(
   attempt: number,
   keyCount: number,
   statedDelayS: number | null,
@@ -113,16 +133,36 @@ function nextAttempt(
   return { sleepS: statedDelayS ?? 15 * (attempt - freeSwaps) };
 }
 
-const sessionService = new InMemorySessionService();
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-let keyIdx = 0; // sticky: after a rotation, later requests start on the key that last worked
+export const sessionService = new InMemorySessionService();
+export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Sticky: after a rotation, later requests start on the key that last worked. Shared with the
+// orchestrator runner — two independent cursors would each rediscover the same exhausted key.
+let keyIdx = 0;
+export const keyCursor = {
+  current: () => KEYS[keyIdx],
+  rotate: () => { keyIdx = (keyIdx + 1) % KEYS.length; return keyIdx; },
+  index: () => keyIdx,
+};
+
+// Classify an ADK error event: quota is per-key (another key may still have headroom); an overload
+// is the model's own problem, so no key swap helps. Shared by both runners.
+export function classifyError(errEvent: { errorCode?: unknown; errorMessage?: unknown }) {
+  const msg = String(errEvent.errorMessage || "");
+  const isQuota = String(errEvent.errorCode) === "429" || msg.includes("RESOURCE_EXHAUSTED");
+  const isOverload = String(errEvent.errorCode) === "503"
+    || ["overloaded", "high demand"].some(s => msg.includes(s));
+  // Gemini 429s carry a retryDelay ("retryDelay":"22s"); honor it over our own backoff.
+  const stated = Number(msg.match(/retryDelay[^0-9]*(\d+)/)?.[1]) || null;
+  return { msg, isQuota, isOverload, stated };
+}
 
 // Stateless agent call: ephemeral session per request, drain events, keep the last text and any
 // grounding metadata. ADK reports model failures as error EVENTS (errorCode/errorMessage), not
 // throws — they must be surfaced here or a 429 looks like an empty answer.
 export async function askAgent(make: AgentFactory, text: string): Promise<{ text: string; grounding?: any }> {
   for (let attempt = 1; ; attempt++) {
-    const agent = make(KEYS[keyIdx]);
+    const agent = make(keyCursor.current());
     const runner = new Runner({ appName: "scribant", agent, sessionService });
     let out = "";
     let grounding: any;
@@ -138,20 +178,14 @@ export async function askAgent(make: AgentFactory, text: string): Promise<{ text
     }
     if (!errEvent) return { text: out, grounding };
 
-    const msg = String(errEvent.errorMessage || "");
-    // Quota is per-key (another key may still have headroom); overload is the model's own problem.
-    const isQuota = String(errEvent.errorCode) === "429" || msg.includes("RESOURCE_EXHAUSTED");
-    const isOverload = String(errEvent.errorCode) === "503"
-      || ["overloaded", "high demand"].some(s => msg.includes(s));
-    // Gemini 429s carry a retryDelay ("retryDelay":"22s"); honor it over our own backoff.
-    const stated = Number(msg.match(/retryDelay[^0-9]*(\d+)/)?.[1]) || null;
+    const { msg, isQuota, isOverload, stated } = classifyError(errEvent);
     const plan = (isQuota || isOverload) ? nextAttempt(attempt, KEYS.length, stated, isQuota) : null;
     if (!plan) throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
 
-    if (isQuota) keyIdx = (keyIdx + 1) % KEYS.length; // no point swapping keys for an overload
+    if (isQuota) keyCursor.rotate(); // no point swapping keys for an overload
     console.warn(
       `[askAgent] ${errEvent.errorCode} on ${agent.name}` +
-      `${isQuota ? ` — switching to key ${keyIdx + 1}/${KEYS.length}` : ""}` +
+      `${isQuota ? ` — switching to key ${keyCursor.index() + 1}/${KEYS.length}` : ""}` +
       `${plan.sleepS ? `, waiting ${plan.sleepS}s` : ""} (attempt ${attempt})`
     );
     if (plan.sleepS) await sleep(plan.sleepS * 1000);
@@ -188,8 +222,21 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   const keyOf = (a: LlmAgent) => (a.canonicalModel as any).apiKey;
   assert.ok(liveSummarizer("k-test").canonicalModel instanceof Gemini);
   assert.equal(keyOf(liveSummarizer("k-test")), "k-test");
-  assert.equal(keyOf(intentClassifier("")("k-2")), "k-2");
-  assert.equal(keyOf(proofreader({ model: "gemini-2.5-flash" })("k-3")), "k-3");
+  assert.equal(keyOf(intentClassifier("k-2")), "k-2");
+  assert.equal(keyOf(proofreader("k-3")), "k-3");
+
+  // Sub-agents read their input from state, not from the user message — an instruction that ignored
+  // state would silently summarize/classify an empty transcript inside the orchestrator.
+  const stateCtx = (state: Record<string, string>) =>
+    ({ state: { get: (k: string) => state[k] } }) as any;
+  const instructionOf = async (a: LlmAgent, state: Record<string, string>) =>
+    String(typeof a.instruction === "function" ? await a.instruction(stateCtx(state)) : a.instruction);
+  assert.match(await instructionOf(liveSummarizer("k"), { corrected: "buy milk" }), /buy milk/);
+  const classifierPrompt = await instructionOf(intentClassifier("k"), { corrected: "buy milk", refISO: "2026-06-27T09:00:00", liveSummary: "notes so far" });
+  assert.match(classifierPrompt, /buy milk/);
+  assert.match(classifierPrompt, /2026-06-27T09:00:00/);
+  assert.match(classifierPrompt, /notes so far/);
+  assert.match(await instructionOf(proofreader("k"), { rawText: "buy milk" }), /0:buy 1:milk/);
 
   console.log("agents self-check ✓");
 }

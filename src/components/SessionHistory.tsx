@@ -1,5 +1,6 @@
 import { StreamRun } from "../types";
 import { Brain, FileText, Calendar, CheckSquare, ChevronRight } from "lucide-react";
+import { Panel } from "./ActiveSession";
 
 interface SessionHistoryProps {
   runs: StreamRun[];
@@ -7,34 +8,28 @@ interface SessionHistoryProps {
   onSelectRun: (id: string) => void;
 }
 
+// App only renders this component when runs.length > 0 (see App.tsx), so there is no empty state
+// to handle here — one place shows "no sessions yet", not two with different copy.
 export default function SessionHistory({
   runs,
   selectedRunId,
   onSelectRun
 }: SessionHistoryProps) {
-  
-  const formatDate = (isoStr: string) => {
-    const d = new Date(isoStr);
-    return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-  };
+  const formatDate = (isoStr: string) =>
+    new Date(isoStr).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
 
   return (
-    <div id="session-history-panel" className="bg-white border border-stone-200 rounded-2xl p-5 shadow-sm space-y-4">
-      <div className="flex items-center justify-between pb-3 border-b border-stone-100">
-        <h3 className="text-sm font-bold text-stone-800 flex items-center gap-2">
-          <Brain className="w-4 h-4 text-amber-600" />
-          Brain Dump Archive
-        </h3>
-        <span className="text-[10px] font-mono bg-stone-100 text-stone-500 border border-stone-200 px-2 py-0.5 rounded-full font-bold">
-          {runs.length} Sessions
-        </span>
-      </div>
-
-      {runs.length === 0 ? (
-        <div className="text-center py-6 text-xs text-stone-400 italic">
-          No previous sessions saved. Try speaking or typing your first thoughts!
-        </div>
-      ) : (
+    <div id="session-history-panel">
+      <Panel
+        icon={Brain}
+        iconClass="text-amber-600"
+        title="Brain Dump Archive"
+        action={
+          <span className="text-[10px] font-mono bg-stone-100 text-stone-500 border border-stone-200 px-2 py-0.5 rounded-full font-bold">
+            {runs.length} Sessions
+          </span>
+        }
+      >
         <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
           {runs.map((run) => {
             const isSelected = run.id === selectedRunId;
@@ -83,7 +78,7 @@ export default function SessionHistory({
             );
           })}
         </div>
-      )}
+      </Panel>
     </div>
   );
 }
