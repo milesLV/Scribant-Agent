@@ -27,6 +27,38 @@ declare global {
   }
 }
 
+// Maps a click point to a character offset in `container`'s rendered text, so switching from the
+// read-only view to a textarea can land the cursor where the user actually clicked instead of at 0 —
+// caretRangeFromPoint/caretPositionFromPoint give a DOM position, not a string index, so this walks
+// every text node in document order and sums lengths up to the hit.
+function caretOffsetFromPoint(x: number, y: number, container: Node): number | null {
+  const doc = document as any;
+  let node: Node | null = null;
+  let localOffset = 0;
+  if (doc.caretRangeFromPoint) {
+    const range = doc.caretRangeFromPoint(x, y);
+    if (!range) return null;
+    node = range.startContainer;
+    localOffset = range.startOffset;
+  } else if (doc.caretPositionFromPoint) {
+    const pos = doc.caretPositionFromPoint(x, y);
+    if (!pos) return null;
+    node = pos.offsetNode;
+    localOffset = pos.offset;
+  } else {
+    return null; // unsupported browser — caller leaves the default cursor position alone
+  }
+  if (!container.contains(node)) return null;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let total = 0;
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    if (n === node) return total + localOffset;
+    total += (n.textContent || "").length;
+  }
+  return total;
+}
+
 export default function AudioRecorder({
   onAnalyze,
   isProcessing,
@@ -52,6 +84,11 @@ export default function AudioRecorder({
   const manualStopRef = useRef(false);
 
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
+  // Where to place the cursor once the read-only view swaps for the textarea — computed from the
+  // click point BEFORE the swap, since the textarea is a fresh element with no memory of where in
+  // the div the user clicked. null means "couldn't compute it" (unsupported browser); leave it alone.
+  const pendingCaretRef = useRef<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Misheard-word proofread state. `words` are scored against the exact text in proofedTextRef
   // (offsets index into it), so corrections splice safely even as the live transcript moves on.
@@ -87,6 +124,18 @@ export default function AudioRecorder({
     setWords(flags.length ? flags : null);
     setActiveChip(null);
   }, [proofResult]);
+
+  // The textarea just replaced the read-only view (click-to-edit) — land the cursor where the click
+  // actually landed instead of wherever the browser's own autoFocus default puts it.
+  useEffect(() => {
+    if (!isEditingTranscript || pendingCaretRef.current === null) return;
+    const el = textareaRef.current;
+    if (!el) return;
+    const pos = Math.min(pendingCaretRef.current, el.value.length);
+    el.focus();
+    el.setSelectionRange(pos, pos);
+    pendingCaretRef.current = null;
+  }, [isEditingTranscript]);
 
   // Swap a misheard word for one of its suggestions. Splice into the proofed text and shift every
   // later word's offsets by the length delta, so the OTHER highlights survive the edit intact.
@@ -327,24 +376,6 @@ export default function AudioRecorder({
             {isListening ? "Listening to your thoughts..." : "Capture your thoughts"}
           </h2>
         </div>
-        <button
-          onClick={() => {
-            setUseKeyboard(!useKeyboard);
-            setIsEditingTranscript(false);
-          }}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-stone-500 hover:text-stone-800 bg-stone-50 hover:bg-stone-100 rounded-lg transition-colors border border-stone-100"
-          title="Toggle Manual/Voice mode"
-        >
-          {useKeyboard ? (
-            <>
-              <Mic className="w-3.5 h-3.5" /> Use Voice
-            </>
-          ) : (
-            <>
-              <Keyboard className="w-3.5 h-3.5" /> Paste / Type Prompt
-            </>
-          )}
-        </button>
       </div>
 
       {recognitionError && (
@@ -432,6 +463,7 @@ export default function AudioRecorder({
             {useKeyboard || isEditingTranscript ? (
               <textarea
                 id="type-thoughts-textarea"
+                ref={textareaRef}
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
                 onBlur={() => setIsEditingTranscript(false)}
@@ -441,11 +473,13 @@ export default function AudioRecorder({
                 className="w-full flex-1 bg-transparent border-0 p-0 text-xs text-stone-700 leading-normal focus:ring-0 outline-none resize-none font-sans"
               />
             ) : (
-              <div 
-                onClick={() => {
-                  if (!isListening) {
-                    setIsEditingTranscript(true);
-                  }
+              <div
+                onClick={(e) => {
+                  if (isListening) return;
+                  pendingCaretRef.current = (transcript || interimTranscript)
+                    ? caretOffsetFromPoint(e.clientX, e.clientY, e.currentTarget)
+                    : 0;
+                  setIsEditingTranscript(true);
                 }}
                 className="w-full flex-1 overflow-y-auto text-xs text-stone-700 leading-relaxed font-sans cursor-text whitespace-pre-wrap pr-1"
                 title={isListening ? "Listening..." : "Click anywhere to edit transcript text"}
@@ -493,20 +527,6 @@ export default function AudioRecorder({
                   <FolderPlus className="w-3.5 h-3.5" />
                 )}
               </button>
-
-              <button
-                type="button"
-                onClick={onRunNow}
-                disabled={busy.summary || !transcript.trim()}
-                title="Run the live pipeline now — proofread, summary and draft actions"
-                className="p-1 text-stone-500 hover:text-amber-700 hover:bg-stone-100 rounded transition-colors disabled:opacity-44 cursor-pointer"
-              >
-                {busy.summary ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
-                ) : (
-                  <Sparkles className="w-3.5 h-3.5 text-stone-600 hover:text-amber-600" />
-                )}
-              </button>
             </div>
           </div>
 
@@ -522,7 +542,7 @@ export default function AudioRecorder({
                 ) : (
                   <>
                     <span>No summarized notes yet.</span>
-                    <span className="mt-1 text-[10px] text-stone-400 font-light">Notes will auto-generate periodically as you speak or type. Or click the sparkles button to refine draft right now!</span>
+                    <span className="mt-1 text-[10px] text-stone-400 font-light">Notes will auto-generate periodically as you speak or type.</span>
                   </>
                 )}
               </div>

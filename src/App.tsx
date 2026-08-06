@@ -20,6 +20,27 @@ import { isAutoExecutable } from "./utils/autonomy";
 // stale (lower) or the free-tier quota bites (higher).
 const PLAN_MIN_GROWTH = 80;
 
+// The debounce below waits for a quiet gap before running the live pipeline, which means someone
+// talking continuously without a 2s pause never gets proofread — the errors just sit there mid-tirade.
+// This caps how long a run can be postponed: once new speech has been pending this long, run on the
+// NEXT transcript change regardless of whether it was quiet.
+const LIVE_QUIET_MS = 2000;
+const LIVE_MAX_WAIT_MS = 6000;
+
+// State that's just mirrored to localStorage verbatim (no expiry/removal branching like the token
+// has) — one hook instead of a bespoke init-then-useEffect pair per field. Old plain-string values
+// (written before this hook existed) fail JSON.parse and fall back to the raw string, so existing
+// sessions aren't reset; every write from here on is JSON.
+function useLocalStorage<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return initial;
+    try { return JSON.parse(raw); } catch { return raw as unknown as T; }
+  });
+  useEffect(() => { localStorage.setItem(key, JSON.stringify(value)); }, [key, value]);
+  return [value, setValue] as const; // setValue accepts the updater-fn form too, same as useState
+}
+
 // Who the server files transcripts under. The Google account id once signed in; otherwise a
 // per-browser uuid so sandbox sessions still land in their own folder instead of one shared heap.
 const localUserId = () => {
@@ -46,23 +67,16 @@ export default function App() {
     }
     return null;
   });
-  const [clientId, setClientId] = useState<string>(() => {
-    return localStorage.getItem("gcp_client_id") || "";
-  });
-  const [runs, setRuns] = useState<StreamRun[]>(() => {
-    const data = localStorage.getItem("stream_runs_archive");
-    return data ? JSON.parse(data) : [];
-  });
+  const [clientId, setClientId] = useLocalStorage("gcp_client_id", "");
+  const [runs, setRuns] = useLocalStorage<StreamRun[]>("stream_runs_archive", []);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(() => {
     const data = localStorage.getItem("stream_runs_archive");
     if (!data) return null;
     const parsed: StreamRun[] = JSON.parse(data);
     return parsed.length > 0 ? parsed[0].id : null;
   });
-  const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>(() =>
-    (localStorage.getItem("autonomy_mode") as AutonomyMode) || "consent");
-  const [allowUncertain, setAllowUncertain] = useState<boolean>(() =>
-    localStorage.getItem("autonomy_allow_uncertain") === "true");
+  const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
+  const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
   const [userId, setUserId] = useState<string>(() => localStorage.getItem("gcp_user_id") || localUserId());
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -85,6 +99,9 @@ export default function App() {
   const lastSentTextRef = useRef("");
   const lastPlannedLenRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
+  // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
+  const pendingSinceRef = useRef<number | null>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -185,21 +202,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [token]);
 
-  // Sync state to local storage
-  useEffect(() => {
-    localStorage.setItem("stream_runs_archive", JSON.stringify(runs));
-  }, [runs]);
-
-  useEffect(() => {
-    if (clientId) {
-      localStorage.setItem("gcp_client_id", clientId);
-    } else {
-      localStorage.removeItem("gcp_client_id");
-    }
-  }, [clientId]);
-
-  useEffect(() => { localStorage.setItem("autonomy_mode", autonomyMode); }, [autonomyMode]);
-  useEffect(() => { localStorage.setItem("autonomy_allow_uncertain", String(allowUncertain)); }, [allowUncertain]);
+  // clientId/runs/autonomyMode/allowUncertain mirror themselves via useLocalStorage above.
 
   // Default the client ID from the server's credentials.json when none is saved.
   useEffect(() => {
@@ -279,19 +282,27 @@ export default function App() {
     if (msg.stage in busy) setBusy(b => ({ ...b, [msg.stage]: false }));
   };
 
-  // Debounce: one cycle 2s after the transcript stops changing.
+  // Debounce with a cap: normally waits for a 2s quiet gap, but continuous speech (interim results
+  // firing every few hundred ms) can keep resetting that gap indefinitely, so proofreading/summary
+  // would never run mid-tirade. Once this change has been waiting LIVE_MAX_WAIT_MS, run on the next
+  // tick instead of waiting for quiet.
   useEffect(() => {
     const text = liveTranscript.trim();
     if (!text) {
       setLiveDraft(null);
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
+      pendingSinceRef.current = null;
       return;
     }
     if (!autoRun || text.length < 15 || text === lastSentTextRef.current) return;
 
+    if (pendingSinceRef.current === null) pendingSinceRef.current = Date.now();
+    const waited = Date.now() - pendingSinceRef.current;
+    const delay = waited >= LIVE_MAX_WAIT_MS ? 0 : LIVE_QUIET_MS;
+
     if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
-    liveTimerRef.current = setTimeout(() => runLive(text), 2000);
+    liveTimerRef.current = setTimeout(() => { pendingSinceRef.current = null; runLive(text); }, delay);
     return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
   }, [liveTranscript, autoRun]);
 

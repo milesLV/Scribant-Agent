@@ -167,9 +167,11 @@ export default function ActiveSession({
   savingDrive,
   isLiveAnalyzing = false
 }: ActiveSessionProps) {
-  const [executingCal, setExecutingCal] = useState<number | null>(null);
-  const [executingTask, setExecutingTask] = useState<number | null>(null);
-  const [executingSearch, setExecutingSearch] = useState<number | null>(null);
+  // Which row (if any) of each list is mid-write. One record instead of three parallel useStates —
+  // a kind can only ever have one row executing at a time, same as before.
+  const [executing, setExecuting] = useState<Record<"calendar" | "task" | "search", number | null>>({
+    calendar: null, task: null, search: null,
+  });
 
   const analysis = run?.analysis;
   
@@ -185,30 +187,30 @@ export default function ActiveSession({
 
   // Spinner-on-the-clicked-row for a write: optional confirm, mark the row busy, always clear it.
   const runOnRow = async (
-    setBusy: (idx: number | null) => void,
+    kind: "calendar" | "task" | "search",
     idx: number,
     exec: () => Promise<void>,
     confirmMsg?: string,
   ) => {
     if (confirmMsg && !window.confirm(confirmMsg)) return;
-    setBusy(idx);
+    setExecuting(e => ({ ...e, [kind]: idx }));
     try {
       await exec();
     } finally {
-      setBusy(null);
+      setExecuting(e => ({ ...e, [kind]: null }));
     }
   };
 
   const handleCalClick = (idx: number, event: CalendarEvent) =>
-    runOnRow(setExecutingCal, idx, () => onExecuteCalendar(idx),
+    runOnRow("calendar", idx, () => onExecuteCalendar(idx),
       `Confirm Action: Double-check schedule details.\n\nEvent: ${event.title}\nStarts: ${new Date(event.start).toLocaleString()}\nEnds: ${new Date(event.end).toLocaleString()}\n\nDo you want to confirm and schedule this event on Google Calendar?`);
 
   const handleTaskClick = (idx: number, task: TaskItem) =>
-    runOnRow(setExecutingTask, idx, () => onExecuteTask(idx),
+    runOnRow("task", idx, () => onExecuteTask(idx),
       `Confirm Action: Log to-do task.\n\nTask: ${task.title}\nNotes: ${task.notes || "None"}\n\nDo you want to push this to Google Tasks?`);
 
   const handleSearchClick = (idx: number) =>
-    runOnRow(setExecutingSearch, idx, () => onExecuteSearch(idx));
+    runOnRow("search", idx, () => onExecuteSearch(idx));
 
   const toDatetimeLocalString = (isoString: string): string => {
     const d = new Date(isoString);
@@ -322,10 +324,10 @@ export default function ActiveSession({
                       {item.status === 'pending' && (
                         <button
                           onClick={() => handleSearchClick(idx)}
-                          disabled={executingSearch !== null}
+                          disabled={executing.search !== null}
                           className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
                         >
-                          {executingSearch === idx ? (
+                          {executing.search === idx ? (
                             <RefreshCw className="w-3 h-3 animate-spin" />
                           ) : (
                             <Play className="w-2.5 h-2.5" />
@@ -386,7 +388,7 @@ export default function ActiveSession({
                     onSubtitle={v => onUpdateCalendar(idx, { ...item, description: v })}
                     subtitlePlaceholder="Configure description..."
                     chip={<UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />}
-                    button={<ActionButton busy={executingCal === idx} disabled={executingCal !== null}
+                    button={<ActionButton busy={executing.calendar === idx} disabled={executing.calendar !== null}
                       onClick={() => handleCalClick(idx, item)} icon={Calendar} label="Add Event" />}
                   >
                     <div className="grid grid-cols-2 gap-2 text-[10px] font-sans pt-1 w-full">
@@ -430,7 +432,7 @@ export default function ActiveSession({
                   onSubtitle={v => onUpdateTask(idx, { ...item, notes: v })}
                   subtitlePlaceholder="Add notes..."
                   chip={<UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />}
-                  button={<ActionButton busy={executingTask === idx} disabled={executingTask !== null}
+                  button={<ActionButton busy={executing.task === idx} disabled={executing.task !== null}
                     onClick={() => handleTaskClick(idx, item)} icon={CheckSquare} label="Log To-Do" />}
                 >
                   {item.dueDate && (
