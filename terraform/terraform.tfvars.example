@@ -1,0 +1,7 @@
+# Example variables override
+project_prefix  = "scribant"
+environment     = "dev"
+region          = "us-central1"
+zone            = "us-central1-a"
+org_id          = "101096319108"
+billing_account = "01C57A-D0DCD2-49BE8B"

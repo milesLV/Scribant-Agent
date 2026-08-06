@@ -230,7 +230,7 @@ async function post(pathname: string, body: any): Promise<any> {
 // second Gemini SDK with its own key lookup.
 const judgeAgent = (apiKey: string) => new LlmAgent({
   name: "eval_judge",
-  model: new Gemini({ model: "gemini-2.5-flash", apiKey }),
+  model: new Gemini({ model: "gemini-3.6-flash", apiKey }),
   instruction: `You are grading an AI answer. Reply ONLY JSON: {"pass": <boolean>, "reason": "<one short sentence>"}`,
   generateContentConfig: { responseMimeType: "application/json" },
 });

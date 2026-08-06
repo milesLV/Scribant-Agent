@@ -9,3 +9,13 @@ coverage/
 credentials.json
 /evals/out
 /data
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!.tfvars.example
+.terraform.lock.hcl
+
