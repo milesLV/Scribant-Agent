@@ -1,4 +1,10 @@
 # Example variables override
+
+# Leave project_id unset ("") to auto-generate an ID via the pet-name scheme
+# (project_prefix-environment-<random-pet>). Set it to target an existing project
+# (e.g. "agentclinicep04"); when set, terraform destroy will refuse to delete the project.
+project_id = ""
+
 project_prefix  = "scribant"
 environment     = "dev"
 region          = "us-central1"

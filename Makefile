@@ -1,4 +1,4 @@
-.PHONY: help dev build lint check eval tf-init tf-validate tf-plan tf-apply tf-output tf-destroy clean
+.PHONY: help dev build lint check eval tf-init tf-validate tf-plan tf-apply tf-import tf-output tf-destroy clean
 
 .DEFAULT_GOAL := help
 
@@ -18,6 +18,7 @@ help: ## Display available commands
 	@echo "  make tf-validate  - Validate Terraform syntax & logic"
 	@echo "  make tf-plan      - Show execution plan for GCP infrastructure"
 	@echo "  make tf-apply     - Apply Terraform changes to GCP"
+	@echo "  make tf-import    - Import an existing GCP project into state (usage: make tf-import PROJECT_ID=agentclinicep04)"
 	@echo "  make tf-output    - Display outputs from applied Terraform state"
 	@echo "  make tf-destroy   - Destroy Terraform-managed infrastructure"
 	@echo ""
@@ -51,6 +52,12 @@ tf-plan:
 
 tf-apply:
 	terraform -chdir=terraform apply
+
+# Import an existing GCP project (e.g. one created outside Terraform) into state
+# before applying with project_id set, so Terraform adopts it instead of trying
+# to create a project with an already-taken ID.
+tf-import:
+	terraform -chdir=terraform import -var="project_id=$(PROJECT_ID)" google_project.project $(PROJECT_ID)
 
 tf-output:
 	terraform -chdir=terraform output

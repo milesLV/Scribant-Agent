@@ -1,7 +1,13 @@
+variable "project_id" {
+  type        = string
+  default     = ""
+  description = "Explicit GCP project ID to use (e.g. an existing project like \"agentclinicep04\"). When set, this exact ID is used instead of the generated pet-name ID, and the project is protected from deletion via `terraform destroy` (lifecycle.prevent_destroy). Leave empty to auto-generate an ID with the pet-name scheme."
+}
+
 variable "project_prefix" {
   type        = string
   default     = "scribant"
-  description = "Prefix for the GCP project name and project ID."
+  description = "Prefix for the GCP project name and project ID. Only used when project_id is not set."
 }
 
 variable "environment" {
