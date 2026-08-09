@@ -72,18 +72,16 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
 });
 
 // Prompt criteria + schema are generated once from the skill registry (skills.ts). Order is fixed:
-// ideasSummary (1), each skill (2..), organizedFolderName (last) — the calendar criteria's
-// "(see #3)" reference relies on tasks landing at index 3.
+// ideasSummary (1), each skill (2..) — the calendar criteria's "(see #3)" reference relies on
+// tasks landing at index 3.
 const analyzeCriteriaText = [
   { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
   ...SKILLS.map(s => ({ key: s.name, body: s.description })),
-  { key: "organizedFolderName", body: `(string) A clean, professional, descriptive 2-4 word name for this session as a whole, used to label it in the archive (e.g. "Project Beta Alignment", "Home Gardening Brainstorm").` },
 ].map((e, i) => `${i + 1}. "${e.key}": ${e.body}`).join("\n");
 
 const analyzeOutputSchema = z.object({
   ideasSummary: z.string().describe("A beautifully organized list of summarized ideas and insights, in markdown bullet points."),
   ...skillSchemaProperties(),
-  organizedFolderName: z.string().describe("Descriptive 2-4 word label for this session."),
 });
 
 // Turn the transcript into calendar/task/search items. Transcript, reference time and the live

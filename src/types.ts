@@ -69,7 +69,6 @@ export interface AnalysisResult {
   calendarEvents: CalendarEvent[];
   tasks: TaskItem[];
   searchQueries: SearchQueryItem[];
-  organizedFolder?: string; // grouping label for the session (shown in the archive list)
 }
 
 export interface StreamRun {

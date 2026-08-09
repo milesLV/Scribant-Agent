@@ -427,7 +427,7 @@ export default function AudioRecorder({
                 <FileText className="w-3.5 h-3.5 text-stone-500" />
               )}
               <span className="text-[10px] font-bold text-stone-700 uppercase tracking-widest font-mono">
-                {useKeyboard || isEditingTranscript ? "Editable Input Text" : "Live Unfiltered Transcript"}
+                {useKeyboard || isEditingTranscript ? "Editable Input Text" : "Live Transcript"}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -469,7 +469,7 @@ export default function AudioRecorder({
                 onBlur={() => setIsEditingTranscript(false)}
                 autoFocus={isEditingTranscript && !useKeyboard}
                 disabled={isProcessing}
-                placeholder="Write down whatever is on your mind. For example:&#10;'Today is a solid day. Discussing the product roadmap with Alice on June 10 at 2pm. Keep a note to draft the mock schema beforehand. I wonder who designed the Concorde airplane originally? Also, remember to grab coffee on the way home.'"
+                placeholder="Write down whatever is on your mind. For example:&#10;'Today was busy, but good. I got a lot done on the product roadmap and Alice and I will meet tomorrow at 2 to discuss it. I need to make a mockup before it. Also, remember to grab more coffee beans on the way home.'"
                 className="w-full flex-1 bg-transparent border-0 p-0 text-xs text-stone-700 leading-normal focus:ring-0 outline-none resize-none font-sans"
               />
             ) : (

@@ -41,17 +41,6 @@ function useLocalStorage<T>(key: string, initial: T) {
   return [value, setValue] as const; // setValue accepts the updater-fn form too, same as useState
 }
 
-// Who the server files transcripts under. The Google account id once signed in; otherwise a
-// per-browser uuid so sandbox sessions still land in their own folder instead of one shared heap.
-const localUserId = () => {
-  let id = localStorage.getItem("scribant_local_user_id");
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem("scribant_local_user_id", id);
-  }
-  return id;
-};
-
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
     const storedToken = localStorage.getItem("gcp_access_token");
@@ -77,7 +66,6 @@ export default function App() {
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
-  const [userId, setUserId] = useState<string>(() => localStorage.getItem("gcp_user_id") || localUserId());
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -99,6 +87,10 @@ export default function App() {
   const lastSentTextRef = useRef("");
   const lastPlannedLenRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Minted once per recording (first non-empty transcript), reused by every /api/live tick AND the
+  // final /api/analyze call — one id, one server-side session file, auto-saved every few seconds
+  // instead of only at finalize. Cleared whenever liveTranscript resets to "".
+  const sessionIdRef = useRef<string | null>(null);
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
@@ -121,7 +113,6 @@ export default function App() {
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
       .map((q: any) => ({ ...q, status: "pending" as const })),
-    organizedFolder: rawRes.organizedFolderName || "Session Notes"
   });
 
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
@@ -167,24 +158,6 @@ export default function App() {
       }
     }
   }, []);
-
-  // Resolve the Google account id once per token (the userinfo.profile scope is already requested),
-  // and fall back to the local uuid when signed out. Only `sub` is kept — no profile data.
-  useEffect(() => {
-    if (!token) {
-      localStorage.removeItem("gcp_user_id");
-      setUserId(localUserId());
-      return;
-    }
-    fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => {
-        if (!d?.sub) return;
-        localStorage.setItem("gcp_user_id", d.sub);
-        setUserId(d.sub);
-      })
-      .catch(() => {});
-  }, [token]);
 
   // Monitor token expiration periodically
   useEffect(() => {
@@ -238,7 +211,7 @@ export default function App() {
       const res = await fetch("/api/live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, withPlan }),
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, withPlan, sessionId: sessionIdRef.current }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) throw new Error(`Live pipeline failed (HTTP ${res.status}).`);
@@ -293,8 +266,10 @@ export default function App() {
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
       pendingSinceRef.current = null;
+      sessionIdRef.current = null;
       return;
     }
+    if (!sessionIdRef.current) sessionIdRef.current = `run-${Date.now()}`;
     if (!autoRun || text.length < 15 || text === lastSentTextRef.current) return;
 
     if (pendingSinceRef.current === null) pendingSinceRef.current = Date.now();
@@ -346,9 +321,11 @@ export default function App() {
 
   const handleAnalyzeStream = async (text: string) => {
     setIsProcessing(true);
-    // Minted before the request so the server files the transcript under the same id the archived
-    // run gets — one JSONL file per session, matching what the user sees in their history.
-    const runId = `run-${Date.now()}`;
+    // The SAME id the live loop's been auto-saving under (minted on the first non-empty transcript
+    // tick) — so finalize appends the last, authoritative line to the session file the live ticks
+    // were already writing, rather than starting a new one. Falls back to a fresh id only if
+    // finalize is somehow reached without a live tick ever having run.
+    const runId = sessionIdRef.current ?? `run-${Date.now()}`;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -361,7 +338,7 @@ export default function App() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, userId, sessionId: runId }),
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, sessionId: runId }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -553,6 +530,7 @@ export default function App() {
       inFlightRef.current = false;
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
+      sessionIdRef.current = null;
       resetSandboxState();
       showToast("All session data cleared.");
     }
@@ -635,7 +613,7 @@ export default function App() {
             busy={busy}
             onRunNow={() => runLive(liveTranscript.trim())}
             onSaveToDrive={() => handleSaveToDrive(
-              liveDraft?.organizedFolder || "Scribant Session",
+              "Scribant Session",
               "Live Notes.md",
               liveSummary,
             )}
@@ -655,7 +633,7 @@ export default function App() {
             onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
             onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
             onSaveToDrive={() => handleSaveToDrive(
-              activeAnalysis?.organizedFolder || "Scribant Session",
+              "Scribant Session",
               "Session Summary.md",
               activeAnalysis?.summary || "",
             )}

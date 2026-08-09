@@ -4,8 +4,8 @@
 //
 // Scope note: a Skill here is EXTRACTION only (what the model emits). Execution stays per-item
 // behind the client's review-then-act UI (handleExecute* in App.tsx → /api/execute), deliberately
-// not a batch loop, so there's no `execute` here. Document-level outputs (ideasSummary,
-// organizedFolderName) are not skills; they live inline in agents.ts.
+// not a batch loop, so there's no `execute` here. Document-level outputs (ideasSummary) are not
+// skills; they live inline in agents.ts.
 import { z } from "zod";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
