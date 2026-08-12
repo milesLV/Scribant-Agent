@@ -371,22 +371,11 @@ export default function App() {
 
   const handleAnalyzeStream = async (text: string) => {
     setIsProcessing(true);
-<<<<<<< Updated upstream
     // The SAME id the live loop's been auto-saving under (minted on the first non-empty transcript
     // tick) — so finalize appends the last, authoritative line to the session file the live ticks
     // were already writing, rather than starting a new one. Falls back to a fresh id only if
     // finalize is somehow reached without a live tick ever having run.
     const runId = sessionIdRef.current ?? `run-${Date.now()}`;
-=======
-    // Identifies this finalized run in the client-side archive list (SessionHistory) — unrelated to
-    // the transcript archive's fixed user/session id, this one just needs to be unique per finalize
-    // so multiple past analyses stay distinguishable in the sidebar.
-    const runId = `run-${Date.now()}`;
-    // Catch up whatever the 15s interval hasn't flushed yet — covers both the last <15s tail of a
-    // long session and a short typed-and-submitted session that never saw a single tick.
-    flushTranscriptSegment(text.slice(flushedLenRef.current));
-    flushedLenRef.current = text.length;
->>>>>>> Stashed changes
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -399,11 +388,7 @@ export default function App() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-<<<<<<< Updated upstream
         body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, sessionId: runId }),
-=======
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary }),
->>>>>>> Stashed changes
       });
       if (!res.ok) {
         const err = await res.json();

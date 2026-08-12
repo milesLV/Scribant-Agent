@@ -1,6 +1,8 @@
 // Deterministic helpers pulled out of server.ts so they can be unit-tested without booting the
 // HTTP server. No LLM, no network — run the self-check with: tsx server-utils.ts
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as chrono from "chrono-node";
@@ -41,17 +43,11 @@ export function splitTiers(raw: string): { condensed: string; inDepth: string } 
 export const safeSeg = (s: unknown, fallback: string) =>
   (typeof s === "string" ? s : "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || fallback;
 
-<<<<<<< Updated upstream
 // Zero-padded UTC bucket path: {YYYY}/{MM}/{DD}/{HH}, computed server-side from the write instant
-// (never a client-supplied timestamp, so it can't be steered into an arbitrary path). Exported for
-// memory.ts's captureMemoryEvent, the sole writer of the date-based capture hierarchy now.
+// (never a client-supplied timestamp, so it can't be steered into an arbitrary path). Shared by
+// memory.ts's captureMemoryEvent and logUserTranscript below — both date-based capture hierarchies
+// bucket the same way.
 const pad = (n: number) => String(n).padStart(2, "0");
-export function hourBucket(d: Date): string {
-  return path.join(String(d.getUTCFullYear()), pad(d.getUTCMonth() + 1), pad(d.getUTCDate()), pad(d.getUTCHours()));
-=======
-const pad = (n: number) => String(n).padStart(2, "0");
-// UTC year/month/day/hour, used to bucket the transcript archive so a day's or hour's worth of
-// sessions can be browsed/pruned without scanning every session ever captured.
 export function hourBucket(d: Date): string {
   return path.join(String(d.getUTCFullYear()), pad(d.getUTCMonth() + 1), pad(d.getUTCDate()), pad(d.getUTCHours()));
 }
@@ -78,7 +74,6 @@ export function logUserTranscript(
   const logFile = path.join(dir, `${safeSeg(sessionId, "session")}.jsonl`);
   fs.appendFileSync(logFile, JSON.stringify({ timestamp: now.toISOString(), text }) + "\n", "utf8");
   return logFile;
->>>>>>> Stashed changes
 }
 
 // Drop calendar events with a missing/blank/placeholder start (the client only filters on title).
@@ -192,13 +187,8 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(plan.tasks[1].dueDate, "");                              // no deadline -> not invented
   assert.deepEqual(resolvePlanDates({}, R), {});                        // empty plan is a no-op
 
-<<<<<<< Updated upstream
   assert.equal(hourBucket(new Date(Date.UTC(2026, 0, 5, 9))), path.join("2026", "01", "05", "09"));
   assert.equal(hourBucket(new Date(Date.UTC(2026, 10, 30, 23))), path.join("2026", "11", "30", "23"));
-=======
-  // hourBucket — UTC year/month/day/hour, zero-padded
-  assert.equal(hourBucket(new Date("2026-06-27T14:22:00.000Z")), path.join("2026", "06", "27", "14"));
-  assert.equal(hourBucket(new Date("2026-01-03T05:00:00.000Z")), path.join("2026", "01", "03", "05"));
 
   // logUserTranscript — the ids are attacker-controlled path segments, so this is the check that
   // matters most; also verifies the year/month/day/hour bucket that nests under each user's dir.
@@ -230,7 +220,6 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
->>>>>>> Stashed changes
 
   console.log("server-utils self-check ✓");
 })();

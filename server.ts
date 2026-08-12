@@ -3,7 +3,7 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import { splitTiers } from "./server-utils";
+import { splitTiers, logUserTranscript } from "./server-utils";
 import { captureMemoryEvent } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { KEYS, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
@@ -42,24 +42,17 @@ app.get("/api/config", async (_req, res) => {
 
 app.post("/api/analyze", async (req, res) => {
   try {
-<<<<<<< Updated upstream
     const { text, currentLocalTime, liveSummary, sessionId } = req.body;
-=======
-    const { text, currentLocalTime, liveSummary } = req.body;
->>>>>>> Stashed changes
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
 
-<<<<<<< Updated upstream
     // Durably save the raw transcript BEFORE calling the model, so the user's words survive even if
     // the plan call below fails — `plan` is omitted for now, filled in once it resolves below. A
     // disk failure must not 500 an analysis the user already spent tokens on.
     safeCapture("analyze", sessionId, { text });
 
-=======
->>>>>>> Stashed changes
     const { plan } = await runOrchestrator({
       stages: new Set<Stage>(["plan"]),
       text,
