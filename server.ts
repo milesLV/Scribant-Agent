@@ -6,11 +6,13 @@ import { setLogLevel, LogLevel } from "@google/adk";
 import { splitTiers } from "./server-utils";
 import { captureMemoryEvent } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, askAgent, groundedSearcher } from "./agents";
+import { KEYS, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 
 const app = express();
-app.use(express.json());
+// 15mb covers a base64-encoded ~8-10s audio chunk (see /api/transcribe-audio) with headroom; every
+// other route here sends plain text, well under that.
+app.use(express.json({ limit: "15mb" }));
 
 // 3000 by default: the OAuth redirect URI registered in Google Cloud is per-port.
 const PORT = Number(process.env.PORT) || 3000;
@@ -40,17 +42,24 @@ app.get("/api/config", async (_req, res) => {
 
 app.post("/api/analyze", async (req, res) => {
   try {
+<<<<<<< Updated upstream
     const { text, currentLocalTime, liveSummary, sessionId } = req.body;
+=======
+    const { text, currentLocalTime, liveSummary } = req.body;
+>>>>>>> Stashed changes
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
 
+<<<<<<< Updated upstream
     // Durably save the raw transcript BEFORE calling the model, so the user's words survive even if
     // the plan call below fails — `plan` is omitted for now, filled in once it resolves below. A
     // disk failure must not 500 an analysis the user already spent tokens on.
     safeCapture("analyze", sessionId, { text });
 
+=======
+>>>>>>> Stashed changes
     const { plan } = await runOrchestrator({
       stages: new Set<Stage>(["plan"]),
       text,
@@ -69,6 +78,23 @@ app.post("/api/analyze", async (req, res) => {
   } catch (error: any) {
     console.error("Analysis API failed:", error);
     res.status(500).json({ error: error.message || "Internal server error" });
+  }
+});
+
+// Thin, model-free archive write: one 15s segment (or a catch-up flush) of raw dictation, appended
+// as its own JSONL line. Safe to call constantly — no orchestrator/Gemini call, no quota spent.
+app.post("/api/transcript-segment", async (req, res) => {
+  try {
+    const { userId, sessionId, text } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "text is required and must be a string." });
+      return;
+    }
+    logUserTranscript(userId, sessionId, text);
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error("Transcript segment log failed:", error);
+    res.status(500).json({ error: error.message || "Failed to log transcript segment." });
   }
 });
 
@@ -176,6 +202,25 @@ app.post("/api/search", async (req, res) => {
   }
 });
 
+// One chunk of captured audio (mic or shared-tab) → verbatim text, via Gemini. The client is
+// expected to POST per-chunk (~8-10s of opus, base64), never accumulate a whole session client-side.
+app.post("/api/transcribe-audio", async (req, res) => {
+  try {
+    const { audio, mimeType, source } = req.body;
+    if (!audio || typeof audio !== "string") {
+      res.status(400).json({ error: "audio (base64) is required and must be a string." });
+      return;
+    }
+    const { text } = await askAgentParts(audioTranscriber, [
+      { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: audio } },
+    ]);
+    res.json({ text: text.trim(), source: source === "tab" ? "tab" : "mic" });
+  } catch (error: any) {
+    console.error("Audio transcription failed:", error);
+    res.status(500).json({ error: error.message || "Failed to transcribe audio." });
+  }
+});
+
 // Execute ONE reviewed item. The review-then-act gate is the client UI: this is only called after
 // a human approves an item, with their OAuth token forwarded per request. Sandbox mode never
 // reaches here (the client simulates locally when signed out).
@@ -230,9 +275,15 @@ app.post("/api/execute", async (req, res) => {
 
 // Startup: key check, then Vite middleware (dev) or static bundle (prod), then listen.
 async function main() {
-  // ADK reads the key when each agent is built — fail fast at startup if .env has none.
-  if (!KEYS.length) {
-    throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) found in .env. Please add one.");
+  // ADK reads the key (or the Vertex AI project/location) when each agent is built — fail fast at
+  // startup if .env has neither. Vertex mode auths via ADC/service account, not an API key, so an
+  // empty KEYS list is only fatal when GOOGLE_GENAI_USE_VERTEXAI isn't set.
+  const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || "");
+  if (!KEYS.length && !usingVertex) {
+    throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) found in .env, and GOOGLE_GENAI_USE_VERTEXAI is not set. Please add one.");
+  }
+  if (usingVertex && (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION)) {
+    throw new Error("GOOGLE_GENAI_USE_VERTEXAI is set but GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION is missing in .env.");
   }
 
   if (process.env.NODE_ENV !== "production") {
@@ -250,7 +301,10 @@ async function main() {
   }
 
   app.listen(PORT, "127.0.0.1", () => {
-    console.log(`Server running on http://127.0.0.1:${PORT} (${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""})`);
+    const authDesc = usingVertex
+      ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION}`
+      : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""}`;
+    console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
   });
 }

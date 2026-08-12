@@ -71,6 +71,16 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
   tools: [GOOGLE_SEARCH],
 });
 
+// Verbatim STT for one short audio chunk (shared-tab or mic capture — see /api/transcribe-audio).
+// The user message carries the audio as an inlineData part, not text, so this agent's instruction
+// is static; askAgentParts (not askAgent) is what supplies the actual clip.
+export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
+  name: "audio_transcriber",
+  model: new Gemini({ model: MODEL, apiKey }),
+  instruction: `Transcribe the spoken audio verbatim as plain text. No markdown, no speaker labels, no timestamps, no commentary — just the words said, in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
+  includeContents: "none",
+});
+
 // Prompt criteria + schema are generated once from the skill registry (skills.ts). Order is fixed:
 // ideasSummary (1), each skill (2..) — the calendar criteria's "(see #3)" reference relies on
 // tasks landing at index 3.
@@ -159,6 +169,13 @@ export function classifyError(errEvent: { errorCode?: unknown; errorMessage?: un
 // grounding metadata. ADK reports model failures as error EVENTS (errorCode/errorMessage), not
 // throws — they must be surfaced here or a 429 looks like an empty answer.
 export async function askAgent(make: AgentFactory, text: string): Promise<{ text: string; grounding?: any }> {
+  return askAgentParts(make, [{ text }]);
+}
+
+// Same call, but for a caller (audioTranscriber) whose input isn't plain text — an inlineData part
+// carrying an audio clip instead. Kept as a separate entry point rather than an overload so every
+// existing askAgent call site stays untouched.
+export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{ text: string; grounding?: any }> {
   for (let attempt = 1; ; attempt++) {
     const agent = make(keyCursor.current());
     const runner = new Runner({ appName: "scribant", agent, sessionService });
@@ -167,7 +184,7 @@ export async function askAgent(make: AgentFactory, text: string): Promise<{ text
     let errEvent: any = null;
     for await (const ev of runner.runEphemeral({
       userId: "local",
-      newMessage: { role: "user", parts: [{ text }] },
+      newMessage: { role: "user", parts },
     })) {
       if (ev.errorCode) errEvent = ev;
       const t = ev.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") ?? "";
