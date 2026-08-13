@@ -11,7 +11,7 @@ import { z } from "zod";
 import { SKILLS, skillSchemaProperties } from "./skills";
 import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcriber";
 
-const MODEL = "gemini-3.6-flash";
+export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.6-flash";
 
 if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
   process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;

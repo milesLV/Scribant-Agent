@@ -6,7 +6,7 @@ import { setLogLevel, LogLevel } from "@google/adk";
 import { splitTiers, logUserTranscript } from "./server-utils";
 import { captureMemoryEvent } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
+import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 
 const app = express();
@@ -298,8 +298,8 @@ async function main() {
 
   app.listen(PORT, "127.0.0.1", () => {
     const authDesc = usingVertex
-      ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION}`
-      : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""}`;
+      ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`
+      : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""} | Model: ${MODEL}`;
     console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
   });
