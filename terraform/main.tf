@@ -45,7 +45,7 @@ resource "google_project" "project" {
   deletion_policy = local.using_provided_project_id ? "PREVENT" : "DELETE"
 }
 
-# Enable required GCP APIs for Vertex AI and Memory Bank
+# Enable required GCP APIs
 resource "google_project_service" "services" {
   for_each = toset(var.gcp_services)
 
@@ -54,3 +54,46 @@ resource "google_project_service" "services" {
 
   disable_on_destroy = false
 }
+
+data "google_client_openid_userinfo" "me" {}
+
+locals {
+  # Use explicit support_email if set, otherwise fall back to active authenticated user email.
+  support_email = var.support_email != "" ? var.support_email : data.google_client_openid_userinfo.me.email
+}
+
+# Internal OAuth Consent Screen (Brand)
+# Internal brands require an organization context (org_id).
+resource "google_iap_brand" "project_brand" {
+  count             = var.org_id != "" ? 1 : 0
+  support_email     = local.support_email
+  application_title = "Scribant Agent"
+  project           = google_project.project.project_id
+
+  depends_on = [google_project_service.services]
+}
+
+# OAuth 2.0 Client Credentials
+resource "google_iap_client" "project_client" {
+  count        = var.org_id != "" ? 1 : 0
+  display_name = "Scribant Web Client"
+  brand        = google_iap_brand.project_brand[0].name
+}
+
+# Store OAuth client credentials locally in credentials.json at project root
+resource "local_file" "credentials_json" {
+  count    = var.org_id != "" ? 1 : 0
+  filename = "${path.module}/../credentials.json"
+  content  = jsonencode({
+    installed = {
+      client_id                   = google_iap_client.project_client[0].client_id
+      project_id                  = google_project.project.project_id
+      auth_uri                    = "https://accounts.google.com/o/oauth2/auth"
+      token_uri                   = "https://oauth2.googleapis.com/token"
+      auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+      client_secret               = google_iap_client.project_client[0].secret
+    }
+  })
+  file_permission = "0600"
+}
+

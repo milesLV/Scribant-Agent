@@ -22,3 +22,20 @@ output "enabled_services" {
   value       = keys(google_project_service.services)
   description = "List of enabled GCP services."
 }
+
+output "oauth_client_id" {
+  value       = try(google_iap_client.project_client[0].client_id, null)
+  description = "OAuth 2.0 Client ID."
+}
+
+output "oauth_client_secret" {
+  value       = try(google_iap_client.project_client[0].secret, null)
+  sensitive   = true
+  description = "OAuth 2.0 Client Secret."
+}
+
+output "credentials_json_path" {
+  value       = try(local_file.credentials_json[0].filename, null)
+  description = "Path to generated credentials.json file."
+}
+

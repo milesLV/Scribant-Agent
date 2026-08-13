@@ -48,12 +48,23 @@ variable "zone" {
 
 variable "gcp_services" {
   type        = list(string)
-  description = "List of GCP API services to enable for Vertex AI and Memory Bank."
+  description = "List of GCP API services to enable for Vertex AI, Memory Bank, Google Docs, Sheets, Drive, and IAP."
   default = [
     "cloudresourcemanager.googleapis.com",
     "serviceusage.googleapis.com",
     "aiplatform.googleapis.com",
     "generativelanguage.googleapis.com",
-    "discoveryengine.googleapis.com"
+    "discoveryengine.googleapis.com",
+    "docs.googleapis.com",
+    "sheets.googleapis.com",
+    "drive.googleapis.com",
+    "iap.googleapis.com"
   ]
 }
+
+variable "support_email" {
+  type        = string
+  default     = ""
+  description = "Support email for the internal OAuth consent screen (must be your email address or an organization Google Group)."
+}
+

@@ -112,6 +112,23 @@ export async function gdriveUploadDoc(token: string, fileName: string, content: 
   return meta.id;
 }
 
+export async function gdocsCreateDocument(token: string, title: string, content?: string): Promise<string> {
+  const doc = await googlePost("https://docs.googleapis.com/v1/documents", token, { title });
+  if (content && doc.documentId) {
+    await googlePost(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(doc.documentId)}:batchUpdate`, token, {
+      requests: [{ insertText: { location: { index: 1 }, text: content } }],
+    });
+  }
+  return doc.documentId;
+}
+
+export async function gsheetsCreateSpreadsheet(token: string, title: string): Promise<string> {
+  const sheet = await googlePost("https://sheets.googleapis.com/v1/spreadsheets", token, {
+    properties: { title },
+  });
+  return sheet.spreadsheetId;
+}
+
 interface WorkspaceAction {
   description: string;
   parameters: z.ZodObject<any>;
@@ -155,6 +172,21 @@ export const WORKSPACE_ACTIONS: Record<string, WorkspaceAction> = {
       folderId: z.string().optional().describe("Folder to upload into; omit for the Drive root"),
     }),
     run: async (token, { fileName, content, folderId }) => ({ fileId: await gdriveUploadDoc(token, fileName, content, folderId) }),
+  },
+  create_google_doc: {
+    description: "Create a native Google Document in Google Docs.",
+    parameters: z.object({
+      title: z.string().min(1).describe("Document title"),
+      content: z.string().optional().describe("Initial body text of the document"),
+    }),
+    run: async (token, { title, content }) => ({ fileId: await gdocsCreateDocument(token, title, content) }),
+  },
+  create_google_sheet: {
+    description: "Create a native Google Spreadsheet in Google Sheets.",
+    parameters: z.object({
+      title: z.string().min(1).describe("Spreadsheet title"),
+    }),
+    run: async (token, { title }) => ({ fileId: await gsheetsCreateSpreadsheet(token, title) }),
   },
 };
 
@@ -258,7 +290,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   // The registry: every capability /api/execute can dispatch to.
   assert.deepEqual(
     Object.keys(WORKSPACE_ACTIONS),
-    ["create_calendar_event", "create_task", "create_drive_folder", "create_drive_doc"],
+    ["create_calendar_event", "create_task", "create_drive_folder", "create_drive_doc", "create_google_doc", "create_google_sheet"],
   );
 
   // The schemas are what /api/execute validates with, so the rejections matter as much as the shapes.

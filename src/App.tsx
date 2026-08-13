@@ -72,8 +72,12 @@ export default function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(() => {
     const data = localStorage.getItem("stream_runs_archive");
     if (!data) return null;
-    const parsed: StreamRun[] = JSON.parse(data);
-    return parsed.length > 0 ? parsed[0].id : null;
+    try {
+      const parsed: StreamRun[] = JSON.parse(data);
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed[0].id : null;
+    } catch {
+      return null;
+    }
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
@@ -204,14 +208,14 @@ export default function App() {
 
   // clientId/runs/autonomyMode/allowUncertain mirror themselves via useLocalStorage above.
 
-  // Default the client ID from the server's credentials.json when none is saved.
+  // Always sync the client ID from the server's credentials.json if present.
   useEffect(() => {
-    if (clientId) return;
     fetch("/api/config")
       .then(r => r.json())
       .then(d => { if (d.googleClientId) setClientId(d.googleClientId); })
       .catch(() => {});
   }, []);
+
 
   // ONE capture cycle: proofread → summary + plan, streamed back stage by stage. One timer, not one
   // per stage — independent timers race each other and stack up 429s. Deliberately not keyed on
@@ -335,8 +339,8 @@ export default function App() {
       return;
     }
     const redirectUri = window.location.origin;
-    // drive.file is least privilege: this app only ever sees the files it created itself.
-    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile";
+    // Full CRUD scopes for Google Calendar, Tasks, Drive, Docs, and Sheets.
+    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/userinfo.profile";
 
     // Standard Implicit Grant Flow auth URL
     const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&include_granted_scopes=true&prompt=consent`;
