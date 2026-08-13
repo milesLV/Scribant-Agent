@@ -106,9 +106,65 @@ async function testLiveAutosave() {
   console.log(`  memory: ${mFile} (${lineCount(mFile)} line)`);
 }
 
+// Phase 2: Memory Bank API endpoints (/api/memory/ingest, /api/memory/retrieve, /api/memory/sync)
+async function testMemoryBankEndpoints() {
+  const sessionId = `test-bank-${Date.now()}`;
+  const text = "Planning a team offsite in Lake Tahoe with vegetarian catering options.";
+
+  // 1. Ingest via POST /api/memory/ingest
+  const ingestRes = await fetch(BASE + "/api/memory/ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      sessionId,
+      userId: "test-user",
+      plan: {
+        ideasSummary: "Team offsite in Tahoe",
+        tasks: [{ title: "Reserve cabin in Tahoe" }],
+      },
+    }),
+  });
+  if (!ingestRes.ok) throw new Error(`/api/memory/ingest -> ${ingestRes.status}: ${(await ingestRes.text()).slice(0, 200)}`);
+  const ingestData = await ingestRes.json();
+  assert.equal(ingestData.ok, true);
+  assert.equal(ingestData.sessionId, sessionId);
+  assert.equal(ingestData.userId, "test-user");
+
+  // 2. Retrieve via POST /api/memory/retrieve
+  const retrieveRes = await fetch(BASE + "/api/memory/retrieve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: "Tahoe", userId: "test-user" }),
+  });
+  if (!retrieveRes.ok) throw new Error(`/api/memory/retrieve -> ${retrieveRes.status}: ${(await retrieveRes.text()).slice(0, 200)}`);
+  const retrieveData = await retrieveRes.json();
+  assert.equal(retrieveData.ok, true);
+  assert.ok(retrieveData.count >= 1);
+  assert.ok(retrieveData.memories.some((m: any) => m.text.includes("Tahoe")));
+
+  // 3. Retrieve via GET /api/memory/retrieve
+  const getRes = await fetch(`${BASE}/api/memory/retrieve?query=Tahoe&userId=test-user`);
+  if (!getRes.ok) throw new Error(`GET /api/memory/retrieve -> ${getRes.status}`);
+  const getData = await getRes.json();
+  assert.equal(getData.ok, true);
+  assert.ok(getData.count >= 1);
+
+  // 4. Sync via POST /api/memory/sync
+  const syncRes = await fetch(BASE + "/api/memory/sync", { method: "POST" });
+  if (!syncRes.ok) throw new Error(`/api/memory/sync -> ${syncRes.status}`);
+  const syncData = await syncRes.json();
+  assert.equal(syncData.ok, true);
+  assert.ok(typeof syncData.syncedCount === "number");
+
+  console.log("memory bank ingest, retrieve, and sync endpoints ✓");
+}
+
 async function main() {
   await testFinalizeOnly();
   await testLiveAutosave();
+  await testMemoryBankEndpoints();
 }
 
 main().catch(e => { console.error("memory-capture integration test ✗", e); process.exitCode = 1; });
+

@@ -11,7 +11,25 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  VertexAiMemoryBankService,
+  InMemoryMemoryService,
+  type BaseMemoryService,
+  type MemoryEntry,
+  type SearchMemoryResponse,
+  type SingleBeforeModelCallback,
+  type Context,
+  type LlmRequest,
+} from "@google/adk";
 import { safeSeg, hourBucket } from "./server-utils";
+
+export {
+  VertexAiMemoryBankService,
+  InMemoryMemoryService,
+  type BaseMemoryService,
+  type MemoryEntry,
+  type SingleBeforeModelCallback,
+};
 
 // The three item categories the intent classifier extracts (skills.ts), grouped under one
 // "actionItems" parent for storage. The live classifier's own output/schema stays FLAT
@@ -44,7 +62,7 @@ function toActionItems(plan: any): { ideasSummary?: string; actionItems: ActionI
   return {
     ...(typeof plan.ideasSummary === "string" ? { ideasSummary: plan.ideasSummary } : {}),
     actionItems: {
-      todos: Array.isArray(plan.tasks) ? plan.tasks : [],
+      todos: Array.isArray(plan.tasks) ? plan.tasks : (Array.isArray(plan.todos) ? plan.todos : []),
       calendarEvents: Array.isArray(plan.calendarEvents) ? plan.calendarEvents : [],
       searchQueries: Array.isArray(plan.searchQueries) ? plan.searchQueries : [],
     },
@@ -105,104 +123,582 @@ export function captureMemoryEvent(
   return file;
 }
 
-// ponytail: self-check pins the overwrite/traversal/reshape behavior, plus the shrink-not-merge,
-// embedded-newline, and hour-boundary bring-forward edge cases above. hourBucket's own date math is
-// pinned by server-utils.ts's self-check (single source of truth).
-// Run: tsx memory.ts — no API key needed, no model is called.
-if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "scribant-memory-"));
-  try {
-    const escaped = captureMemoryEvent("../../etc", { text: "hi" }, root);
-    assert.ok(escaped.startsWith(root + path.sep), `traversal escaped the root: ${escaped}`);
-    assert.equal(path.basename(escaped), "etc.jsonl"); // ".." stripped, not the segment itself
+// ---- Phase 2: Vertex AI Memory Bank Integration ----------------------------
 
-    // The classifier's flat plan shape in -> nested actionItems out. "tasks" becomes "todos";
-    // calendarEvents/searchQueries keep their names but move under actionItems.
-    const flatPlan = {
-      ideasSummary: "* buy milk\n* call mom",
-      calendarEvents: [{ title: "Dentist" }],
-      tasks: [{ title: "Buy milk" }],
-      searchQueries: [{ query: "lactose free milk brands" }],
-    };
-    const file = captureMemoryEvent("run-99", { text: "lunch tomorrow at noon", plan: flatPlan }, root);
-    const nested = JSON.parse(fs.readFileSync(file, "utf8").trim()) as MemoryCapture;
-    assert.equal(nested.ideasSummary, flatPlan.ideasSummary);
-    assert.deepEqual(nested.actionItems, {
-      todos: [{ title: "Buy milk" }],
-      calendarEvents: [{ title: "Dentist" }],
-      searchQueries: [{ query: "lactose free milk brands" }],
-    });
-    assert.ok(!("plan" in nested), "flat plan should not survive alongside the reshaped fields");
+let memoryServiceInstance: BaseMemoryService | null = null;
 
-    // A tick with no plan (autosave before the classifier ran) omits actionItems entirely rather
-    // than writing three empty arrays every tick.
-    const noPlanFile = captureMemoryEvent("run-100", { text: "just talking" }, root);
-    assert.ok(!("actionItems" in JSON.parse(fs.readFileSync(noPlanFile, "utf8"))));
+export interface MemoryServiceConfig {
+  agentEngineId?: string;
+  projectId?: string;
+  location?: string;
+  expressModeApiKey?: string;
+  forceInMemory?: boolean;
+  client?: any;
+}
 
-    // A plan missing an array (e.g. the model omitted a key) reshapes to [] rather than undefined.
-    const partialFile = captureMemoryEvent("run-101", { text: "x", plan: { tasks: [{ title: "t" }] } }, root);
-    assert.deepEqual(JSON.parse(fs.readFileSync(partialFile, "utf8")).actionItems, {
-      todos: [{ title: "t" }], calendarEvents: [], searchQueries: [],
-    });
+// Instantiates a VertexAiMemoryBankService when configuration (AGENT_ENGINE_ID) is present,
+// or falls back to an InMemoryMemoryService for prototyping, tests, and offline use.
+export function createMemoryBankService(config?: MemoryServiceConfig): BaseMemoryService {
+  const agentEngineId = config?.agentEngineId ??
+    process.env.VERTEX_AI_AGENT_ENGINE_ID ??
+    process.env.AGENT_ENGINE_ID ??
+    process.env.MEMORY_BANK_AGENT_ENGINE_ID ??
+    process.env.REASONING_ENGINE_ID;
 
-    captureMemoryEvent("run-99", { text: "and call mom" }, root); // overwrites, never appends
-    const lines = fs.readFileSync(file, "utf8").trim().split("\n");
-    assert.equal(lines.length, 1, "second capture should replace the first, not grow the file");
-    const only = JSON.parse(lines[0]) as MemoryCapture;
-    assert.equal(only.content.parts[0].text, "and call mom");
-    assert.ok(!("actionItems" in only)); // plan omitted on the second call -> not carried over from the first
-    assert.ok(!isNaN(Date.parse(only.timestamp)));
+  const projectId = config?.projectId ??
+    process.env.GOOGLE_CLOUD_PROJECT ??
+    process.env.PROJECT_ID;
 
-    // Both captures landed in the same hour bucket, so they share a directory (bucketed by
-    // capture time, not by call — the second call didn't get its own hour folder).
-    assert.equal(path.dirname(file), path.dirname(captureMemoryEvent("run-99", { text: "x" }, root)));
+  const location = config?.location ??
+    process.env.VERTEX_AI_LOCATION ??
+    process.env.GOOGLE_CLOUD_LOCATION ??
+    "us-central1";
 
-    // A LATER capture with FEWER items must fully replace the earlier actionItems, not merge with
-    // them — overwrite semantics apply to the whole record, not a field-by-field union.
-    const growFile = captureMemoryEvent("run-shrink", { text: "x", plan: { tasks: [{ title: "a" }, { title: "b" }] } }, root);
-    captureMemoryEvent("run-shrink", { text: "x", plan: { tasks: [{ title: "a" }] } }, root);
-    assert.deepEqual(JSON.parse(fs.readFileSync(growFile, "utf8")).actionItems.todos, [{ title: "a" }],
-      "shrinking plan should fully replace, not merge with, the previous actionItems");
+  const expressModeApiKey = config?.expressModeApiKey ??
+    process.env.VERTEX_EXPRESS_MODE_API_KEY ??
+    process.env.GEMINI_API_KEY;
 
-    // Multi-line, quote-containing, unicode text must not break the one-record-per-line JSONL
-    // contract — JSON.stringify escapes newlines/quotes within the string value, so the file stays
-    // exactly one physical line no matter what the transcript itself contains.
-    const trickyText = 'Line one.\nLine "two" has quotes.\n\nEmoji: 🎉 and ünïcödé.';
-    const trickyFile = captureMemoryEvent("run-tricky", { text: trickyText }, root);
-    const rawLines = fs.readFileSync(trickyFile, "utf8").split("\n").filter(Boolean);
-    assert.equal(rawLines.length, 1, "embedded newlines in the transcript must not create extra physical lines");
-    assert.equal(JSON.parse(rawLines[0]).content.parts[0].text, trickyText);
-
-    // Hour-boundary crossing: a session's first tick lands in the 8 o'clock bucket, the next tick
-    // (same session) two hours later lands in the 10 o'clock bucket — the file must be brought
-    // forward, not left behind as an orphaned duplicate.
-    const hour8 = new Date(Date.UTC(2026, 0, 5, 8, 59, 58));
-    const hour10 = new Date(Date.UTC(2026, 0, 5, 10, 0, 2));
-    const fileAt8 = captureMemoryEvent("run-boundary", { text: "first tick, hour 8" }, root, hour8);
-    assert.ok(fs.existsSync(fileAt8));
-    const fileAt10 = captureMemoryEvent("run-boundary", { text: "second tick, hour 10" }, root, hour10);
-    assert.notEqual(fileAt8, fileAt10, "the file should move to the new hour bucket, not sit at a fixed path");
-    assert.ok(!fs.existsSync(fileAt8), "the stale hour-8 file should be removed once hour-10 has the up-to-date record");
-    assert.ok(fs.existsSync(fileAt10));
-    assert.equal(JSON.parse(fs.readFileSync(fileAt10, "utf8")).content.parts[0].text, "second tick, hour 10");
-    // The now-empty hour-8 directory (only ever held this one session) is cleaned up too.
-    assert.ok(!fs.existsSync(path.dirname(fileAt8)), "an hour bucket left empty by the move should be removed");
-
-    // A third tick nine hours later still finds and removes the (now hour-10) stale copy — proves
-    // the backward walk isn't hardcoded to a single hop.
-    const hour19 = new Date(Date.UTC(2026, 0, 5, 19, 0, 0));
-    const fileAt19 = captureMemoryEvent("run-boundary", { text: "third tick, hour 19" }, root, hour19);
-    assert.ok(!fs.existsSync(fileAt10), "a multi-hour gap should still find and remove the stale file");
-    assert.ok(fs.existsSync(fileAt19));
-
-    // Different sessions in different hour buckets never interfere with each other's bring-forward
-    // logic — only a matching sessionId filename triggers a move.
-    const otherSessionFile = captureMemoryEvent("run-other", { text: "unrelated session" }, root, hour8);
-    captureMemoryEvent("run-boundary", { text: "fourth tick, hour 19 again" }, root, hour19);
-    assert.ok(fs.existsSync(otherSessionFile), "an unrelated session's file must survive another session's bring-forward");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+  if (!config?.forceInMemory && agentEngineId) {
+    try {
+      return new VertexAiMemoryBankService({
+        agentEngineId,
+        projectId,
+        location,
+        expressModeApiKey,
+        ...(config?.client ? { client: config.client } : {}),
+      });
+    } catch (e: any) {
+      console.warn("[memory] Failed to initialize VertexAiMemoryBankService, falling back to InMemoryMemoryService:", e?.message || e);
+    }
   }
 
-  console.log("memory self-check ✓");
+  return new InMemoryMemoryService();
 }
+
+// Shared singleton getter, overrideable per-caller or per-test.
+export function getMemoryService(override?: BaseMemoryService): BaseMemoryService {
+  if (override) return override;
+  if (!memoryServiceInstance) {
+    memoryServiceInstance = createMemoryBankService();
+  }
+  return memoryServiceInstance;
+}
+
+// Resets or sets the active memory service singleton (useful for testing or reconfiguration).
+export function setMemoryService(service: BaseMemoryService | null): void {
+  memoryServiceInstance = service;
+}
+
+export interface IngestTranscriptParams {
+  text: string;
+  sessionId?: string;
+  userId?: string;
+  appName?: string;
+  plan?: unknown;
+  timestamp?: string;
+  memoryService?: BaseMemoryService;
+}
+
+export interface IngestTranscriptResult {
+  ok: boolean;
+  sessionId: string;
+  userId: string;
+  appName: string;
+  eventCount: number;
+  service: "vertex_ai" | "in_memory" | "custom";
+}
+
+// Ingests transcript text and extracted actions into Vertex AI Memory Bank (or InMemoryMemoryService).
+export async function ingestTranscriptToMemoryBank(
+  params: IngestTranscriptParams
+): Promise<IngestTranscriptResult> {
+  const text = (params.text || "").trim();
+  if (!text) {
+    throw new Error("Transcript text is required for memory bank ingestion.");
+  }
+
+  const appName = params.appName || process.env.APP_NAME || "scribant";
+  const userId = safeSeg(params.userId, "default_user");
+  const sessionId = safeSeg(params.sessionId, "session");
+  const timestamp = params.timestamp || new Date().toISOString();
+  const service = params.memoryService ?? getMemoryService();
+
+  const events: any[] = [
+    {
+      author: "user",
+      content: { role: "user", parts: [{ text }] },
+      timestamp,
+    },
+  ];
+
+  // If a plan / actionItems are provided, also attach extracted facts as a structured model event
+  if (params.plan && typeof params.plan === "object") {
+    const planObj = params.plan as any;
+    const notes: string[] = [];
+    if (typeof planObj.ideasSummary === "string" && planObj.ideasSummary.trim()) {
+      notes.push(`Summary: ${planObj.ideasSummary.trim()}`);
+    }
+    const items = planObj.actionItems ?? planObj;
+    if (Array.isArray(items.todos) && items.todos.length > 0) {
+      notes.push(`Todos: ${items.todos.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
+    } else if (Array.isArray(items.tasks) && items.tasks.length > 0) {
+      notes.push(`Tasks: ${items.tasks.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
+    }
+    if (Array.isArray(items.calendarEvents) && items.calendarEvents.length > 0) {
+      notes.push(`Events: ${items.calendarEvents.map((e: any) => `${e.title || "Event"} at ${e.start || ""}`).join(", ")}`);
+    }
+    if (Array.isArray(items.searchQueries) && items.searchQueries.length > 0) {
+      notes.push(`Queries: ${items.searchQueries.map((q: any) => q.query || JSON.stringify(q)).join(", ")}`);
+    }
+
+    if (notes.length > 0) {
+      events.push({
+        author: "model",
+        content: { role: "model", parts: [{ text: notes.join("\n") }] },
+        timestamp,
+      });
+    }
+  }
+
+  const isVertex = service instanceof VertexAiMemoryBankService;
+
+  if (typeof (service as any).addEventsToMemory === "function") {
+    await (service as any).addEventsToMemory({
+      appName,
+      userId,
+      sessionId,
+      events,
+      customMetadata: {
+        sessionId,
+        timestamp,
+      },
+    });
+  } else {
+    await service.addSessionToMemory({
+      id: sessionId,
+      appName,
+      userId,
+      events,
+      state: {},
+      lastUpdateTime: Date.now(),
+    } as any);
+  }
+
+  return {
+    ok: true,
+    sessionId,
+    userId,
+    appName,
+    eventCount: events.length,
+    service: isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom",
+  };
+}
+
+export interface RetrievedMemory {
+  text: string;
+  author: string;
+  timestamp: string;
+}
+
+export interface RetrieveMemoryParams {
+  query: string;
+  userId?: string;
+  appName?: string;
+  memoryService?: BaseMemoryService;
+}
+
+export interface RetrieveMemoryResult {
+  query: string;
+  memories: RetrievedMemory[];
+  count: number;
+  service: "vertex_ai" | "in_memory" | "custom";
+}
+
+// Searches/retrieves relevant memories from Vertex AI Memory Bank (or InMemoryMemoryService).
+export async function retrieveFromMemoryBank(
+  query: string,
+  options?: Omit<RetrieveMemoryParams, "query">
+): Promise<RetrieveMemoryResult> {
+  const trimmedQuery = (query || "").trim();
+  if (!trimmedQuery) {
+    throw new Error("Search query is required for memory bank retrieval.");
+  }
+
+  const appName = options?.appName || process.env.APP_NAME || "scribant";
+  const userId = safeSeg(options?.userId, "default_user");
+  const service = options?.memoryService ?? getMemoryService();
+
+  const response: SearchMemoryResponse = await service.searchMemory({
+    appName,
+    userId,
+    query: trimmedQuery,
+  });
+
+  const memories: RetrievedMemory[] = (response.memories || []).map((m: MemoryEntry) => {
+    const textParts = m.content?.parts?.map((p: any) => p.text).filter(Boolean) ?? [];
+    return {
+      text: textParts.join("\n"),
+      author: m.author || "user",
+      timestamp: m.timestamp || new Date().toISOString(),
+    };
+  });
+
+  const isVertex = service instanceof VertexAiMemoryBankService;
+
+  return {
+    query: trimmedQuery,
+    memories,
+    count: memories.length,
+    service: isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom",
+  };
+}
+
+// Recursively walks a directory and gathers all .jsonl files
+function findJsonlFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const results: string[] = [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...findJsonlFiles(fullPath));
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+// Synchronizes all durable local session captures from data/memory into Vertex AI Memory Bank.
+export async function syncLocalMemoriesToMemoryBank(
+  root = path.join(process.cwd(), "data", "memory"),
+  memoryService?: BaseMemoryService
+): Promise<{ syncedCount: number; errors: string[] }> {
+  const files = findJsonlFiles(root);
+  let syncedCount = 0;
+  const errors: string[] = [];
+
+  for (const file of files) {
+    try {
+      const content = fs.readFileSync(file, "utf8").trim();
+      if (!content) continue;
+      const lines = content.split("\n").filter(Boolean);
+      for (const line of lines) {
+        const record = JSON.parse(line) as MemoryCapture;
+        const text = record.content?.parts?.[0]?.text;
+        if (!text) continue;
+        await ingestTranscriptToMemoryBank({
+          text,
+          sessionId: record.sessionId,
+          plan: record.actionItems ?? (record.ideasSummary ? { ideasSummary: record.ideasSummary } : undefined),
+          timestamp: record.timestamp,
+          memoryService,
+        });
+        syncedCount++;
+      }
+    } catch (e: any) {
+      errors.push(`Failed to sync ${file}: ${e?.message || e}`);
+    }
+  }
+
+  return { syncedCount, errors };
+}
+
+// Helper to prepend retrieved memory context directly into the user message content parts
+export function injectMemoryIntoUserMessage(request: LlmRequest, memories: string[]): void {
+  if (!memories.length) return;
+  const memoryBlock = `[Relevant Context from Memory Bank]:\n${memories.map(m => `- ${m}`).join("\n")}`;
+
+  if (!request.contents || request.contents.length === 0) {
+    request.contents = [{ role: "user", parts: [{ text: memoryBlock }] }];
+    return;
+  }
+
+  // Prepend memory block to the user turn's parts so the model sees it as grounding context
+  const userContent = request.contents.find(c => c.role === "user") || request.contents[0];
+  if (userContent) {
+    userContent.parts = [{ text: memoryBlock }, ...(userContent.parts || [])];
+  }
+}
+
+/**
+ * ADK beforeModelCallback that automatically ingests the current transcript / session state
+ * into Vertex AI Memory Bank (or InMemoryMemoryService) before the LLM call executes.
+ */
+export const autoMemoryIngestCallback: SingleBeforeModelCallback = async ({ context, request }) => {
+  try {
+    const memoryService = context.invocationContext?.memoryService ?? getMemoryService();
+    const sessionId = context.invocationContext?.session?.id || "session";
+    const userId = context.invocationContext?.session?.userId || "default_user";
+    const appName = context.invocationContext?.session?.appName || "scribant";
+
+    const text = context.state.get<string>("corrected") ||
+      context.state.get<string>("rawText") ||
+      (request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ")) || "";
+
+    if (text.trim()) {
+      await ingestTranscriptToMemoryBank({
+        text: text.trim(),
+        sessionId,
+        userId,
+        appName,
+        memoryService,
+      });
+    }
+  } catch (e: any) {
+    console.warn("[beforeModelCallback] Automatic memory ingestion failed:", e?.message || e);
+  }
+  return undefined;
+};
+
+/**
+ * ADK beforeModelCallback that automatically ingests the transcript into Memory Bank AND
+ * retrieves relevant past memories to inject directly into the user message before inference.
+ */
+export const memoryBankBeforeModelCallback: SingleBeforeModelCallback = async ({ context, request }) => {
+  try {
+    const memoryService = context.invocationContext?.memoryService ?? getMemoryService();
+    const sessionId = context.invocationContext?.session?.id || "session";
+    const userId = context.invocationContext?.session?.userId || "default_user";
+    const appName = context.invocationContext?.session?.appName || "scribant";
+
+    const text = context.state.get<string>("corrected") ||
+      context.state.get<string>("rawText") ||
+      (request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ")) || "";
+
+    if (text.trim()) {
+      // 1. Auto-ingest current transcript
+      await ingestTranscriptToMemoryBank({
+        text: text.trim(),
+        sessionId,
+        userId,
+        appName,
+        memoryService,
+      });
+
+      // 2. Retrieve past relevant memories
+      const searchRes = await retrieveFromMemoryBank(text.trim(), {
+        userId,
+        appName,
+        memoryService,
+      });
+
+      // 3. Preload past context into the user message
+      if (searchRes.memories.length > 0) {
+        injectMemoryIntoUserMessage(
+          request,
+          searchRes.memories.map(m => m.text)
+        );
+      }
+    }
+  } catch (e: any) {
+    console.warn("[memoryBankBeforeModelCallback] Callback error:", e?.message || e);
+  }
+  return undefined;
+};
+
+// ponytail: self-check pins the overwrite/traversal/reshape behavior, plus the shrink-not-merge,
+// embedded-newline, and hour-boundary bring-forward edge cases above, as well as Phase 2 ingest/retrieve/sync.
+// Run: tsx memory.ts — no API key needed, no model is called.
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
+  (async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "scribant-memory-"));
+    try {
+      const escaped = captureMemoryEvent("../../etc", { text: "hi" }, root);
+      assert.ok(escaped.startsWith(root + path.sep), `traversal escaped the root: ${escaped}`);
+      assert.equal(path.basename(escaped), "etc.jsonl"); // ".." stripped, not the segment itself
+
+      // The classifier's flat plan shape in -> nested actionItems out. "tasks" becomes "todos";
+      // calendarEvents/searchQueries keep their names but move under actionItems.
+      const flatPlan = {
+        ideasSummary: "* buy milk\n* call mom",
+        calendarEvents: [{ title: "Dentist" }],
+        tasks: [{ title: "Buy milk" }],
+        searchQueries: [{ query: "lactose free milk brands" }],
+      };
+      const file = captureMemoryEvent("run-99", { text: "lunch tomorrow at noon", plan: flatPlan }, root);
+      const nested = JSON.parse(fs.readFileSync(file, "utf8").trim()) as MemoryCapture;
+      assert.equal(nested.ideasSummary, flatPlan.ideasSummary);
+      assert.deepEqual(nested.actionItems, {
+        todos: [{ title: "Buy milk" }],
+        calendarEvents: [{ title: "Dentist" }],
+        searchQueries: [{ query: "lactose free milk brands" }],
+      });
+      assert.ok(!("plan" in nested), "flat plan should not survive alongside the reshaped fields");
+
+      // A tick with no plan (autosave before the classifier ran) omits actionItems entirely rather
+      // than writing three empty arrays every tick.
+      const noPlanFile = captureMemoryEvent("run-100", { text: "just talking" }, root);
+      assert.ok(!("actionItems" in JSON.parse(fs.readFileSync(noPlanFile, "utf8"))));
+
+      // A plan missing an array (e.g. the model omitted a key) reshapes to [] rather than undefined.
+      const partialFile = captureMemoryEvent("run-101", { text: "x", plan: { tasks: [{ title: "t" }] } }, root);
+      assert.deepEqual(JSON.parse(fs.readFileSync(partialFile, "utf8")).actionItems, {
+        todos: [{ title: "t" }], calendarEvents: [], searchQueries: [],
+      });
+
+      captureMemoryEvent("run-99", { text: "and call mom" }, root); // overwrites, never appends
+      const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+      assert.equal(lines.length, 1, "second capture should replace the first, not grow the file");
+      const only = JSON.parse(lines[0]) as MemoryCapture;
+      assert.equal(only.content.parts[0].text, "and call mom");
+      assert.ok(!("actionItems" in only)); // plan omitted on the second call -> not carried over from the first
+      assert.ok(!isNaN(Date.parse(only.timestamp)));
+
+      // Both captures landed in the same hour bucket, so they share a directory (bucketed by
+      // capture time, not by call — the second call didn't get its own hour folder).
+      assert.equal(path.dirname(file), path.dirname(captureMemoryEvent("run-99", { text: "x" }, root)));
+
+      // A LATER capture with FEWER items must fully replace the earlier actionItems, not merge with
+      // them — overwrite semantics apply to the whole record, not a field-by-field union.
+      const growFile = captureMemoryEvent("run-shrink", { text: "x", plan: { tasks: [{ title: "a" }, { title: "b" }] } }, root);
+      captureMemoryEvent("run-shrink", { text: "x", plan: { tasks: [{ title: "a" }] } }, root);
+      assert.deepEqual(JSON.parse(fs.readFileSync(growFile, "utf8")).actionItems.todos, [{ title: "a" }],
+        "shrinking plan should fully replace, not merge with, the previous actionItems");
+
+      // Multi-line, quote-containing, unicode text must not break the one-record-per-line JSONL
+      // contract — JSON.stringify escapes newlines/quotes within the string value, so the file stays
+      // exactly one physical line no matter what the transcript itself contains.
+      const trickyText = 'Line one.\nLine "two" has quotes.\n\nEmoji: 🎉 and ünïcödé.';
+      const trickyFile = captureMemoryEvent("run-tricky", { text: trickyText }, root);
+      const rawLines = fs.readFileSync(trickyFile, "utf8").split("\n").filter(Boolean);
+      assert.equal(rawLines.length, 1, "embedded newlines in the transcript must not create extra physical lines");
+      assert.equal(JSON.parse(rawLines[0]).content.parts[0].text, trickyText);
+
+      // Hour-boundary crossing: a session's first tick lands in the 8 o'clock bucket, the next tick
+      // (same session) two hours later lands in the 10 o'clock bucket — the file must be brought
+      // forward, not left behind as an orphaned duplicate.
+      const hour8 = new Date(Date.UTC(2026, 0, 5, 8, 59, 58));
+      const hour10 = new Date(Date.UTC(2026, 0, 5, 10, 0, 2));
+      const fileAt8 = captureMemoryEvent("run-boundary", { text: "first tick, hour 8" }, root, hour8);
+      assert.ok(fs.existsSync(fileAt8));
+      const fileAt10 = captureMemoryEvent("run-boundary", { text: "second tick, hour 10" }, root, hour10);
+      assert.notEqual(fileAt8, fileAt10, "the file should move to the new hour bucket, not sit at a fixed path");
+      assert.ok(!fs.existsSync(fileAt8), "the stale hour-8 file should be removed once hour-10 has the up-to-date record");
+      assert.ok(fs.existsSync(fileAt10));
+      assert.equal(JSON.parse(fs.readFileSync(fileAt10, "utf8")).content.parts[0].text, "second tick, hour 10");
+      // The now-empty hour-8 directory (only ever held this one session) is cleaned up too.
+      assert.ok(!fs.existsSync(path.dirname(fileAt8)), "an hour bucket left empty by the move should be removed");
+
+      // A third tick nine hours later still finds and removes the (now hour-10) stale copy — proves
+      // the backward walk isn't hardcoded to a single hop.
+      const hour19 = new Date(Date.UTC(2026, 0, 5, 19, 0, 0));
+      const fileAt19 = captureMemoryEvent("run-boundary", { text: "third tick, hour 19" }, root, hour19);
+      assert.ok(!fs.existsSync(fileAt10), "a multi-hour gap should still find and remove the stale file");
+      assert.ok(fs.existsSync(fileAt19));
+
+      // Different sessions in different hour buckets never interfere with each other's bring-forward
+      // logic — only a matching sessionId filename triggers a move.
+      const otherSessionFile = captureMemoryEvent("run-other", { text: "unrelated session" }, root, hour8);
+      captureMemoryEvent("run-boundary", { text: "fourth tick, hour 19 again" }, root, hour19);
+      assert.ok(fs.existsSync(otherSessionFile), "an unrelated session's file must survive another session's bring-forward");
+
+      // ---- Phase 2 Memory Bank Ingest & Retrieve Self-checks ----
+      const testMemService = new InMemoryMemoryService();
+      
+      // Ingest test transcript
+      const ingestRes = await ingestTranscriptToMemoryBank({
+        text: "I am planning a trip to Kyoto next spring and prefer green tea over coffee.",
+        sessionId: "run-kyoto",
+        userId: "traveler",
+        plan: {
+          ideasSummary: "Trip to Kyoto planning",
+          tasks: [{ title: "Book flight to Kansai" }],
+          calendarEvents: [{ title: "Kyoto trip", start: "2027-04-01T09:00:00" }],
+          searchQueries: [{ query: "Best ryokan in Kyoto" }],
+        },
+        memoryService: testMemService,
+      });
+      assert.equal(ingestRes.ok, true);
+      assert.equal(ingestRes.sessionId, "run-kyoto");
+      assert.equal(ingestRes.userId, "traveler");
+      assert.equal(ingestRes.eventCount, 2);
+
+      // Retrieve by query
+      const retrieveRes = await retrieveFromMemoryBank("Kyoto", {
+        userId: "traveler",
+        memoryService: testMemService,
+      });
+      assert.equal(retrieveRes.query, "Kyoto");
+      assert.ok(retrieveRes.count >= 1);
+      assert.ok(retrieveRes.memories.some(m => m.text.includes("Kyoto")));
+
+      // Retrieve by secondary query (e.g. "tea")
+      const teaRes = await retrieveFromMemoryBank("tea", {
+        userId: "traveler",
+        memoryService: testMemService,
+      });
+      assert.ok(teaRes.count >= 1);
+      assert.ok(teaRes.memories.some(m => m.text.includes("green tea")));
+
+      // Retrieve non-matching query returns empty list
+      const nonMatchingRes = await retrieveFromMemoryBank("astronaut", {
+        userId: "traveler",
+        memoryService: testMemService,
+      });
+      assert.equal(nonMatchingRes.count, 0);
+      assert.deepEqual(nonMatchingRes.memories, []);
+
+      // Sync local files to memory service
+      const syncMemService = new InMemoryMemoryService();
+      const syncRes = await syncLocalMemoriesToMemoryBank(root, syncMemService);
+      assert.ok(syncRes.syncedCount >= 1);
+      assert.equal(syncRes.errors.length, 0);
+
+      // Verify synced memories are retrievable
+      const syncedSearch = await retrieveFromMemoryBank("talking", {
+        userId: "default_user",
+        memoryService: syncMemService,
+      });
+      assert.ok(syncedSearch.count >= 1);
+      assert.ok(syncedSearch.memories.some(m => m.text.includes("talking")));
+
+      // Service creation with explicit config
+      const customMem = createMemoryBankService({ forceInMemory: true });
+      assert.ok(customMem instanceof InMemoryMemoryService);
+
+      const vertexMem = createMemoryBankService({
+        agentEngineId: "test-engine-id",
+        projectId: "test-project",
+        location: "us-central1",
+        client: { agentEnginesInternal: { memories: {} } },
+      });
+      assert.ok(vertexMem instanceof VertexAiMemoryBankService);
+
+      // ---- Automatic Memory Callback Self-checks ----
+      const cbMemService = new InMemoryMemoryService();
+      const mockState: Record<string, any> = { corrected: "Schedule a product demo with Alex on Friday" };
+      const mockContext: any = {
+        invocationContext: {
+          memoryService: cbMemService,
+          session: { id: "run-cb-1", userId: "cb-user", appName: "scribant" },
+        },
+        state: { get: (k: string) => mockState[k] },
+      };
+      const mockRequest: any = { contents: [], config: {} };
+
+      // 1. Test autoMemoryIngestCallback
+      await autoMemoryIngestCallback({ context: mockContext, request: mockRequest });
+      const cbRetrieve = await retrieveFromMemoryBank("Alex", {
+        userId: "cb-user",
+        memoryService: cbMemService,
+      });
+      assert.ok(cbRetrieve.count >= 1);
+      assert.ok(cbRetrieve.memories.some(m => m.text.includes("Alex")));
+
+      // 2. Test memoryBankBeforeModelCallback with user message injection
+      const mockRequest2: any = { contents: [{ role: "user", parts: [{ text: "Schedule meeting" }] }], config: {} };
+      await memoryBankBeforeModelCallback({ context: mockContext, request: mockRequest2 });
+      assert.ok(
+        mockRequest2.contents[0].parts.some((p: any) =>
+          typeof p.text === "string" && p.text.includes("[Relevant Context from Memory Bank]")
+        )
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+
+    console.log("memory self-check ✓");
+  })();
+}
+

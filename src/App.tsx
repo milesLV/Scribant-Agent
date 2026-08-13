@@ -692,19 +692,13 @@ export default function App() {
           />
         </div>
 
-        {/* Brain Dump Archive: moved all the way to the bottom of the screen */}
+        {/* Brain Dump Archive: Memory Bank & past session records */}
         <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
-          {runs.length > 0 ? (
-            <SessionHistory
-              runs={runs}
-              selectedRunId={selectedRunId}
-              onSelectRun={setSelectedRunId}
-            />
-          ) : (
-            <div className="bg-white/40 border border-stone-200/50 rounded-2xl p-5 text-center text-xs text-stone-400 italic">
-              No past sessions yet. Record your thoughts to start building an archive.
-            </div>
-          )}
+          <SessionHistory
+            runs={runs}
+            selectedRunId={selectedRunId}
+            onSelectRun={setSelectedRunId}
+          />
         </div>
 
         {/* Clear All Session Data button */}
