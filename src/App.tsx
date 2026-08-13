@@ -27,6 +27,17 @@ const PLAN_MIN_GROWTH = 80;
 const LIVE_QUIET_MS = 2000;
 const LIVE_MAX_WAIT_MS = 6000;
 
+// How often the raw dictation gets archived to disk as its own JSONL segment (POST
+// /api/transcript-segment), independent of the proofread/summarize/classify cycle above — a pure
+// disk write, so this can run on a fixed cadence without touching Gemini quota at all.
+const SEGMENT_FLUSH_MS = 15000;
+
+// Single-user app — no per-account or per-browser identity to resolve for the transcript archive.
+// One fixed user, one fixed session; "active" vs "inactive" is just whether liveTranscript is
+// currently non-empty, not a new id minted per recording.
+const TRANSCRIPT_USER_ID = "default_user";
+const TRANSCRIPT_SESSION_ID = "session";
+
 // State that's just mirrored to localStorage verbatim (no expiry/removal branching like the token
 // has) — one hook instead of a bespoke init-then-useEffect pair per field. Old plain-string values
 // (written before this hook existed) fail JSON.parse and fall back to the raw string, so existing
@@ -40,17 +51,6 @@ function useLocalStorage<T>(key: string, initial: T) {
   useEffect(() => { localStorage.setItem(key, JSON.stringify(value)); }, [key, value]);
   return [value, setValue] as const; // setValue accepts the updater-fn form too, same as useState
 }
-
-// Who the server files transcripts under. The Google account id once signed in; otherwise a
-// per-browser uuid so sandbox sessions still land in their own folder instead of one shared heap.
-const localUserId = () => {
-  let id = localStorage.getItem("scribant_local_user_id");
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem("scribant_local_user_id", id);
-  }
-  return id;
-};
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
@@ -81,7 +81,6 @@ export default function App() {
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
-  const [userId, setUserId] = useState<string>(() => localStorage.getItem("gcp_user_id") || localUserId());
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -103,13 +102,38 @@ export default function App() {
   const lastSentTextRef = useRef("");
   const lastPlannedLenRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Minted once per recording (first non-empty transcript), reused by every /api/live tick AND the
+  // final /api/analyze call — one id, one server-side session file, auto-saved every few seconds
+  // instead of only at finalize. Cleared whenever liveTranscript resets to "".
+  const sessionIdRef = useRef<string | null>(null);
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
 
+  // How many characters of liveTranscript have already been sent as segments — the delta past this
+  // point is what the next flush sends, never the whole growing transcript again. Resets to 0
+  // whenever liveTranscript goes back to empty (recording stopped/cleared).
+  const flushedLenRef = useRef(0);
+  // Mirrors liveTranscript for the segment-flush interval (created once on mount, so its closure
+  // would otherwise see a stale value) — same "assign during render" idiom AudioRecorder.tsx uses
+  // for transcriptRef/editingRef.
+  const liveTranscriptRef = useRef("");
+  liveTranscriptRef.current = liveTranscript;
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
+  };
+
+  // Fire-and-forget archive write for one segment of raw dictation — never blocks or fails the
+  // capture loop; a lost segment just means a smaller gap in the archive, not a broken session.
+  const flushTranscriptSegment = (text: string) => {
+    if (!text.trim()) return;
+    fetch("/api/transcript-segment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: TRANSCRIPT_USER_ID, sessionId: TRANSCRIPT_SESSION_ID, text }),
+    }).catch(e => console.warn("[transcript-segment] flush failed:", e));
   };
 
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage).
@@ -125,7 +149,6 @@ export default function App() {
     searchQueries: (rawRes.searchQueries || [])
       .filter((q: any) => q && q.query && q.query.trim() !== "")
       .map((q: any) => ({ ...q, status: "pending" as const })),
-    organizedFolder: rawRes.organizedFolderName || "Session Notes"
   });
 
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
@@ -171,24 +194,6 @@ export default function App() {
       }
     }
   }, []);
-
-  // Resolve the Google account id once per token (the userinfo.profile scope is already requested),
-  // and fall back to the local uuid when signed out. Only `sub` is kept — no profile data.
-  useEffect(() => {
-    if (!token) {
-      localStorage.removeItem("gcp_user_id");
-      setUserId(localUserId());
-      return;
-    }
-    fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => {
-        if (!d?.sub) return;
-        localStorage.setItem("gcp_user_id", d.sub);
-        setUserId(d.sub);
-      })
-      .catch(() => {});
-  }, [token]);
 
   // Monitor token expiration periodically
   useEffect(() => {
@@ -242,7 +247,7 @@ export default function App() {
       const res = await fetch("/api/live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, withPlan }),
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, withPlan, sessionId: sessionIdRef.current }),
         signal: controller.signal,
       });
       if (!res.ok || !res.body) throw new Error(`Live pipeline failed (HTTP ${res.status}).`);
@@ -293,12 +298,18 @@ export default function App() {
   useEffect(() => {
     const text = liveTranscript.trim();
     if (!text) {
+      // Recording stopped/cleared — catch up any trailing text the 15s interval hasn't flushed
+      // yet before resetting, so the last few seconds aren't lost.
+      flushTranscriptSegment(liveTranscript.slice(flushedLenRef.current));
+      flushedLenRef.current = 0;
       setLiveDraft(null);
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
       pendingSinceRef.current = null;
+      sessionIdRef.current = null;
       return;
     }
+    if (!sessionIdRef.current) sessionIdRef.current = `run-${Date.now()}`;
     if (!autoRun || text.length < 15 || text === lastSentTextRef.current) return;
 
     if (pendingSinceRef.current === null) pendingSinceRef.current = Date.now();
@@ -309,6 +320,20 @@ export default function App() {
     liveTimerRef.current = setTimeout(() => { pendingSinceRef.current = null; runLive(text); }, delay);
     return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
   }, [liveTranscript, autoRun]);
+
+  // Raw-dictation archive, entirely independent of the debounced proofread/summary/plan cycle
+  // above: flushes whatever's new since the last tick as its own segment every SEGMENT_FLUSH_MS,
+  // regardless of pauses or autoRun. One interval for the app's lifetime — reads refs, not state,
+  // so it never needs to be recreated as liveTranscript changes.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const text = liveTranscriptRef.current;
+      if (text.length <= flushedLenRef.current) return; // nothing new since the last flush
+      flushTranscriptSegment(text.slice(flushedLenRef.current));
+      flushedLenRef.current = text.length;
+    }, SEGMENT_FLUSH_MS);
+    return () => clearInterval(id);
+  }, []);
 
   // Sync selectedRunId to live-draft or fallback to archive
   useEffect(() => {
@@ -350,9 +375,11 @@ export default function App() {
 
   const handleAnalyzeStream = async (text: string) => {
     setIsProcessing(true);
-    // Minted before the request so the server files the transcript under the same id the archived
-    // run gets — one JSONL file per session, matching what the user sees in their history.
-    const runId = `run-${Date.now()}`;
+    // The SAME id the live loop's been auto-saving under (minted on the first non-empty transcript
+    // tick) — so finalize appends the last, authoritative line to the session file the live ticks
+    // were already writing, rather than starting a new one. Falls back to a fresh id only if
+    // finalize is somehow reached without a live tick ever having run.
+    const runId = sessionIdRef.current ?? `run-${Date.now()}`;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -365,7 +392,7 @@ export default function App() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, userId, sessionId: runId }),
+        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, sessionId: runId }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -557,6 +584,7 @@ export default function App() {
       inFlightRef.current = false;
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
+      sessionIdRef.current = null;
       resetSandboxState();
       showToast("All session data cleared.");
     }
@@ -639,7 +667,7 @@ export default function App() {
             busy={busy}
             onRunNow={() => runLive(liveTranscript.trim())}
             onSaveToDrive={() => handleSaveToDrive(
-              liveDraft?.organizedFolder || "Scribant Session",
+              "Scribant Session",
               "Live Notes.md",
               liveSummary,
             )}
@@ -659,7 +687,7 @@ export default function App() {
             onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
             onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
             onSaveToDrive={() => handleSaveToDrive(
-              activeAnalysis?.organizedFolder || "Scribant Session",
+              "Scribant Session",
               "Session Summary.md",
               activeAnalysis?.summary || "",
             )}

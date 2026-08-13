@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus } from "lucide-react";
+import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus, ScreenShare, ScreenShareOff } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
 import { applyCorrections, CONFIDENCE_THRESHOLD } from "../utils/transcript";
+import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
 
 // The capture cycle lives in App (one debounce timer → /api/live). This component owns the
 // transcript and the correction-splicing that keeps highlight offsets valid; it receives finished
@@ -76,6 +77,7 @@ export default function AudioRecorder({
   const [interimTranscript, setInterimTranscript] = useState("");
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [useKeyboard, setUseKeyboard] = useState(false);
+  const [tabAudioError, setTabAudioError] = useState<string | null>(null);
 
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
@@ -97,6 +99,22 @@ export default function AudioRecorder({
   const proofedTextRef = useRef("");
 
   const recognitionRef = useRef<any>(null);
+
+  // Shared-tab capture is entirely separate from the mic's Web Speech pipeline above — its own
+  // record/upload/transcribe loop (see the hook) — and only ever APPENDS finished chunks onto the
+  // same transcript the mic is building, tagged so they read as a distinct source. Chunks land
+  // roughly in completion order (~9s apart), not precisely interleaved by timestamp against
+  // concurrent mic speech — good enough for an MVP; true chronological interleaving would need the
+  // transcript to be a list of tagged segments instead of one flat string.
+  const { isSharing: isSharingTab, start: startTabAudio, stop: stopTabAudio } = useTabAudioCapture({
+    onChunk: ({ text }) => {
+      setTranscript(prev => {
+        const cleanedPrev = prev.trim();
+        return (cleanedPrev ? cleanedPrev + " " : "") + `[Meeting] ${text}` + " ";
+      });
+    },
+    onError: (msg) => setTabAudioError(msg),
+  });
 
   // Read during the proofResult effect, which must see CURRENT values without re-running every time
   // speech appends or the editor toggles. Assigned in render so they are never a frame stale.
@@ -264,6 +282,17 @@ export default function AudioRecorder({
     };
   }, []);
 
+  // Unmounting (recorderKey bump on Clear All, in App.tsx) must tear down the shared-tab capture the
+  // same way the mic recognizer does above — otherwise the browser keeps recording/uploading a tab
+  // that's no longer wired to anything on screen.
+  useEffect(() => () => stopTabAudio(), [stopTabAudio]);
+
+  const handleToggleTabAudio = () => {
+    setTabAudioError(null);
+    if (isSharingTab) stopTabAudio();
+    else startTabAudio();
+  };
+
   const handleToggleListening = () => {
     if (isListening) {
       manualStopRef.current = true;
@@ -385,32 +414,70 @@ export default function AudioRecorder({
         </div>
       )}
 
+      {tabAudioError && (
+        <div className="mb-4 text-xs bg-amber-50 text-amber-800 border border-amber-100 rounded-xl p-3.5 leading-relaxed flex items-start gap-2">
+          <HelpCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+          <span>{tabAudioError}</span>
+        </div>
+      )}
+
       {!useKeyboard && (
         <div className="flex flex-col items-center justify-center py-4 border-b border-stone-100/75 mb-4">
-          {/* Pulse Recording Trigger */}
-          <button
-            id="mic-pulse-button"
-            onClick={handleToggleListening}
-            className={`relative flex items-center justify-center w-20 h-20 rounded-full border transition-all duration-300 ${
-              isListening
-                ? "bg-red-50 border-red-200 text-red-650 shadow-md scale-105 animate-pulse"
-                : "bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100 hover:border-stone-300 shadow-sm"
-            }`}
-          >
-            {isListening ? (
-              <div className="absolute inset-0 rounded-full border border-red-500/20 wrapper-ping animate-ping" />
-            ) : null}
-            {isListening ? (
-              <MicOff className="w-7 h-7" />
-            ) : (
-              <Mic className="w-7 h-7" />
+          <div className="flex items-center justify-center gap-6">
+            {/* Pulse Recording Trigger */}
+            <div className="flex flex-col items-center">
+              <button
+                id="mic-pulse-button"
+                onClick={handleToggleListening}
+                className={`relative flex items-center justify-center w-20 h-20 rounded-full border transition-all duration-300 ${
+                  isListening
+                    ? "bg-red-50 border-red-200 text-red-650 shadow-md scale-105 animate-pulse"
+                    : "bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100 hover:border-stone-300 shadow-sm"
+                }`}
+              >
+                {isListening ? (
+                  <div className="absolute inset-0 rounded-full border border-red-500/20 wrapper-ping animate-ping" />
+                ) : null}
+                {isListening ? (
+                  <MicOff className="w-7 h-7" />
+                ) : (
+                  <Mic className="w-7 h-7" />
+                )}
+              </button>
+              <p className="mt-3 text-[10px] font-semibold text-stone-500 text-center uppercase tracking-wider font-mono">
+                {isListening ? "Click to Pause Speech Capture" : "Click to Speak Thoughts"}
+              </p>
+            </div>
+
+            {/* Shared-tab audio capture — a separate pipeline from the mic above (see
+                useTabAudioCapture); only shown where getDisplayMedia exists at all. */}
+            {typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getDisplayMedia === "function" && (
+              <div className="flex flex-col items-center">
+                <button
+                  id="tab-audio-share-button"
+                  onClick={handleToggleTabAudio}
+                  title={isSharingTab ? "Stop capturing the shared tab's audio" : "Share a Chrome tab (e.g. a meeting) and transcribe its audio too"}
+                  className={`relative flex items-center justify-center w-20 h-20 rounded-full border transition-all duration-300 ${
+                    isSharingTab
+                      ? "bg-red-50 border-red-200 text-red-650 shadow-md scale-105 animate-pulse"
+                      : "bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100 hover:border-stone-300 shadow-sm"
+                  }`}
+                >
+                  {isSharingTab ? (
+                    <div className="absolute inset-0 rounded-full border border-red-500/20 wrapper-ping animate-ping" />
+                  ) : null}
+                  {isSharingTab ? (
+                    <ScreenShareOff className="w-7 h-7" />
+                  ) : (
+                    <ScreenShare className="w-7 h-7" />
+                  )}
+                </button>
+                <p className="mt-3 text-[10px] font-semibold text-stone-500 text-center uppercase tracking-wider font-mono">
+                  {isSharingTab ? "Click to Stop Tab Capture" : "Click to Share Tab Audio"}
+                </p>
+              </div>
             )}
-          </button>
-
-          <p className="mt-3 text-[10px] font-semibold text-stone-500 text-center uppercase tracking-wider font-mono">
-            {isListening ? "Click to Pause Speech Capture" : "Click to Speak Thoughts"}
-          </p>
-
+          </div>
         </div>
       )}
 
@@ -427,7 +494,7 @@ export default function AudioRecorder({
                 <FileText className="w-3.5 h-3.5 text-stone-500" />
               )}
               <span className="text-[10px] font-bold text-stone-700 uppercase tracking-widest font-mono">
-                {useKeyboard || isEditingTranscript ? "Editable Input Text" : "Live Unfiltered Transcript"}
+                {useKeyboard || isEditingTranscript ? "Editable Input Text" : "Live Transcript"}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -469,7 +536,7 @@ export default function AudioRecorder({
                 onBlur={() => setIsEditingTranscript(false)}
                 autoFocus={isEditingTranscript && !useKeyboard}
                 disabled={isProcessing}
-                placeholder="Write down whatever is on your mind. For example:&#10;'Today is a solid day. Discussing the product roadmap with Alice on June 10 at 2pm. Keep a note to draft the mock schema beforehand. I wonder who designed the Concorde airplane originally? Also, remember to grab coffee on the way home.'"
+                placeholder="Write down whatever is on your mind. For example:&#10;'Today was busy, but good. I got a lot done on the product roadmap and Alice and I will meet tomorrow at 2 to discuss it. I need to make a mockup before it. Also, remember to grab more coffee beans on the way home.'"
                 className="w-full flex-1 bg-transparent border-0 p-0 text-xs text-stone-700 leading-normal focus:ring-0 outline-none resize-none font-sans"
               />
             ) : (

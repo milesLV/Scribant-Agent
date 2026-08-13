@@ -37,24 +37,42 @@ export function splitTiers(raw: string): { condensed: string; inDepth: string } 
   return { condensed, inDepth };
 }
 
-// Both ids arrive in an unauthenticated request body and become path segments, so anything that
-// isn't [A-Za-z0-9_-] is stripped — "../../etc" must not escape the transcripts directory.
-const safeSeg = (s: unknown, fallback: string) =>
+// sessionId arrives in an unauthenticated request body and becomes a path segment, so anything
+// that isn't [A-Za-z0-9_-] is stripped — "../../etc" must not escape the memory-capture directory.
+// Exported so memory.ts's captureMemoryEvent can guard sessionId the same way.
+export const safeSeg = (s: unknown, fallback: string) =>
   (typeof s === "string" ? s : "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || fallback;
 
-// Append one raw transcript to ./data/transcripts/{userId}/{sessionId}.jsonl. `root` exists so the
-// self-check can write to a temp dir instead of the repo.
-// ponytail: sync append — one write per finalize. Move to fs.promises if it ever blocks a request.
+// Zero-padded UTC bucket path: {YYYY}/{MM}/{DD}/{HH}, computed server-side from the write instant
+// (never a client-supplied timestamp, so it can't be steered into an arbitrary path). Shared by
+// memory.ts's captureMemoryEvent and logUserTranscript below — both date-based capture hierarchies
+// bucket the same way.
+const pad = (n: number) => String(n).padStart(2, "0");
+export function hourBucket(d: Date): string {
+  return path.join(String(d.getUTCFullYear()), pad(d.getUTCMonth() + 1), pad(d.getUTCDate()), pad(d.getUTCHours()));
+}
+
+// Append one raw transcript segment to
+// ./data/transcripts/{userId}/{year}/{month}/{day}/{hour}/{sessionId}.jsonl, bucketed by the
+// CURRENT write time (each segment is its own capture event, not a session as a whole — the later
+// concatenation-into-Memory-Bank step is already designed to reassemble a session's segments
+// across time bins, so a session straddling an hour boundary isn't a problem here). `root`/`now`
+// exist so the self-check can write to a temp dir and pin the clock instead of touching the repo.
+// Called once per 15s live-capture flush (POST /api/transcript-segment) plus a final catch-up
+// flush at finalize/clear — NOT once per finalize with the whole text anymore, so a session's
+// file accumulates many small segment lines in speaking order rather than one big final line.
+// ponytail: sync append — infrequent, small writes. Move to fs.promises if it ever blocks a request.
 export function logUserTranscript(
   userId: unknown,
   sessionId: unknown,
   text: string,
   root = path.join(process.cwd(), "data", "transcripts"),
+  now = new Date(),
 ): string {
-  const dir = path.join(root, safeSeg(userId, "default_user"));
+  const dir = path.join(root, safeSeg(userId, "default_user"), hourBucket(now));
   fs.mkdirSync(dir, { recursive: true });
   const logFile = path.join(dir, `${safeSeg(sessionId, "session")}.jsonl`);
-  fs.appendFileSync(logFile, JSON.stringify({ timestamp: new Date().toISOString(), text }) + "\n", "utf8");
+  fs.appendFileSync(logFile, JSON.stringify({ timestamp: now.toISOString(), text }) + "\n", "utf8");
   return logFile;
 }
 
@@ -79,7 +97,6 @@ function resolveDate(phrase: string, referenceISO: string): ResolvedDate | null 
   if (!c) return null;
   const y = c.get("year"), mo = c.get("month"), d = c.get("day");
   if (y == null || mo == null || d == null) return null;
-  const pad = (n: number) => String(n).padStart(2, "0");
   const timed = c.isCertain("hour");
   return { date: `${y}-${pad(mo)}-${pad(d)}`, hour: timed ? c.get("hour") : null, minute: timed ? (c.get("minute") ?? 0) : null };
 }
@@ -90,7 +107,6 @@ function resolveDate(phrase: string, referenceISO: string): ResolvedDate | null 
 // verbatim sourceText via chrono; the model's value survives when the phrase carries no date.
 // Time-of-day comes from chrono only when the phrase stated one, else the model's, else 09:00.
 export function resolvePlanDates(plan: any, refISO: string): any {
-  const pad = (n: number) => String(n).padStart(2, "0");
   for (const evt of plan?.calendarEvents || []) {
     const r = resolveDate(evt.sourceText || "", refISO);
     if (!r) continue;
@@ -171,21 +187,36 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(plan.tasks[1].dueDate, "");                              // no deadline -> not invented
   assert.deepEqual(resolvePlanDates({}, R), {});                        // empty plan is a no-op
 
-  // logUserTranscript — the ids are attacker-controlled path segments, so this is the check that matters.
+  assert.equal(hourBucket(new Date(Date.UTC(2026, 0, 5, 9))), path.join("2026", "01", "05", "09"));
+  assert.equal(hourBucket(new Date(Date.UTC(2026, 10, 30, 23))), path.join("2026", "11", "30", "23"));
+
+  // logUserTranscript — the ids are attacker-controlled path segments, so this is the check that
+  // matters most; also verifies the year/month/day/hour bucket that nests under each user's dir.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "scribant-log-"));
   try {
-    const escaped = logUserTranscript("../../etc", "../session", "hi", root);
+    const NOW = new Date("2026-06-27T14:22:00.000Z");
+
+    const escaped = logUserTranscript("../../etc", "../session", "hi", root, NOW);
     assert.ok(escaped.startsWith(root + path.sep), `traversal escaped the root: ${escaped}`);
     assert.equal(path.basename(escaped), "session.jsonl");
 
-    const file = logUserTranscript("user-1", "run-99", "lunch tomorrow at noon", root);
-    logUserTranscript("user-1", "run-99", "and call mom", root);          // appends, never overwrites
+    const file = logUserTranscript("user-1", "run-99", "lunch tomorrow at noon", root, NOW);
+    assert.equal(file, path.join(root, "user-1", "2026", "06", "27", "14", "run-99.jsonl"));
+    logUserTranscript("user-1", "run-99", "and call mom", root, NOW);      // appends, never overwrites
     const lines = fs.readFileSync(file, "utf8").trim().split("\n");
     assert.equal(lines.length, 2);
     assert.equal(JSON.parse(lines[0]).text, "lunch tomorrow at noon");
     assert.ok(!isNaN(Date.parse(JSON.parse(lines[1]).timestamp)));
-    assert.ok(fs.readFileSync(logUserTranscript("", "", "x", root), "utf8").length > 0); // blank ids -> defaults
-    assert.ok(fs.existsSync(path.join(root, "default_user", "session.jsonl")));
+
+    // A segment written in a DIFFERENT hour lands in its own bucket dir, not the earlier file — by
+    // design (see logUserTranscript's comment): each segment buckets by ITS OWN write time, and
+    // reassembling a session that spans hours is the later Memory Bank concatenation step's job.
+    const laterFile = logUserTranscript("user-1", "run-99", "one more thing", root, new Date("2026-06-27T15:05:00.000Z"));
+    assert.notEqual(laterFile, file);
+    assert.equal(fs.readFileSync(file, "utf8").trim().split("\n").length, 2); // earlier file untouched
+
+    assert.ok(fs.readFileSync(logUserTranscript("", "", "x", root, NOW), "utf8").length > 0); // blank ids -> defaults
+    assert.ok(fs.existsSync(path.join(root, "default_user", "2026", "06", "27", "14", "session.jsonl")));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { LlmAgent, Gemini } from "@google/adk";
-import { askAgent, KEYS } from "../agents";
+import { askAgent, KEYS, MODEL } from "../agents";
 import { applyCorrections, CONFIDENCE_THRESHOLD } from "../src/utils/transcript";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -230,7 +230,7 @@ async function post(pathname: string, body: any): Promise<any> {
 // second Gemini SDK with its own key lookup.
 const judgeAgent = (apiKey: string) => new LlmAgent({
   name: "eval_judge",
-  model: new Gemini({ model: "gemini-3.6-flash", apiKey }),
+  model: new Gemini({ model: MODEL, apiKey }),
   instruction: `You are grading an AI answer. Reply ONLY JSON: {"pass": <boolean>, "reason": "<one short sentence>"}`,
   generateContentConfig: { responseMimeType: "application/json" },
 });

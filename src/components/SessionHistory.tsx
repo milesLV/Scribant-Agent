@@ -23,7 +23,7 @@ export default function SessionHistory({
       <Panel
         icon={Brain}
         iconClass="text-amber-600"
-        title="Brain Dump Archive"
+        title="Archive"
         action={
           <span className="text-[10px] font-mono bg-stone-100 text-stone-500 border border-stone-200 px-2 py-0.5 rounded-full font-bold">
             {runs.length} Sessions
@@ -62,9 +62,6 @@ export default function SessionHistory({
 
                   {run.analysis && (
                     <div className="flex items-center gap-3 pt-2 text-[10px] font-mono text-stone-400 flex-wrap">
-                      <span className="bg-amber-500/10 text-amber-800 font-sans px-1.5 py-0.2 rounded text-[9.5px] font-extrabold flex items-center gap-0.5 border border-amber-200/20">
-                        TOPIC: {run.analysis.organizedFolder}
-                      </span>
                       <span className="flex items-center gap-0.5">
                         <Calendar className="w-3 h-3 text-stone-300" /> {run.analysis.calendarEvents.length} APPOINTMENTS
                       </span>

@@ -4,17 +4,27 @@ import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
 import { splitTiers, logUserTranscript } from "./server-utils";
+import { captureMemoryEvent } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, askAgent, groundedSearcher } from "./agents";
+import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 
 const app = express();
-app.use(express.json());
+// 15mb covers a base64-encoded ~8-10s audio chunk (see /api/transcribe-audio) with headroom; every
+// other route here sends plain text, well under that.
+app.use(express.json({ limit: "15mb" }));
 
 // 3000 by default: the OAuth redirect URI registered in Google Cloud is per-port.
 const PORT = Number(process.env.PORT) || 3000;
 
 setLogLevel(LogLevel.WARN); // silence ADK's per-event INFO logging
+
+// A disk failure must never 500 a response the user already spent tokens on — every capture site
+// swallows its own error and just logs, tagged by caller for the console.
+const safeCapture = (tag: string, sessionId: unknown, entry: { text: string; plan?: unknown }) => {
+  try { captureMemoryEvent(sessionId, entry); }
+  catch (e: any) { console.warn(`[${tag}] memory capture failed:`, e?.message || e); }
+};
 
 // Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
 // so no two of them can drift apart the way four hand-wired agent calls did.
@@ -32,20 +42,16 @@ app.get("/api/config", async (_req, res) => {
 
 app.post("/api/analyze", async (req, res) => {
   try {
-    const { text, currentLocalTime, liveSummary, userId, sessionId } = req.body;
+    const { text, currentLocalTime, liveSummary, sessionId } = req.body;
     if (!text || typeof text !== "string") {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
 
-    // Archive the raw transcript per user. Finalize only — /api/live fires every couple of seconds
-    // with the same growing text and would write the session hundreds of times. A disk failure must
-    // not 500 an analysis the user already spent tokens on.
-    try {
-      logUserTranscript(userId, sessionId, text);
-    } catch (e: any) {
-      console.warn("[analyze] transcript log failed:", e?.message || e);
-    }
+    // Durably save the raw transcript BEFORE calling the model, so the user's words survive even if
+    // the plan call below fails — `plan` is omitted for now, filled in once it resolves below. A
+    // disk failure must not 500 an analysis the user already spent tokens on.
+    safeCapture("analyze", sessionId, { text });
 
     const { plan } = await runOrchestrator({
       stages: new Set<Stage>(["plan"]),
@@ -55,10 +61,33 @@ app.post("/api/analyze", async (req, res) => {
     });
     const parsed = plan ?? {};
     console.log(`[analyze] text=${text.length}ch → events=${parsed.calendarEvents?.length ?? 0} tasks=${parsed.tasks?.length ?? 0} queries=${parsed.searchQueries?.length ?? 0}`);
+
+    // Phase 1 memory capture: overwrite the same session record with the resolved plan attached, for
+    // Phase 2 to eventually sync into Memory Bank. Same "never fail the response over a side write"
+    // treatment as the pre-model save above.
+    safeCapture("analyze", sessionId, { text, plan: parsed });
+
     res.json(parsed);
   } catch (error: any) {
     console.error("Analysis API failed:", error);
     res.status(500).json({ error: error.message || "Internal server error" });
+  }
+});
+
+// Thin, model-free archive write: one 15s segment (or a catch-up flush) of raw dictation, appended
+// as its own JSONL line. Safe to call constantly — no orchestrator/Gemini call, no quota spent.
+app.post("/api/transcript-segment", async (req, res) => {
+  try {
+    const { userId, sessionId, text } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "text is required and must be a string." });
+      return;
+    }
+    logUserTranscript(userId, sessionId, text);
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error("Transcript segment log failed:", error);
+    res.status(500).json({ error: error.message || "Failed to log transcript segment." });
   }
 });
 
@@ -89,7 +118,7 @@ app.post("/api/transcribe-correct", async (req, res) => {
 // Additive by design: /api/analyze, /api/transcribe-correct and /api/search keep their contracts
 // (the evals and the "Analyze Thoughts" finalize button still use them).
 app.post("/api/live", async (req, res) => {
-  const { text, currentLocalTime, liveSummary, withPlan } = req.body;
+  const { text, currentLocalTime, liveSummary, withPlan, sessionId } = req.body;
   if (!text || typeof text !== "string") {
     res.status(400).json({ error: "Text is required and must be a string." });
     return;
@@ -103,6 +132,7 @@ app.post("/api/live", async (req, res) => {
   try {
     // Skip the expensive classifier when the client says this tick added too little to re-plan.
     const stages = new Set<Stage>(withPlan === false ? ["proof", "summary"] : ["proof", "summary", "plan"]);
+    let latestPlan: unknown;
     await runOrchestrator({
       stages,
       text,
@@ -110,9 +140,20 @@ app.post("/api/live", async (req, res) => {
       liveSummary,
       // One stage failing must not sink the others — the orchestrator reports each stage
       // independently, error included, so a 429 on the classifier still ships the proofread.
-      onStage: (stage, payload) => send({ stage, ...payload }),
+      onStage: (stage, payload) => {
+        if (stage === "plan" && payload && !payload.error) latestPlan = payload.plan;
+        send({ stage, ...payload });
+      },
     });
     console.log(`[live] text=${text.length}ch plan=${withPlan === false ? "skipped" : "ran"}`);
+
+    // Auto-save: overwrite the session's memory record (text + the latest plan, on ticks that re-ran
+    // the classifier) with the current snapshot on every live tick — one file per session, not a
+    // growing log of near-duplicate lines. The client already debounces these to a couple of
+    // seconds apart (LIVE_QUIET_MS/LIVE_MAX_WAIT_MS in App.tsx), so this doubles as the auto-save
+    // cadence without a second timer. `sessionId` is only set once a recording is underway, so
+    // evals and other callers that don't send one simply don't autosave.
+    if (sessionId) safeCapture("live", sessionId, { text, plan: latestPlan });
   } catch (error: any) {
     console.error("Live API failed:", error);
     send({ stage: "fatal", error: error?.message || "Live pipeline failed." });
@@ -151,6 +192,25 @@ app.post("/api/search", async (req, res) => {
   } catch (error: any) {
     console.error("Search API failed:", error);
     res.status(500).json({ error: error.message || "Failed to execute grounded search." });
+  }
+});
+
+// One chunk of captured audio (mic or shared-tab) → verbatim text, via Gemini. The client is
+// expected to POST per-chunk (~8-10s of opus, base64), never accumulate a whole session client-side.
+app.post("/api/transcribe-audio", async (req, res) => {
+  try {
+    const { audio, mimeType, source } = req.body;
+    if (!audio || typeof audio !== "string") {
+      res.status(400).json({ error: "audio (base64) is required and must be a string." });
+      return;
+    }
+    const { text } = await askAgentParts(audioTranscriber, [
+      { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: audio } },
+    ]);
+    res.json({ text: text.trim(), source: source === "tab" ? "tab" : "mic" });
+  } catch (error: any) {
+    console.error("Audio transcription failed:", error);
+    res.status(500).json({ error: error.message || "Failed to transcribe audio." });
   }
 });
 
@@ -208,9 +268,18 @@ app.post("/api/execute", async (req, res) => {
 
 // Startup: key check, then Vite middleware (dev) or static bundle (prod), then listen.
 async function main() {
-  // ADK reads the key when each agent is built — fail fast at startup if .env has none.
-  if (!KEYS.length) {
-    throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) found in .env. Please add one.");
+  if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
+    process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;
+  }
+  // ADK reads the key (or the Vertex AI project/location) when each agent is built — fail fast at
+  // startup if .env has neither. Vertex mode auths via ADC/service account, not an API key, so an
+  // empty KEYS list is only fatal when GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_ENTERPRISE isn't set.
+  const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || process.env.GOOGLE_GENAI_USE_ENTERPRISE || "");
+  if (!KEYS.length && !usingVertex) {
+    throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) found in .env, and GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_ENTERPRISE is not set. Please add one.");
+  }
+  if (usingVertex && (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION)) {
+    throw new Error("GOOGLE_GENAI_USE_VERTEXAI is set but GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION is missing in .env.");
   }
 
   if (process.env.NODE_ENV !== "production") {
@@ -228,7 +297,10 @@ async function main() {
   }
 
   app.listen(PORT, "127.0.0.1", () => {
-    console.log(`Server running on http://127.0.0.1:${PORT} (${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""})`);
+    const authDesc = usingVertex
+      ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`
+      : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""} | Model: ${MODEL}`;
+    console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
   });
 }
