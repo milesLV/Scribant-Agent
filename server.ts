@@ -3,10 +3,17 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import { splitTiers, logUserTranscript } from "./server-utils";
-import { captureMemoryEvent } from "./memory";
+import { splitTiers, logUserTranscript, safeSeg } from "./server-utils";
+import {
+  captureMemoryEvent,
+  getMemoryService,
+  ingestTranscriptToMemoryBank,
+  retrieveFromMemoryBank,
+  syncLocalMemoriesToMemoryBank,
+  VertexAiMemoryBankService,
+} from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
+import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 
 const app = express();
@@ -24,6 +31,15 @@ setLogLevel(LogLevel.WARN); // silence ADK's per-event INFO logging
 const safeCapture = (tag: string, sessionId: unknown, entry: { text: string; plan?: unknown }) => {
   try { captureMemoryEvent(sessionId, entry); }
   catch (e: any) { console.warn(`[${tag}] memory capture failed:`, e?.message || e); }
+};
+
+// Non-blocking Vertex AI Memory Bank ingestion helper
+const safeIngest = (tag: string, sessionId: unknown, entry: { text: string; plan?: unknown }) => {
+  ingestTranscriptToMemoryBank({
+    text: entry.text,
+    sessionId: safeSeg(sessionId, "session"),
+    plan: entry.plan,
+  }).catch(e => console.warn(`[${tag}] memory bank ingest failed:`, e?.message || e));
 };
 
 // Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
@@ -66,6 +82,7 @@ app.post("/api/analyze", async (req, res) => {
     // Phase 2 to eventually sync into Memory Bank. Same "never fail the response over a side write"
     // treatment as the pre-model save above.
     safeCapture("analyze", sessionId, { text, plan: parsed });
+    safeIngest("analyze", sessionId, { text, plan: parsed });
 
     res.json(parsed);
   } catch (error: any) {
@@ -153,12 +170,84 @@ app.post("/api/live", async (req, res) => {
     // seconds apart (LIVE_QUIET_MS/LIVE_MAX_WAIT_MS in App.tsx), so this doubles as the auto-save
     // cadence without a second timer. `sessionId` is only set once a recording is underway, so
     // evals and other callers that don't send one simply don't autosave.
-    if (sessionId) safeCapture("live", sessionId, { text, plan: latestPlan });
+    if (sessionId) {
+      safeCapture("live", sessionId, { text, plan: latestPlan });
+      safeIngest("live", sessionId, { text, plan: latestPlan });
+    }
   } catch (error: any) {
     console.error("Live API failed:", error);
     send({ stage: "fatal", error: error?.message || "Live pipeline failed." });
   } finally {
     res.end();
+  }
+});
+
+// Memory Bank: Ingest a transcript or session explicitly into Vertex AI Memory Bank
+app.post("/api/memory/ingest", async (req, res) => {
+  try {
+    const { text, sessionId, userId, plan, timestamp } = req.body;
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "text is required and must be a string." });
+      return;
+    }
+    const result = await ingestTranscriptToMemoryBank({
+      text,
+      sessionId: safeSeg(sessionId, "session"),
+      userId: safeSeg(userId, "default_user"),
+      plan,
+      timestamp,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error: any) {
+    console.error("Memory bank ingest failed:", error);
+    res.status(500).json({ error: error.message || "Failed to ingest into memory bank." });
+  }
+});
+
+// Memory Bank: Retrieve memories/facts matching a query from Vertex AI Memory Bank
+const handleMemoryRetrieve = async (req: express.Request, res: express.Response) => {
+  try {
+    const query = String((req.method === "POST" ? req.body.query : req.query.query) || "").trim();
+    const userId = String((req.method === "POST" ? req.body.userId : req.query.userId) || "").trim();
+    if (!query) {
+      res.status(400).json({ error: "query is required." });
+      return;
+    }
+    const result = await retrieveFromMemoryBank(query, {
+      userId: userId ? safeSeg(userId, "default_user") : undefined,
+    });
+
+    let answer: string | null = null;
+    if (result.memories.length > 0) {
+      try {
+        const memoryContext = result.memories.map((m, i) => `[Memory ${i + 1} (${m.timestamp})]: ${m.text}`).join("\n\n");
+        const prompt = `User Question: "${query}"\n\nPast Recorded Memories from Vertex AI Memory Bank:\n${memoryContext}\n\nAnswer the user's question directly based on these past memories in 1-2 clear sentences.`;
+        const ans = await askAgent(memoryAnswerer, prompt);
+        answer = ans.text.trim() || null;
+      } catch (e: any) {
+        console.warn("[memory] Failed to synthesize direct answer:", e?.message || e);
+      }
+    }
+
+    res.json({ ok: true, answer, ...result });
+  } catch (error: any) {
+    console.error("Memory bank retrieval failed:", error);
+    res.status(500).json({ error: error.message || "Failed to retrieve from memory bank." });
+  }
+};
+app.post("/api/memory/retrieve", handleMemoryRetrieve);
+app.post("/api/memory/search", handleMemoryRetrieve);
+app.get("/api/memory/retrieve", handleMemoryRetrieve);
+app.get("/api/memory/search", handleMemoryRetrieve);
+
+// Memory Bank: Synchronize all local session files to Vertex AI Memory Bank
+app.post("/api/memory/sync", async (_req, res) => {
+  try {
+    const result = await syncLocalMemoriesToMemoryBank();
+    res.json({ ok: true, ...result });
+  } catch (error: any) {
+    console.error("Memory bank sync failed:", error);
+    res.status(500).json({ error: error.message || "Failed to sync local memory to memory bank." });
   }
 });
 
@@ -296,11 +385,23 @@ async function main() {
     });
   }
 
+  // Automatically sync local disk sessions to Vertex AI Memory Bank on startup
+  syncLocalMemoriesToMemoryBank().then(({ syncedCount }) => {
+    if (syncedCount > 0) {
+      console.log(`[memory] Synced ${syncedCount} session(s) from disk into Vertex AI Memory Bank.`);
+    }
+  }).catch(e => console.warn("[memory] Startup memory sync failed:", e?.message || e));
+
   app.listen(PORT, "127.0.0.1", () => {
+    const memService = getMemoryService();
+    const isVertexMem = memService instanceof VertexAiMemoryBankService;
+    const memDesc = isVertexMem
+      ? `Vertex AI Memory Bank (${process.env.VERTEX_AI_AGENT_ENGINE_ID || process.env.AGENT_ENGINE_ID || "active"})`
+      : "Custom Memory Bank";
     const authDesc = usingVertex
       ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`
       : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""} | Model: ${MODEL}`;
-    console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc})`);
+    console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc} | ${memDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
   });
 }

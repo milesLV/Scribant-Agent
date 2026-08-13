@@ -105,7 +105,7 @@ export default function SessionHistory({
               Sync Bank
             </button>
             <span className="text-[10px] font-mono bg-stone-100 text-stone-500 border border-stone-200 px-2 py-0.5 rounded-full font-bold">
-              {runs.length} Local
+              {runs.length} Sessions
             </span>
           </div>
         }
@@ -151,7 +151,7 @@ export default function SessionHistory({
             <div className="p-3.5 bg-amber-50/50 border border-amber-200/70 rounded-xl space-y-2.5">
               <div className="flex items-center justify-between text-[10.5px] font-mono text-amber-800 font-bold">
                 <span className="flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-600" /> Memory Bank Response
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" /> Vertex AI Memory Bank Response
                 </span>
                 <button
                   type="button"
@@ -179,7 +179,7 @@ export default function SessionHistory({
               {memoryResults && memoryResults.length > 0 && (
                 <div className="space-y-1.5 pt-1">
                   <p className="text-[10px] font-mono text-stone-500 font-bold">
-                    Source Sessions ({memoryResults.length})
+                    Vertex AI Grounded Memories ({memoryResults.length})
                   </p>
                   <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-1">
                     {memoryResults.map((mem, idx) => (
@@ -193,7 +193,7 @@ export default function SessionHistory({
               )}
 
               {memoryResults?.length === 0 && !memoryAnswer && (
-                <p className="text-xs text-stone-400 italic">No matching facts or past memories found in Memory Bank.</p>
+                <p className="text-xs text-stone-400 italic">No matching facts or memories found in Vertex AI Memory Bank.</p>
               )}
             </div>
           )}
@@ -203,7 +203,7 @@ export default function SessionHistory({
             {filteredRuns.length === 0 ? (
               <p className="text-xs text-stone-400 italic text-center py-4">
                 {runs.length === 0
-                  ? "No in-memory active sessions yet. Use 'Sync Bank' to sync captured disk sessions or 'Query Bank' to search."
+                  ? "No active recording sessions. Use 'Query Bank' above to search your Google Cloud Vertex AI Memory Bank."
                   : "No matching sessions found."}
               </p>
             ) : (
