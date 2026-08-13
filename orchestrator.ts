@@ -214,7 +214,7 @@ export async function runOrchestrator(opts: {
 // The steps' logic itself is already pinned by the pure functions they call (transcriber,
 // server-utils, transcript). Run: tsx orchestrator.ts — no API key needed, no model is called.
 // import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only.
-if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   const shape = (stages: Stage[]) =>
     buildOrchestrator("k", new Set(stages)).subAgents.map(a =>
       a instanceof ParallelAgent ? a.subAgents.map(s => s.name) : a.name);
@@ -278,4 +278,5 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   assert.equal((await events(correctionApplier(), { rawText: "hi", proofRaw: "{}" })).length, 1);
 
   console.log("orchestrator self-check ✓");
-}
+})();
+

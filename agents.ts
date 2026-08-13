@@ -213,7 +213,7 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
 
 // ponytail: self-check pins the retry policy (the only branching here). Run: tsx agents.ts
 // import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
-if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
+if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   // Quota, 4 keys: swap to the other three instantly, then back off from 15s.
   assert.deepEqual(nextAttempt(1, 4, null, true), { sleepS: 0 });
   assert.deepEqual(nextAttempt(3, 4, null, true), { sleepS: 0 });
@@ -258,4 +258,5 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   assert.match(await instructionOf(proofreader("k"), { rawText: "buy milk" }), /0:buy 1:milk/);
 
   console.log("agents self-check ✓");
-}
+})();
+
