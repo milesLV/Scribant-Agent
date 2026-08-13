@@ -13,7 +13,7 @@ import {
   VertexAiMemoryBankService,
 } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
+import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 
 const app = express();
@@ -217,7 +217,20 @@ const handleMemoryRetrieve = async (req: express.Request, res: express.Response)
     const result = await retrieveFromMemoryBank(query, {
       userId: userId ? safeSeg(userId, "default_user") : undefined,
     });
-    res.json({ ok: true, ...result });
+
+    let answer: string | null = null;
+    if (result.memories.length > 0) {
+      try {
+        const memoryContext = result.memories.map((m, i) => `[Memory ${i + 1} (${m.timestamp})]: ${m.text}`).join("\n\n");
+        const prompt = `User Question: "${query}"\n\nPast Recorded Memories:\n${memoryContext}\n\nAnswer the user's question directly based on these past memories in 1-2 clear sentences.`;
+        const ans = await askAgent(memoryAnswerer, prompt);
+        answer = ans.text.trim() || null;
+      } catch (e: any) {
+        console.warn("[memory] Failed to synthesize direct answer:", e?.message || e);
+      }
+    }
+
+    res.json({ ok: true, answer, ...result });
   } catch (error: any) {
     console.error("Memory bank retrieval failed:", error);
     res.status(500).json({ error: error.message || "Failed to retrieve from memory bank." });

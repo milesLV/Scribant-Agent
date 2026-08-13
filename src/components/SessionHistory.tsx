@@ -26,6 +26,7 @@ export default function SessionHistory({
   const [isSearchingMemory, setIsSearchingMemory] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [memoryAnswer, setMemoryAnswer] = useState<string | null>(null);
   const [memoryResults, setMemoryResults] = useState<MemoryResult[] | null>(null);
 
   const formatDate = (isoStr: string) =>
@@ -35,6 +36,7 @@ export default function SessionHistory({
     const q = searchQuery.trim();
     if (!q) {
       setMemoryResults(null);
+      setMemoryAnswer(null);
       return;
     }
     setIsSearchingMemory(true);
@@ -47,6 +49,7 @@ export default function SessionHistory({
       if (res.ok) {
         const data = await res.json();
         setMemoryResults(data.memories || []);
+        setMemoryAnswer(data.answer || null);
       }
     } catch (e) {
       console.warn("Memory bank search failed:", e);
@@ -117,10 +120,13 @@ export default function SessionHistory({
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
-                  if (!e.target.value.trim()) setMemoryResults(null);
+                  if (!e.target.value.trim()) {
+                    setMemoryResults(null);
+                    setMemoryAnswer(null);
+                  }
                 }}
                 onKeyDown={(e) => { if (e.key === "Enter") handleSearchMemoryBank(); }}
-                placeholder="Search transcripts &amp; memories..."
+                placeholder="Ask or search past memories (e.g. What is my name?)..."
                 className="w-full text-xs bg-stone-50 border border-stone-200 focus:bg-white rounded-lg pl-8 pr-3 py-1.5 outline-none focus:ring-1 focus:ring-amber-500/20 text-stone-700 font-sans"
               />
             </div>
@@ -141,31 +147,53 @@ export default function SessionHistory({
           </div>
 
           {/* Memory Bank Results */}
-          {memoryResults !== null && (
-            <div className="p-3 bg-amber-50/40 border border-amber-200/60 rounded-xl space-y-2">
-              <div className="flex items-center justify-between text-[10px] font-mono text-amber-800 font-bold">
-                <span className="flex items-center gap-1">
-                  <Sparkles className="w-3 h-3 text-amber-600" /> Memory Bank Results ({memoryResults.length})
+          {(memoryResults !== null || memoryAnswer !== null) && (
+            <div className="p-3.5 bg-amber-50/50 border border-amber-200/70 rounded-xl space-y-2.5">
+              <div className="flex items-center justify-between text-[10.5px] font-mono text-amber-800 font-bold">
+                <span className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" /> Memory Bank Response
                 </span>
                 <button
                   type="button"
-                  onClick={() => setMemoryResults(null)}
-                  className="text-stone-400 hover:text-stone-600 font-sans cursor-pointer"
+                  onClick={() => {
+                    setMemoryResults(null);
+                    setMemoryAnswer(null);
+                  }}
+                  className="text-stone-400 hover:text-stone-600 font-sans text-xs cursor-pointer"
                 >
                   Clear
                 </button>
               </div>
-              {memoryResults.length === 0 ? (
-                <p className="text-xs text-stone-400 italic">No matching facts or past memories found in Memory Bank.</p>
-              ) : (
-                <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-1">
-                  {memoryResults.map((mem, idx) => (
-                    <div key={idx} className="p-2.5 bg-white rounded-lg border border-amber-100 text-xs text-stone-700 leading-relaxed font-sans shadow-2xs">
-                      <p className="font-medium whitespace-pre-wrap">{mem.text}</p>
-                      <p className="text-[9.5px] text-stone-400 font-mono mt-1">{formatDate(mem.timestamp)}</p>
-                    </div>
-                  ))}
+
+              {/* Direct AI Answer synthesized from memories */}
+              {memoryAnswer && (
+                <div className="p-3 bg-white/90 border border-amber-300/80 rounded-lg shadow-2xs space-y-1">
+                  <p className="text-[10px] font-mono font-bold text-amber-700 uppercase tracking-wide">Direct Answer</p>
+                  <p className="text-xs text-stone-800 font-sans font-medium leading-relaxed">
+                    {memoryAnswer}
+                  </p>
                 </div>
+              )}
+
+              {/* Source memory snippets */}
+              {memoryResults && memoryResults.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  <p className="text-[10px] font-mono text-stone-500 font-bold">
+                    Source Sessions ({memoryResults.length})
+                  </p>
+                  <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-1">
+                    {memoryResults.map((mem, idx) => (
+                      <div key={idx} className="p-2.5 bg-white/70 rounded-lg border border-amber-100 text-xs text-stone-700 leading-relaxed font-sans">
+                        <p className="font-normal whitespace-pre-wrap">{mem.text}</p>
+                        <p className="text-[9.5px] text-stone-400 font-mono mt-1">{formatDate(mem.timestamp)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {memoryResults?.length === 0 && !memoryAnswer && (
+                <p className="text-xs text-stone-400 italic">No matching facts or past memories found in Memory Bank.</p>
               )}
             </div>
           )}

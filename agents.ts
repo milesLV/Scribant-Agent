@@ -86,6 +86,14 @@ export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
   includeContents: "none",
 });
 
+// Answers user questions synthesized from retrieved past session memories
+export const memoryAnswerer: AgentFactory = (apiKey) => new LlmAgent({
+  name: "memory_answerer",
+  model: new Gemini({ model: MODEL, apiKey }),
+  instruction: "You are a helpful personal memory assistant. Based strictly on the user's past session memories provided in the prompt, answer their question directly, clearly, and concisely (1-2 sentences). If the memories do not contain the answer, say so politely.",
+  includeContents: "default",
+});
+
 // Prompt criteria + schema are generated once from the skill registry (skills.ts). Order is fixed:
 // ideasSummary (1), each skill (2..) — the calendar criteria's "(see #3)" reference relies on
 // tasks landing at index 3.
