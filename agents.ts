@@ -13,6 +13,10 @@ import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcrib
 
 const MODEL = "gemini-3.6-flash";
 
+if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
+  process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;
+}
+
 // Sub-agents read their input from session state rather than the user message: inside the
 // orchestrator the message is the raw transcript, but everything downstream of the proofreader must
 // reason over the CORRECTED text. `corrected` is seeded by the orchestrator for callers that skip
