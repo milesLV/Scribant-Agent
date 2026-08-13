@@ -136,18 +136,29 @@ export interface MemoryServiceConfig {
   client?: any;
 }
 
-// Instantiates a VertexAiMemoryBankService when configuration (AGENT_ENGINE_ID) is present,
-// or falls back to an InMemoryMemoryService for prototyping, tests, and offline use.
+// Instantiates a strict VertexAiMemoryBankService connecting to Google Cloud.
+// If VERTEX_AI_AGENT_ENGINE_ID is missing, it throws an explicit error rather than falling back to in-memory.
 export function createMemoryBankService(config?: MemoryServiceConfig): BaseMemoryService {
+  if (config?.forceInMemory) {
+    return new InMemoryMemoryService();
+  }
+
   const agentEngineId = config?.agentEngineId ??
     process.env.VERTEX_AI_AGENT_ENGINE_ID ??
     process.env.AGENT_ENGINE_ID ??
     process.env.MEMORY_BANK_AGENT_ENGINE_ID ??
     process.env.REASONING_ENGINE_ID;
 
+  if (!agentEngineId) {
+    throw new Error(
+      "VERTEX_AI_AGENT_ENGINE_ID (or AGENT_ENGINE_ID) is required in .env to connect to Vertex AI Memory Bank. Run `npm run create:memory-bank` to create one programmatically on GCP."
+    );
+  }
+
   const projectId = config?.projectId ??
     process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID;
+    process.env.PROJECT_ID ??
+    "agentclinicep04";
 
   const location = config?.location ??
     process.env.VERTEX_AI_LOCATION ??
@@ -158,21 +169,120 @@ export function createMemoryBankService(config?: MemoryServiceConfig): BaseMemor
     process.env.VERTEX_EXPRESS_MODE_API_KEY ??
     process.env.GEMINI_API_KEY;
 
-  if (!config?.forceInMemory && agentEngineId) {
-    try {
-      return new VertexAiMemoryBankService({
-        agentEngineId,
-        projectId,
-        location,
-        expressModeApiKey,
-        ...(config?.client ? { client: config.client } : {}),
-      });
-    } catch (e: any) {
-      console.warn("[memory] Failed to initialize VertexAiMemoryBankService, falling back to InMemoryMemoryService:", e?.message || e);
-    }
+  return new VertexAiMemoryBankService({
+    agentEngineId,
+    projectId,
+    location,
+    expressModeApiKey,
+    ...(config?.client ? { client: config.client } : {}),
+  });
+}
+
+// Programmatically creates a new Vertex AI Memory Bank resource on Google Cloud.
+export async function createCloudMemoryBank(options?: {
+  projectId?: string;
+  location?: string;
+  displayName?: string;
+  description?: string;
+}): Promise<{
+  resourceName: string;
+  agentEngineId: string;
+  displayName: string;
+  location: string;
+  projectId: string;
+}> {
+  const { GoogleAuth } = await import("google-auth-library");
+  const auth = new GoogleAuth({
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+  });
+  const client = await auth.getClient();
+  const token = await client.getAccessToken();
+
+  const projectId = options?.projectId ??
+    process.env.GOOGLE_CLOUD_PROJECT ??
+    process.env.PROJECT_ID ??
+    "agentclinicep04";
+
+  const location = options?.location ??
+    process.env.VERTEX_AI_LOCATION ??
+    process.env.GOOGLE_CLOUD_LOCATION ??
+    "us-central1";
+
+  const displayName = options?.displayName || "scribant-memory-bank";
+  const description = options?.description || "Memory Bank for Scribant Voice Agent";
+
+  const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${location}/reasoningEngines`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token.token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      displayName,
+      description,
+      contextSpec: {
+        memoryBankConfig: {}
+      }
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Failed to create Vertex AI Memory Bank (${res.status}): ${errText}`);
   }
 
-  return new InMemoryMemoryService();
+  const data = await res.json();
+  const operationName = String(data.name || "");
+  const match = operationName.match(/reasoningEngines\/([^/]+)/);
+  const agentEngineId = match ? match[1] : operationName.split("/").pop()!;
+  const resourceName = `projects/${projectId}/locations/${location}/reasoningEngines/${agentEngineId}`;
+
+  return {
+    resourceName,
+    agentEngineId,
+    displayName,
+    location,
+    projectId,
+  };
+}
+
+// Programmatically lists all Vertex AI Memory Bank resources in the GCP project.
+export async function listCloudMemoryBanks(options?: {
+  projectId?: string;
+  location?: string;
+}): Promise<Array<{ name: string; displayName?: string; description?: string; createTime?: string }>> {
+  const { GoogleAuth } = await import("google-auth-library");
+  const auth = new GoogleAuth({
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+  });
+  const client = await auth.getClient();
+  const token = await client.getAccessToken();
+
+  const projectId = options?.projectId ??
+    process.env.GOOGLE_CLOUD_PROJECT ??
+    process.env.PROJECT_ID ??
+    "agentclinicep04";
+
+  const location = options?.location ??
+    process.env.VERTEX_AI_LOCATION ??
+    process.env.GOOGLE_CLOUD_LOCATION ??
+    "us-central1";
+
+  const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${location}/reasoningEngines`;
+
+  const res = await fetch(url, {
+    headers: { "Authorization": `Bearer ${token.token}` }
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Failed to list Vertex AI Memory Banks (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  return data.reasoningEngines || [];
 }
 
 // Shared singleton getter, overrideable per-caller or per-test.
