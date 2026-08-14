@@ -160,11 +160,50 @@ async function testMemoryBankEndpoints() {
   console.log("memory bank ingest, retrieve, and sync endpoints ✓");
 }
 
+// Phase 3: Memory Events API endpoints (/api/memory/events, /api/memory/events/clear)
+async function testMemoryEventsEndpoints() {
+  // 1. Fetch all memory events
+  const eventsRes = await fetch(BASE + "/api/memory/events");
+  if (!eventsRes.ok) throw new Error(`/api/memory/events -> ${eventsRes.status}`);
+  const eventsData = await eventsRes.json();
+  assert.equal(eventsData.ok, true);
+  assert.ok(Array.isArray(eventsData.events));
+  assert.ok(eventsData.count >= 1);
+
+  // 2. Fetch filtered by type=memory:insert
+  const insertRes = await fetch(BASE + "/api/memory/events?type=memory:insert");
+  if (!insertRes.ok) throw new Error(`/api/memory/events?type=memory:insert -> ${insertRes.status}`);
+  const insertData = await insertRes.json();
+  assert.equal(insertData.ok, true);
+  assert.ok(insertData.events.every((e: any) => e.actions?.stateDelta?.eventType === "memory:insert"));
+
+  // 3. Fetch filtered by type=memory:retrieve
+  const retrieveRes = await fetch(BASE + "/api/memory/events?type=memory:retrieve");
+  if (!retrieveRes.ok) throw new Error(`/api/memory/events?type=memory:retrieve -> ${retrieveRes.status}`);
+  const retrieveData = await retrieveRes.json();
+  assert.equal(retrieveData.ok, true);
+  assert.ok(retrieveData.events.every((e: any) => e.actions?.stateDelta?.eventType === "memory:retrieve"));
+
+  // 4. Clear events via POST /api/memory/events/clear
+  const clearRes = await fetch(BASE + "/api/memory/events/clear", { method: "POST" });
+  if (!clearRes.ok) throw new Error(`/api/memory/events/clear -> ${clearRes.status}`);
+  const clearData = await clearRes.json();
+  assert.equal(clearData.ok, true);
+
+  const afterClearRes = await fetch(BASE + "/api/memory/events");
+  const afterClearData = await afterClearRes.json();
+  assert.equal(afterClearData.count, 0);
+
+  console.log("memory events endpoints (get, filter, clear) ✓");
+}
+
 async function main() {
   await testFinalizeOnly();
   await testLiveAutosave();
   await testMemoryBankEndpoints();
+  await testMemoryEventsEndpoints();
 }
 
 main().catch(e => { console.error("memory-capture integration test ✗", e); process.exitCode = 1; });
+
 

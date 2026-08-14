@@ -64,7 +64,9 @@ async function executeOnServer(kind: ExecKind, item: object, token: string): Pro
 
 export async function createCalendarEvent(token: string | null, event: Omit<CalendarEvent, "status">): Promise<string> {
   if (!token) {
-    return sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, status: "scheduled", eventId: id }));
+    const id = sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, status: "scheduled", eventId: id }));
+    executeOnServer("create_calendar_event", { title: event.title, description: event.description, start: event.start, end: event.end, allDay: event.allDay }, "sandbox").catch(() => {});
+    return id;
   }
   const { title, description, start, end, allDay } = event;
   return executeOnServer("create_calendar_event", { title, description, start, end, allDay }, token);
@@ -76,7 +78,9 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
 
 export async function createGoogleTask(token: string | null, task: Omit<TaskItem, "status">): Promise<string> {
   if (!token) {
-    return sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id }));
+    const id = sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id }));
+    executeOnServer("create_task", { title: task.title, notes: task.notes, dueDate: task.dueDate }, "sandbox").catch(() => {});
+    return id;
   }
   const { title, notes, dueDate } = task;
   return executeOnServer("create_task", { title, notes, dueDate }, token);
@@ -91,7 +95,9 @@ export async function createDriveFolder(token: string | null, folderName: string
   if (!token) {
     const existing = getSandboxState().folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
     if (existing) return existing.id;
-    return sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName }));
+    const id = sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName }));
+    executeOnServer("create_drive_folder", { folderName }, "sandbox").catch(() => {});
+    return id;
   }
   return executeOnServer("create_drive_folder", { folderName }, token);
 }
@@ -103,7 +109,9 @@ export async function uploadDriveFile(
   folderId?: string
 ): Promise<string> {
   if (!token) {
-    return sandboxAdd("mock-doc", (s, id) => s.docs.push({ name: fileName, fileId: id, folderId }));
+    const id = sandboxAdd("mock-doc", (s, id) => s.docs.push({ name: fileName, fileId: id, folderId }));
+    executeOnServer("create_drive_doc", { fileName, content, folderId }, "sandbox").catch(() => {});
+    return id;
   }
   return executeOnServer("create_drive_doc", { fileName, content, folderId }, token);
 }
@@ -120,6 +128,11 @@ export async function deleteCreatedItem(
     const state = getSandboxState();
     state[list] = (state[list] as any[]).filter(x => x[idKey] !== id);
     saveSandboxState(state);
+    fetch("/api/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, action: "delete", id, accessToken: "sandbox" }),
+    }).catch(() => {});
     return;
   }
   const res = await fetch("/api/execute", {

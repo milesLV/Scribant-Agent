@@ -78,3 +78,56 @@ export interface StreamRun {
   status: 'processing' | 'completed' | 'failed';
   analysis?: AnalysisResult;
 }
+
+export interface AdkEventPart {
+  text?: string;
+  thought?: boolean;
+  functionCall?: { name: string; args: Record<string, any>; id?: string };
+  functionResponse?: { name: string; response: Record<string, any>; id?: string };
+  executableCode?: { code: string; language: string };
+  codeExecutionResult?: { outcome: string; output: string };
+  [key: string]: any;
+}
+
+export interface AdkEventActions {
+  stateDelta?: Record<string, any>;
+  artifactDelta?: Record<string, number>;
+  transferToAgent?: string;
+  escalate?: boolean;
+  requestedAuthConfigs?: Record<string, any>;
+  requestedToolConfirmations?: Record<string, any>;
+  skipSummarization?: boolean;
+  [key: string]: any;
+}
+
+export interface AdkEvent {
+  id: string;
+  invocationId?: string;
+  author?: string;
+  timestamp: number;
+  content?: {
+    role: string;
+    parts: AdkEventPart[];
+  };
+  actions?: AdkEventActions;
+  errorCode?: string | number;
+  errorMessage?: string;
+  groundingMetadata?: any;
+  customMetadata?: Record<string, any>;
+  branch?: string;
+  longRunningToolIds?: string[];
+  [key: string]: any;
+}
+
+export type MemoryEventType = "memory:insert" | "memory:retrieve" | "memory:sync";
+export type MemoryEventStatus = "success" | "error" | "pending";
+
+export interface RetrievedMemoryItem {
+  text: string;
+  author: string;
+  timestamp: string;
+}
+
+export type MemoryEvent = AdkEvent;
+
+

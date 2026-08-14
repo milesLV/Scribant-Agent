@@ -27,6 +27,7 @@ import { buildProofreadPrompt, parseProofread } from "./transcriber";
 import { applyCorrections } from "./src/utils/transcript";
 import { cleanJsonString, resolvePlanDates } from "./server-utils";
 import { getMemoryService } from "./memory";
+import { emitAdkEvent } from "./adk-events";
 
 export type Stage = "proof" | "summary" | "plan";
 
@@ -157,6 +158,7 @@ export async function runOrchestrator(opts: {
       newMessage: { role: "user", parts: [{ text }] },
       stateDelta: { ...state },
     })) {
+      emitAdkEvent(ev);
       if (ev.errorCode) {
         const { msg } = classifyError(ev);
         // Errors are authored by the sub-agent that raised them and STAGE_OF covers the whole tree,

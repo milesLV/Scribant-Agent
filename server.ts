@@ -11,10 +11,15 @@ import {
   retrieveFromMemoryBank,
   syncLocalMemoriesToMemoryBank,
   VertexAiMemoryBankService,
+  getMemoryEvents,
+  clearMemoryEvents,
+  subscribeToMemoryEvents,
+  memoryEvents,
 } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
+import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
 
 const app = express();
 // 15mb covers a base64-encoded ~8-10s audio chunk (see /api/transcribe-audio) with headroom; every
@@ -42,6 +47,14 @@ const safeIngest = (tag: string, sessionId: unknown, entry: { text: string; plan
   }).catch(e => console.warn(`[${tag}] memory bank ingest failed:`, e?.message || e));
 };
 
+// Non-blocking Vertex AI Memory Bank retrieval helper
+const safeRetrieve = (tag: string, query: string, options?: { userId?: string; sessionId?: string }) => {
+  if (!query || !query.trim()) return;
+  retrieveFromMemoryBank(query.trim(), {
+    userId: options?.userId,
+  }).catch(e => console.warn(`[${tag}] memory bank retrieve failed:`, e?.message || e));
+};
+
 // Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
 // so no two of them can drift apart the way four hand-wired agent calls did.
 
@@ -63,6 +76,9 @@ app.post("/api/analyze", async (req, res) => {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
+
+    // Auto-retrieve relevant past memories for this transcript
+    safeRetrieve("analyze", text, { sessionId: safeSeg(sessionId, "session") });
 
     // Durably save the raw transcript BEFORE calling the model, so the user's words survive even if
     // the plan call below fails — `plan` is omitted for now, filled in once it resolves below. A
@@ -173,6 +189,9 @@ app.post("/api/live", async (req, res) => {
     if (sessionId) {
       safeCapture("live", sessionId, { text, plan: latestPlan });
       safeIngest("live", sessionId, { text, plan: latestPlan });
+      if (text.length >= 15 && withPlan !== false) {
+        safeRetrieve("live", text, { sessionId: safeSeg(sessionId, "session") });
+      }
     }
   } catch (error: any) {
     console.error("Live API failed:", error);
@@ -224,6 +243,16 @@ const handleMemoryRetrieve = async (req: express.Request, res: express.Response)
         const prompt = `User Question: "${query}"\n\nPast Recorded Memories from Vertex AI Memory Bank:\n${memoryContext}\n\nAnswer the user's question directly based on these past memories in 1-2 clear sentences.`;
         const ans = await askAgent(memoryAnswerer, prompt);
         answer = ans.text.trim() || null;
+        if (answer) {
+          memoryEvents.updateLatest(
+            e => e.author === "memory" && e.actions?.stateDelta?.query === query && !e.actions?.stateDelta?.answer,
+            (e) => {
+              if (e.actions?.stateDelta) {
+                e.actions.stateDelta.answer = answer;
+              }
+            }
+          );
+        }
       } catch (e: any) {
         console.warn("[memory] Failed to synthesize direct answer:", e?.message || e);
       }
@@ -251,8 +280,101 @@ app.post("/api/memory/sync", async (_req, res) => {
   }
 });
 
+// Memory & ADK Events: Query events with multi-dimensional filtering (in-memory or disk)
+const handleGetEvents = (req: any, res: any) => {
+  try {
+    const type = req.query.type as string | undefined;
+    const author = req.query.author as string | undefined;
+    const status = req.query.status as string | undefined;
+    const search = (req.query.search || req.query.q) as string | undefined;
+    const sessionId = (req.query.sessionId || req.query.session) as string | undefined;
+    const fromDisk = req.query.fromDisk === "true" || req.query.source === "disk";
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const events = getMemoryEvents({ type, author, status, search, sessionId, fromDisk, limit });
+    res.json({ ok: true, count: events.length, events });
+  } catch (error: any) {
+    console.error("Failed to fetch memory/adk events:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch events." });
+  }
+};
+app.get("/api/memory/events", handleGetEvents);
+app.get("/api/adk/events", handleGetEvents);
+
+// Memory & ADK Events: Clear recorded events history (optionally on disk)
+const handleClearEvents = (req: any, res: any) => {
+  try {
+    const clearDisk = req.body?.clearDisk === true || req.query.clearDisk === "true";
+    clearMemoryEvents({ clearDisk });
+    res.json({ ok: true, clearedDisk: clearDisk });
+  } catch (error: any) {
+    console.error("Failed to clear memory events:", error);
+    res.status(500).json({ error: error.message || "Failed to clear memory events." });
+  }
+};
+app.post("/api/memory/events/clear", handleClearEvents);
+app.post("/api/adk/events/clear", handleClearEvents);
+
+// Memory & ADK Events: Real-time Server-Sent Events (SSE) stream
+const handleEventStream = (req: any, res: any) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  // Send initial history
+  const initialEvents = getMemoryEvents({ limit: 100 });
+  res.write(`data: ${JSON.stringify({ type: "init", events: initialEvents })}\n\n`);
+
+  // Subscribe to real-time events
+  const unsubscribe = subscribeToMemoryEvents((event) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ type: "event", event })}\n\n`);
+    }
+  });
+
+  // Keep-alive heartbeat ping every 15s
+  const pingInterval = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(": ping\n\n");
+    }
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(pingInterval);
+    unsubscribe();
+  });
+};
+app.get("/api/memory/events/stream", handleEventStream);
+app.get("/api/adk/events/stream", handleEventStream);
+
 // Grounded search: agent answer + the sources it grounded on, split into the two UI tiers.
 async function groundedSearch(query: string) {
+  emitAdkEvent(
+    createEvent({
+      author: "grounded_searcher",
+      invocationId: `search-${Date.now()}`,
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              name: "google_search",
+              args: { query },
+              id: `call-${Date.now()}`,
+            },
+          },
+        ],
+      },
+      actions: createEventActions({
+        stateDelta: {
+          eventType: "tool_call",
+          toolName: "google_search",
+          args: { query },
+        },
+      }),
+    })
+  );
+
   const response = await askAgent(groundedSearcher, `Search the web and answer this research query: "${query}".
 Respond in EXACTLY this format, nothing else:
 CONDENSED: <a direct 1-2 sentence answer>
@@ -266,6 +388,34 @@ DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`)
     : [];
 
   const { condensed, inDepth } = splitTiers(response.text || "");
+
+  emitAdkEvent(
+    createEvent({
+      author: "grounded_searcher",
+      invocationId: `search-${Date.now()}`,
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionResponse: {
+              name: "google_search",
+              response: { query, sourcesCount: sources.length, sources, condensed },
+              id: `call-${Date.now()}`,
+            },
+          },
+        ],
+      },
+      actions: createEventActions({
+        stateDelta: {
+          eventType: "tool_result",
+          toolName: "google_search",
+          status: "success",
+          result: { query, sourcesCount: sources.length, sources, condensed },
+        },
+      }),
+    })
+  );
+
   return { query, condensed, inDepth, sources };
 }
 
@@ -303,54 +453,164 @@ app.post("/api/transcribe-audio", async (req, res) => {
   }
 });
 
-// Execute ONE reviewed item. The review-then-act gate is the client UI: this is only called after
-// a human approves an item, with their OAuth token forwarded per request. Sandbox mode never
-// reaches here (the client simulates locally when signed out).
+// Execute ONE reviewed item. Supports both authenticated Google Workspace calls and sandbox mode.
 app.post("/api/execute", async (req, res) => {
   try {
     const { kind, item, accessToken, action, id } = req.body;
-    if (!accessToken || typeof accessToken !== "string") {
-      res.status(400).json({ error: "accessToken is required (sandbox mode executes client-side)." });
-      return;
-    }
-    // Undo: delete exactly the resource a previous create returned the id for. Keyed by the action
-    // being undone; Drive saves have no undo.
+    const isSandbox = !accessToken || accessToken === "sandbox";
+
+    // 1. Emit tool_call Event
+    emitAdkEvent(
+      createEvent({
+        author: "workspace_tools",
+        invocationId: `tool-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionCall: {
+                name: action === "delete" ? `delete_${kind}` : kind,
+                args: action === "delete" ? { id, kind } : item || {},
+                id: `call-${Date.now()}`,
+              },
+            },
+          ],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "tool_call",
+            toolName: kind,
+            action: action || "execute",
+            args: item,
+            mode: isSandbox ? "sandbox" : "google_api",
+          },
+        }),
+      })
+    );
+
+    // Undo: delete exactly the resource a previous create returned the id for.
     if (action === "delete") {
-      const del = { create_calendar_event: gcalDeleteEvent, create_task: gtasksDeleteTask }[kind as string];
-      if (!del) {
-        res.status(400).json({ error: `Unknown kind "${kind}" (expected "create_calendar_event" or "create_task").` });
-        return;
+      if (!isSandbox) {
+        const del = { create_calendar_event: gcalDeleteEvent, create_task: gtasksDeleteTask }[kind as string];
+        if (!del) {
+          res.status(400).json({ error: `Unknown kind "${kind}" (expected "create_calendar_event" or "create_task").` });
+          return;
+        }
+        if (!id || typeof id !== "string") {
+          res.status(400).json({ error: "delete requires the created resource id." });
+          return;
+        }
+        await del(accessToken, id);
       }
-      if (!id || typeof id !== "string") {
-        res.status(400).json({ error: "delete requires the created resource id." });
-        return;
-      }
-      await del(accessToken, id);
+
+      emitAdkEvent(
+        createEvent({
+          author: "workspace_tools",
+          invocationId: `tool-${Date.now()}`,
+          content: {
+            role: "model",
+            parts: [
+              {
+                functionResponse: {
+                  name: `delete_${kind}`,
+                  response: { ok: true, id, status: "deleted", mode: isSandbox ? "sandbox" : "google_api" },
+                  id: `call-${Date.now()}`,
+                },
+              },
+            ],
+          },
+          actions: createEventActions({
+            stateDelta: {
+              eventType: "tool_result",
+              toolName: `delete_${kind}`,
+              status: "success",
+            },
+          }),
+        })
+      );
+
       res.json({ ok: true });
       return;
     }
+
     if (!item || typeof item !== "object") {
       res.status(400).json({ error: "item is required." });
       return;
     }
+
     // `kind` IS the registry action name — the client sends what the agent would call.
     const workspaceAction = WORKSPACE_ACTIONS[kind as string];
     if (!workspaceAction) {
       res.status(400).json({ error: `Unknown kind "${kind}" (expected ${Object.keys(WORKSPACE_ACTIONS).map(k => `"${k}"`).join(", ")}).` });
       return;
     }
-    // The action's own schema is the request validation: an item shape the model could not have
-    // proposed is one this endpoint will not execute either.
+
+    // The action's own schema is the request validation
     const parsed = workspaceAction.parameters.safeParse(item);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       res.status(400).json({ error: `${kind} item is invalid: ${issue.path.join(".") || "item"} — ${issue.message}.` });
       return;
     }
-    const result = await workspaceAction.run(accessToken, parsed.data);
-    res.json({ id: result.eventId ?? result.taskId ?? result.folderId ?? result.fileId });
+
+    let resultId: string;
+    if (isSandbox) {
+      resultId = `mock-${kind}-${Date.now()}`;
+    } else {
+      const result: any = await workspaceAction.run(accessToken, parsed.data);
+      resultId = String(result.eventId ?? result.taskId ?? result.folderId ?? result.fileId ?? `id-${Date.now()}`);
+    }
+
+    // Emit tool_result Event
+    emitAdkEvent(
+      createEvent({
+        author: "workspace_tools",
+        invocationId: `tool-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionResponse: {
+                name: kind,
+                response: { id: resultId, ...parsed.data, status: "created", mode: isSandbox ? "sandbox" : "google_api" },
+                id: `call-${Date.now()}`,
+              },
+            },
+          ],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "tool_result",
+            toolName: kind,
+            status: "success",
+            resultId,
+            item: parsed.data,
+            mode: isSandbox ? "sandbox" : "google_api",
+          },
+        }),
+      })
+    );
+
+    res.json({ id: resultId });
   } catch (error: any) {
     console.error("Execute API failed:", error);
+    emitAdkEvent(
+      createEvent({
+        author: "workspace_tools",
+        invocationId: `tool-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [{ text: `Tool execution failed: ${error.message || String(error)}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "tool_result",
+            status: "error",
+            error: error.message || String(error),
+          },
+        }),
+      })
+    );
     res.status(500).json({ error: error.message || "Failed to execute action." });
   }
 });

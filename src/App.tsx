@@ -3,6 +3,7 @@ import Header from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
+import DebugPanel from "./components/DebugPanel";
 import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
@@ -77,6 +78,8 @@ export default function App() {
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
+  const [showDebugPanel, setShowDebugPanel] = useLocalStorage("show_debug_panel", true);
+  const [eventsCount, setEventsCount] = useState(0);
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -627,6 +630,9 @@ export default function App() {
           onSetAllowUncertain={setAllowUncertain}
           autoRun={autoRun}
           onAutoRunChange={setAutoRun}
+          showDebugPanel={showDebugPanel}
+          onToggleDebugPanel={() => setShowDebugPanel(p => !p)}
+          eventsCount={eventsCount}
         />
 
         {/* Sync Mode Info Header banner */}
@@ -700,6 +706,17 @@ export default function App() {
             onSelectRun={setSelectedRunId}
           />
         </div>
+
+        {/* Memory Events Debug Panel */}
+        {showDebugPanel && (
+          <div id="memory-debug-panel-section" className="pt-6 border-t border-stone-200/65 space-y-4">
+            <DebugPanel
+              isOpen={showDebugPanel}
+              onClose={() => setShowDebugPanel(false)}
+              onEventsCountChange={setEventsCount}
+            />
+          </div>
+        )}
 
         {/* Clear All Session Data button */}
         <div className="pt-4 flex justify-center">

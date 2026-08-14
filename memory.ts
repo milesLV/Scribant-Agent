@@ -299,6 +299,45 @@ export function setMemoryService(service: BaseMemoryService | null): void {
   memoryServiceInstance = service;
 }
 
+// ---- ADK Events (adk.dev/events) Integration --------------------------------
+
+import {
+  createEvent,
+  createEventActions,
+  toStructuredEvents,
+  EventType,
+  adkEventStream,
+  emitAdkEvent,
+  subscribeToAdkEvents,
+  getAdkEvents,
+  clearAdkEvents,
+  classifyAdkEventType,
+  type AdkEvent,
+} from "./adk-events";
+
+export {
+  createEvent,
+  createEventActions,
+  toStructuredEvents,
+  EventType,
+  adkEventStream,
+  emitAdkEvent,
+  subscribeToAdkEvents,
+  getAdkEvents,
+  clearAdkEvents,
+  classifyAdkEventType,
+  type AdkEvent,
+};
+
+// Aliases for memory-specific consumers
+export type MemoryEvent = AdkEvent;
+export type MemoryEventListener = (event: AdkEvent) => void;
+export const memoryEvents = adkEventStream;
+export const subscribeToMemoryEvents = subscribeToAdkEvents;
+export const getMemoryEvents = getAdkEvents;
+export const clearMemoryEvents = clearAdkEvents;
+export const recordMemoryEvent = emitAdkEvent;
+
 export interface IngestTranscriptParams {
   text: string;
   sessionId?: string;
@@ -322,86 +361,173 @@ export interface IngestTranscriptResult {
 export async function ingestTranscriptToMemoryBank(
   params: IngestTranscriptParams
 ): Promise<IngestTranscriptResult> {
+  const startTime = Date.now();
   const text = (params.text || "").trim();
-  if (!text) {
-    throw new Error("Transcript text is required for memory bank ingestion.");
-  }
-
   const appName = params.appName || process.env.APP_NAME || "scribant";
   const userId = safeSeg(params.userId, "default_user");
   const sessionId = safeSeg(params.sessionId, "session");
   const timestamp = params.timestamp || new Date().toISOString();
   const service = params.memoryService ?? getMemoryService();
 
-  const events: any[] = [
-    {
-      author: "user",
-      content: { role: "user", parts: [{ text }] },
-      timestamp,
-    },
-  ];
-
-  // If a plan / actionItems are provided, also attach extracted facts as a structured model event
-  if (params.plan && typeof params.plan === "object") {
-    const planObj = params.plan as any;
-    const notes: string[] = [];
-    if (typeof planObj.ideasSummary === "string" && planObj.ideasSummary.trim()) {
-      notes.push(`Summary: ${planObj.ideasSummary.trim()}`);
-    }
-    const items = planObj.actionItems ?? planObj;
-    if (Array.isArray(items.todos) && items.todos.length > 0) {
-      notes.push(`Todos: ${items.todos.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
-    } else if (Array.isArray(items.tasks) && items.tasks.length > 0) {
-      notes.push(`Tasks: ${items.tasks.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
-    }
-    if (Array.isArray(items.calendarEvents) && items.calendarEvents.length > 0) {
-      notes.push(`Events: ${items.calendarEvents.map((e: any) => `${e.title || "Event"} at ${e.start || ""}`).join(", ")}`);
-    }
-    if (Array.isArray(items.searchQueries) && items.searchQueries.length > 0) {
-      notes.push(`Queries: ${items.searchQueries.map((q: any) => q.query || JSON.stringify(q)).join(", ")}`);
-    }
-
-    if (notes.length > 0) {
-      events.push({
-        author: "model",
-        content: { role: "model", parts: [{ text: notes.join("\n") }] },
-        timestamp,
-      });
-    }
+  if (!text) {
+    const err = new Error("Transcript text is required for memory bank ingestion.");
+    emitAdkEvent(
+      createEvent({
+        author: "memory",
+        invocationId: sessionId,
+        content: {
+          role: "model",
+          parts: [{ text: `[Memory Ingest Error]: ${err.message}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "memory:insert",
+            status: "error",
+            durationMs: Date.now() - startTime,
+            sessionId,
+            userId,
+            appName,
+            text: "",
+            error: err.message,
+          },
+        }),
+      })
+    );
+    throw err;
   }
 
-  const isVertex = service instanceof VertexAiMemoryBankService;
-
-  if (typeof (service as any).addEventsToMemory === "function") {
-    await (service as any).addEventsToMemory({
-      appName,
-      userId,
-      sessionId,
-      events,
-      customMetadata: {
-        sessionId,
+  try {
+    const events: any[] = [
+      {
+        author: "user",
+        content: { role: "user", parts: [{ text }] },
         timestamp,
       },
-    });
-  } else {
-    await service.addSessionToMemory({
-      id: sessionId,
-      appName,
-      userId,
-      events,
-      state: {},
-      lastUpdateTime: Date.now(),
-    } as any);
-  }
+    ];
 
-  return {
-    ok: true,
-    sessionId,
-    userId,
-    appName,
-    eventCount: events.length,
-    service: isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom",
-  };
+    // If a plan / actionItems are provided, also attach extracted facts as a structured model event
+    if (params.plan && typeof params.plan === "object") {
+      const planObj = params.plan as any;
+      const notes: string[] = [];
+      if (typeof planObj.ideasSummary === "string" && planObj.ideasSummary.trim()) {
+        notes.push(`Summary: ${planObj.ideasSummary.trim()}`);
+      }
+      const items = planObj.actionItems ?? planObj;
+      if (Array.isArray(items.todos) && items.todos.length > 0) {
+        notes.push(`Todos: ${items.todos.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
+      } else if (Array.isArray(items.tasks) && items.tasks.length > 0) {
+        notes.push(`Tasks: ${items.tasks.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
+      }
+      if (Array.isArray(items.calendarEvents) && items.calendarEvents.length > 0) {
+        notes.push(`Events: ${items.calendarEvents.map((e: any) => `${e.title || "Event"} at ${e.start || ""}`).join(", ")}`);
+      }
+      if (Array.isArray(items.searchQueries) && items.searchQueries.length > 0) {
+        notes.push(`Queries: ${items.searchQueries.map((q: any) => q.query || JSON.stringify(q)).join(", ")}`);
+      }
+
+      if (notes.length > 0) {
+        events.push({
+          author: "model",
+          content: { role: "model", parts: [{ text: notes.join("\n") }] },
+          timestamp,
+        });
+      }
+    }
+
+    const isVertex = service instanceof VertexAiMemoryBankService;
+
+    if (typeof (service as any).addEventsToMemory === "function") {
+      await (service as any).addEventsToMemory({
+        appName,
+        userId,
+        sessionId,
+        events,
+        customMetadata: {
+          sessionId,
+          timestamp,
+        },
+      });
+    } else {
+      await service.addSessionToMemory({
+        id: sessionId,
+        appName,
+        userId,
+        events,
+        state: {},
+        lastUpdateTime: Date.now(),
+      } as any);
+    }
+
+    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
+    const durationMs = Date.now() - startTime;
+
+    const result: IngestTranscriptResult = {
+      ok: true,
+      sessionId,
+      userId,
+      appName,
+      eventCount: events.length,
+      service: serviceName,
+    };
+
+    // Emit ADK-compatible Event (adk.dev/events)
+    emitAdkEvent(
+      createEvent({
+        author: "memory",
+        invocationId: sessionId,
+        content: {
+          role: "model",
+          parts: [{ text: `[Memory Ingest]: ${text.slice(0, 120)}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "memory:insert",
+            status: "success",
+            durationMs,
+            service: serviceName,
+            sessionId,
+            userId,
+            appName,
+            text,
+            eventCount: events.length,
+            plan: params.plan,
+          },
+        }),
+      })
+    );
+
+    return result;
+  } catch (error: any) {
+    const durationMs = Date.now() - startTime;
+    const isVertex = service instanceof VertexAiMemoryBankService;
+    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
+
+    emitAdkEvent(
+      createEvent({
+        author: "memory",
+        invocationId: sessionId,
+        content: {
+          role: "model",
+          parts: [{ text: `[Memory Ingest Error]: ${error?.message || String(error)}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "memory:insert",
+            status: "error",
+            durationMs,
+            service: serviceName,
+            sessionId,
+            userId,
+            appName,
+            text,
+            error: error?.message || String(error),
+            plan: params.plan,
+          },
+        }),
+      })
+    );
+    throw error;
+  }
 }
 
 export interface RetrievedMemory {
@@ -429,38 +555,120 @@ export async function retrieveFromMemoryBank(
   query: string,
   options?: Omit<RetrieveMemoryParams, "query">
 ): Promise<RetrieveMemoryResult> {
+  const startTime = Date.now();
   const trimmedQuery = (query || "").trim();
-  if (!trimmedQuery) {
-    throw new Error("Search query is required for memory bank retrieval.");
-  }
-
   const appName = options?.appName || process.env.APP_NAME || "scribant";
   const userId = safeSeg(options?.userId, "default_user");
   const service = options?.memoryService ?? getMemoryService();
 
-  const response: SearchMemoryResponse = await service.searchMemory({
-    appName,
-    userId,
-    query: trimmedQuery,
-  });
+  if (!trimmedQuery) {
+    const err = new Error("Search query is required for memory bank retrieval.");
+    emitAdkEvent(
+      createEvent({
+        author: "memory",
+        invocationId: `retrieve-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [{ text: `[Memory Retrieve Error]: ${err.message}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "memory:retrieve",
+            status: "error",
+            durationMs: Date.now() - startTime,
+            query: "",
+            userId,
+            appName,
+            error: err.message,
+          },
+        }),
+      })
+    );
+    throw err;
+  }
 
-  const memories: RetrievedMemory[] = (response.memories || []).map((m: MemoryEntry) => {
-    const textParts = m.content?.parts?.map((p: any) => p.text).filter(Boolean) ?? [];
-    return {
-      text: textParts.join("\n"),
-      author: m.author || "user",
-      timestamp: m.timestamp || new Date().toISOString(),
+  try {
+    const response: SearchMemoryResponse = await service.searchMemory({
+      appName,
+      userId,
+      query: trimmedQuery,
+    });
+
+    const memories: RetrievedMemory[] = (response.memories || []).map((m: MemoryEntry) => {
+      const textParts = m.content?.parts?.map((p: any) => p.text).filter(Boolean) ?? [];
+      return {
+        text: textParts.join("\n"),
+        author: m.author || "user",
+        timestamp: m.timestamp || new Date().toISOString(),
+      };
+    });
+
+    const isVertex = service instanceof VertexAiMemoryBankService;
+    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
+    const durationMs = Date.now() - startTime;
+
+    const result: RetrieveMemoryResult = {
+      query: trimmedQuery,
+      memories,
+      count: memories.length,
+      service: serviceName,
     };
-  });
 
-  const isVertex = service instanceof VertexAiMemoryBankService;
+    // Emit ADK-compatible Event (adk.dev/events)
+    emitAdkEvent(
+      createEvent({
+        author: "memory",
+        invocationId: `retrieve-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [{ text: `[Memory Retrieve]: "${trimmedQuery}" (${memories.length} match${memories.length === 1 ? "" : "es"})` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "memory:retrieve",
+            status: "success",
+            durationMs,
+            service: serviceName,
+            query: trimmedQuery,
+            userId,
+            appName,
+            count: memories.length,
+            memories,
+          },
+        }),
+      })
+    );
 
-  return {
-    query: trimmedQuery,
-    memories,
-    count: memories.length,
-    service: isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom",
-  };
+    return result;
+  } catch (error: any) {
+    const durationMs = Date.now() - startTime;
+    const isVertex = service instanceof VertexAiMemoryBankService;
+    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
+
+    emitAdkEvent(
+      createEvent({
+        author: "memory",
+        invocationId: `retrieve-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [{ text: `[Memory Retrieve Error]: ${error?.message || String(error)}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "memory:retrieve",
+            status: "error",
+            durationMs,
+            service: serviceName,
+            query: trimmedQuery,
+            userId,
+            appName,
+            error: error?.message || String(error),
+          },
+        }),
+      })
+    );
+    throw error;
+  }
 }
 
 // Recursively walks a directory and gathers all .jsonl files
@@ -804,6 +1012,65 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
           typeof p.text === "string" && p.text.includes("[Relevant Context from Memory Bank]")
         )
       );
+
+      // ---- Memory Events Self-checks ----
+      const eventsCaptured: AdkEvent[] = [];
+      const unsub = subscribeToMemoryEvents(evt => eventsCaptured.push(evt));
+
+      // Test insert event
+      const evtIngest = await ingestTranscriptToMemoryBank({
+        text: "Testing memory insert event emission",
+        sessionId: "run-evt-1",
+        userId: "event-tester",
+        memoryService: cbMemService,
+      });
+      assert.ok(evtIngest.ok);
+      assert.ok(
+        eventsCaptured.some(
+          e =>
+            classifyAdkEventType(e) === "memory:insert" &&
+            e.actions?.stateDelta?.sessionId === "run-evt-1" &&
+            e.actions?.stateDelta?.status === "success"
+        )
+      );
+
+      // Test retrieve event
+      const evtRetrieve = await retrieveFromMemoryBank("Testing memory insert", {
+        userId: "event-tester",
+        memoryService: cbMemService,
+      });
+      assert.ok(evtRetrieve.count >= 1);
+      assert.ok(
+        eventsCaptured.some(
+          e =>
+            classifyAdkEventType(e) === "memory:retrieve" &&
+            e.actions?.stateDelta?.query === "Testing memory insert" &&
+            e.actions?.stateDelta?.status === "success"
+        )
+      );
+
+      // Test error event emission on empty queries
+      try {
+        await retrieveFromMemoryBank("", { memoryService: cbMemService });
+      } catch {
+        // Expected error
+      }
+      assert.ok(
+        eventsCaptured.some(
+          e =>
+            classifyAdkEventType(e) === "memory:retrieve" &&
+            e.actions?.stateDelta?.status === "error"
+        )
+      );
+
+      // Test event history filtering
+      const insertHistory = getMemoryEvents({ type: "memory:insert" });
+      assert.ok(insertHistory.every(e => classifyAdkEventType(e) === "memory:insert"));
+
+      const retrieveHistory = getMemoryEvents({ type: "memory:retrieve" });
+      assert.ok(retrieveHistory.every(e => classifyAdkEventType(e) === "memory:retrieve"));
+
+      unsub();
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

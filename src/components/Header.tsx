@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X } from "lucide-react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal } from "lucide-react";
 import { AutonomyMode } from "../types";
 
 interface HeaderProps {
@@ -16,6 +16,9 @@ interface HeaderProps {
   onSetAllowUncertain: (allow: boolean) => void;
   autoRun: boolean;
   onAutoRunChange: (on: boolean) => void;
+  showDebugPanel?: boolean;
+  onToggleDebugPanel?: () => void;
+  eventsCount?: number;
 }
 
 const AUTONOMY_OPTIONS: { mode: AutonomyMode; label: string; description: string }[] = [
@@ -37,7 +40,10 @@ export default function Header({
   allowUncertain,
   onSetAllowUncertain,
   autoRun,
-  onAutoRunChange
+  onAutoRunChange,
+  showDebugPanel,
+  onToggleDebugPanel,
+  eventsCount = 0,
 }: HeaderProps) {
   const [inputClientId, setInputClientId] = useState(clientId || "");
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -76,6 +82,27 @@ export default function Header({
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto shrink-0 justify-between sm:justify-end">
+          {onToggleDebugPanel && (
+            <button
+              type="button"
+              onClick={onToggleDebugPanel}
+              title="Toggle Memory Events Debug Panel"
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer font-mono ${
+                showDebugPanel
+                  ? "bg-amber-100/80 border-amber-300 text-amber-900 shadow-2xs"
+                  : "bg-white hover:bg-stone-50 text-stone-600 border-stone-200 hover:text-stone-800"
+              }`}
+            >
+              <Terminal className="w-3.5 h-3.5 text-amber-600" />
+              <span>Events Debug</span>
+              {eventsCount > 0 && (
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-900 text-stone-100 font-mono font-bold">
+                  {eventsCount}
+                </span>
+              )}
+            </button>
+          )}
+
           {!token && (
             <button
               onClick={onSignIn}

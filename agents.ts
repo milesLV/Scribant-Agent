@@ -10,7 +10,8 @@ import type { ReadonlyContext } from "@google/adk";
 import { z } from "zod";
 import { SKILLS, skillSchemaProperties } from "./skills";
 import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcriber";
-import { getMemoryService, autoMemoryIngestCallback } from "./memory";
+import { getMemoryService, autoMemoryIngestCallback, memoryBankBeforeModelCallback } from "./memory";
+import { emitAdkEvent } from "./adk-events";
 
 export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.6-flash";
 
@@ -133,7 +134,7 @@ Stream of thoughts:
   includeContents: "none",
   disallowTransferToParent: true,
   disallowTransferToPeers: true,
-  beforeModelCallback: autoMemoryIngestCallback,
+  beforeModelCallback: memoryBankBeforeModelCallback,
 });
 
 // ---- the runner ------------------------------------------------------------
@@ -200,6 +201,7 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
       userId: "local",
       newMessage: { role: "user", parts },
     })) {
+      emitAdkEvent(ev);
       if (ev.errorCode) errEvent = ev;
       const t = ev.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") ?? "";
       if (t) out = t;
