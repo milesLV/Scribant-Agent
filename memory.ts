@@ -397,6 +397,7 @@ export async function ingestTranscriptToMemoryBank(
   }
 
   try {
+    // Only the user transcript / thoughts are ingested to Memory Bank. Tasks and action items are not added to memory.
     const events: any[] = [
       {
         author: "user",
@@ -404,35 +405,6 @@ export async function ingestTranscriptToMemoryBank(
         timestamp,
       },
     ];
-
-    // If a plan / actionItems are provided, also attach extracted facts as a structured model event
-    if (params.plan && typeof params.plan === "object") {
-      const planObj = params.plan as any;
-      const notes: string[] = [];
-      if (typeof planObj.ideasSummary === "string" && planObj.ideasSummary.trim()) {
-        notes.push(`Summary: ${planObj.ideasSummary.trim()}`);
-      }
-      const items = planObj.actionItems ?? planObj;
-      if (Array.isArray(items.todos) && items.todos.length > 0) {
-        notes.push(`Todos: ${items.todos.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
-      } else if (Array.isArray(items.tasks) && items.tasks.length > 0) {
-        notes.push(`Tasks: ${items.tasks.map((t: any) => t.title || JSON.stringify(t)).join(", ")}`);
-      }
-      if (Array.isArray(items.calendarEvents) && items.calendarEvents.length > 0) {
-        notes.push(`Events: ${items.calendarEvents.map((e: any) => `${e.title || "Event"} at ${e.start || ""}`).join(", ")}`);
-      }
-      if (Array.isArray(items.searchQueries) && items.searchQueries.length > 0) {
-        notes.push(`Queries: ${items.searchQueries.map((q: any) => q.query || JSON.stringify(q)).join(", ")}`);
-      }
-
-      if (notes.length > 0) {
-        events.push({
-          author: "model",
-          content: { role: "model", parts: [{ text: notes.join("\n") }] },
-          timestamp,
-        });
-      }
-    }
 
     const isVertex = service instanceof VertexAiMemoryBankService;
 
@@ -708,7 +680,6 @@ export async function syncLocalMemoriesToMemoryBank(
         await ingestTranscriptToMemoryBank({
           text,
           sessionId: record.sessionId,
-          plan: record.actionItems ?? (record.ideasSummary ? { ideasSummary: record.ideasSummary } : undefined),
           timestamp: record.timestamp,
           memoryService,
         });
@@ -919,18 +890,12 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
         text: "I am planning a trip to Kyoto next spring and prefer green tea over coffee.",
         sessionId: "run-kyoto",
         userId: "traveler",
-        plan: {
-          ideasSummary: "Trip to Kyoto planning",
-          tasks: [{ title: "Book flight to Kansai" }],
-          calendarEvents: [{ title: "Kyoto trip", start: "2027-04-01T09:00:00" }],
-          searchQueries: [{ query: "Best ryokan in Kyoto" }],
-        },
         memoryService: testMemService,
       });
       assert.equal(ingestRes.ok, true);
       assert.equal(ingestRes.sessionId, "run-kyoto");
       assert.equal(ingestRes.userId, "traveler");
-      assert.equal(ingestRes.eventCount, 2);
+      assert.equal(ingestRes.eventCount, 1);
 
       // Retrieve by query
       const retrieveRes = await retrieveFromMemoryBank("Kyoto", {

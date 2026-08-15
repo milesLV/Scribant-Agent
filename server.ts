@@ -39,11 +39,10 @@ const safeCapture = (tag: string, sessionId: unknown, entry: { text: string; pla
 };
 
 // Non-blocking Vertex AI Memory Bank ingestion helper
-const safeIngest = (tag: string, sessionId: unknown, entry: { text: string; plan?: unknown }) => {
+const safeIngest = (tag: string, sessionId: unknown, entry: { text: string }) => {
   ingestTranscriptToMemoryBank({
     text: entry.text,
     sessionId: safeSeg(sessionId, "session"),
-    plan: entry.plan,
   }).catch(e => console.warn(`[${tag}] memory bank ingest failed:`, e?.message || e));
 };
 
@@ -98,7 +97,7 @@ app.post("/api/analyze", async (req, res) => {
     // Phase 2 to eventually sync into Memory Bank. Same "never fail the response over a side write"
     // treatment as the pre-model save above.
     safeCapture("analyze", sessionId, { text, plan: parsed });
-    safeIngest("analyze", sessionId, { text, plan: parsed });
+    safeIngest("analyze", sessionId, { text });
 
     res.json(parsed);
   } catch (error: any) {
@@ -188,7 +187,7 @@ app.post("/api/live", async (req, res) => {
     // evals and other callers that don't send one simply don't autosave.
     if (sessionId) {
       safeCapture("live", sessionId, { text, plan: latestPlan });
-      safeIngest("live", sessionId, { text, plan: latestPlan });
+      safeIngest("live", sessionId, { text });
       if (text.length >= 15 && withPlan !== false) {
         safeRetrieve("live", text, { sessionId: safeSeg(sessionId, "session") });
       }
