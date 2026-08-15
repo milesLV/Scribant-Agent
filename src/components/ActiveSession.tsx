@@ -374,11 +374,20 @@ export default function ActiveSession({
                     tone="emerald"
                     uncertain={!!item.uncertain}
                     uncertainLabel="Uncertain Draft"
-                    badge={item.allDay && (
-                      <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
-                        All-day
-                      </span>
-                    )}
+                    badge={
+                      <>
+                        {item.allDay && (
+                          <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
+                            All-day
+                          </span>
+                        )}
+                        {item.speaker && (
+                          <span className="inline-block text-[9px] font-bold text-emerald-800 bg-emerald-100/70 border border-emerald-250/50 px-1.5 py-0.2 rounded-full mb-1 ml-1 font-mono">
+                            Speaker: {item.speaker}
+                          </span>
+                        )}
+                      </>
+                    }
                     isDone={item.status === 'scheduled'}
                     error={item.status === 'failed' ? item.error : undefined}
                     title={item.title}
@@ -435,12 +444,23 @@ export default function ActiveSession({
                   button={<ActionButton busy={executing.task === idx} disabled={executing.task !== null}
                     onClick={() => handleTaskClick(idx, item)} icon={CheckSquare} label="Log To-Do" />}
                 >
-                  {item.dueDate && (
-                    <span className="inline-block mt-1 text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
-                      {/* dueDate is date-only ("YYYY-MM-DD"), which parses as UTC midnight; the time suffix forces local so TZs behind UTC don't render a day early. */}
-                      Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
-                    </span>
-                  )}
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                    {item.assignee && (
+                      <span className="text-[9px] font-bold text-purple-800 bg-purple-100 border border-purple-200/60 px-1.5 py-0.5 rounded font-mono">
+                        Assignee: {item.assignee}
+                      </span>
+                    )}
+                    {item.requestedBy && (
+                      <span className="text-[9px] font-semibold text-stone-600 bg-stone-100 border border-stone-200/70 px-1.5 py-0.5 rounded font-mono">
+                        Requested by: {item.requestedBy}
+                      </span>
+                    )}
+                    {item.dueDate && (
+                      <span className="text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
+                        Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
                 </ItemCard>
               ))}
             </div>

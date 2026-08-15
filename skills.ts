@@ -28,7 +28,8 @@ const calendarSkill: Skill = {
    - "end": (string) End as ISO-8601. Default to 30 minutes after start when no duration is implied (for all-day, the same day or the stated span).
    - "uncertain": (boolean)
    - "explicitCommand": (boolean) true ONLY when the speaker directly instructs that this be put on their calendar ("add that to my calendar", "schedule it for 5pm", "put it on Google Calendar"). Merely mentioning a plan or appointment ("I'm seeing the dentist tomorrow at 3") is NOT a command — that is false.
-   - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).`,
+   - "sourceText": (string) The exact words from the transcript that triggered this event, copied verbatim (not paraphrased).
+   - "speaker": (string) Optional speaker name/label who mentioned or is participating in this event (e.g. "Alice", "Speaker 1", "You"). Empty string "" if single-speaker or unspecified.`,
   itemSchema: z.object({
     title: z.string().describe("Event summary/title"),
     description: z.string().describe("Event description/context"),
@@ -38,6 +39,7 @@ const calendarSkill: Skill = {
     allDay: z.boolean().describe("True if it spans whole day(s) with no specific clock time"),
     explicitCommand: z.boolean().describe("True only when the speaker directly instructed adding this to their calendar"),
     sourceText: z.string().describe("Verbatim transcript phrase that triggered this event"),
+    speaker: z.string().optional().describe("Speaker or participant associated with this event"),
   }),
 };
 
@@ -51,6 +53,8 @@ const tasksSkill: Skill = {
    - "uncertain": (boolean) Set to true if the task itself or its details are vague or uncertain, else false.
    - "explicitCommand": (boolean) true ONLY when the speaker directly instructs that this be logged ("add that to my to-do list", "put sweeping on my tasks", "remind me to..."). A plain statement of intent ("I need to sweep the floor") is NOT a command — that is false. Also false if they say NOT to add it yet ("don't add that yet").
    - "sourceText": (string) The exact words from the transcript that triggered this task, copied verbatim (not paraphrased).
+   - "assignee": (string) Optional speaker name/label who committed to or was assigned this task in multi-speaker dialogue (e.g. "Alice", "Bob", "You"). Empty string "" if single-speaker or unassigned.
+   - "requestedBy": (string) Optional speaker name/label who requested or assigned this task. Empty string "" if unspecified.
 GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake event time. Only make a calendar event when being there at that specific time matters, or when it occupies whole days. A flexible action with just a deadline (e.g. "hit the gym sometime next week") is a task (uncertain) with a dueDate, NOT an event.`,
   itemSchema: z.object({
     title: z.string().describe("Compact title of the task"),
@@ -59,6 +63,8 @@ GUIDANCE (tasks vs events): prefer a TASK WITH A dueDate over inventing a fake e
     dueDate: z.string().describe("Deadline as ISO date YYYY-MM-DD if bounded, else empty string"),
     explicitCommand: z.boolean().describe("True only when the speaker directly instructed logging this to their to-do list"),
     sourceText: z.string().describe("Verbatim transcript phrase that triggered this task"),
+    assignee: z.string().optional().describe("Speaker assigned to or volunteering for this task"),
+    requestedBy: z.string().optional().describe("Speaker who requested or assigned this task"),
   }),
 };
 
@@ -95,7 +101,11 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   // Zod object fields are required by default — the shape keys ARE the required list.
   assert.deepEqual(
     Object.keys((props.tasks as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element.shape),
-    ["title", "notes", "uncertain", "dueDate", "explicitCommand", "sourceText"]
+    ["title", "notes", "uncertain", "dueDate", "explicitCommand", "sourceText", "assignee", "requestedBy"]
+  );
+  assert.deepEqual(
+    Object.keys((props.calendarEvents as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element.shape),
+    ["title", "description", "start", "end", "uncertain", "allDay", "explicitCommand", "sourceText", "speaker"]
   );
   // tasks must stay index 3 (calendar=2) so the calendar criteria's "(see #3)" reference holds.
   assert.equal(SKILLS.findIndex(s => s.name === "tasks"), 1);

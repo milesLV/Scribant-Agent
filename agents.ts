@@ -83,7 +83,7 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
 export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
   name: "audio_transcriber",
   model: new Gemini({ model: MODEL, apiKey }),
-  instruction: `Transcribe the spoken audio verbatim as plain text. No markdown, no speaker labels, no timestamps, no commentary — just the words said, in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
+  instruction: `Transcribe the spoken audio verbatim. If multiple distinct speakers are talking, separate their turns and prefix each turn with a clear speaker label (e.g., 'Speaker 1: ...', 'Speaker 2: ...'). If speakers introduce themselves or address each other by name (e.g., 'Hi Alice', 'Thanks Bob'), use their actual names as the speaker label. If only one person is speaking, transcribe verbatim without speaker labels. No markdown formatting, timestamps, or commentary — return only the transcribed speech in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
   includeContents: "none",
 });
 
@@ -114,8 +114,9 @@ export const intentClassifier: AgentFactory = (apiKey) => new LlmAgent({
   name: "intent_classifier",
   model: new Gemini({ model: MODEL, apiKey }),
   instruction: (ctx) => `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
-The user is speaking or writing their thoughts in an unfiltered "brain dump" format.
-Analyze the provided stream of thoughts and categorize segments into different structured action buckets.
+The user is speaking or writing their thoughts in an unfiltered "brain dump" format or recording a meeting with multiple speakers.
+Analyze the provided stream of thoughts/dialogue and categorize segments into different structured action buckets.
+If speaker labels are present in the transcript (e.g., 'You:', 'Alice:', 'Speaker 1:'), attribute extracted tasks with the responsible speaker in 'assignee' (the person who volunteered or was assigned) and 'requestedBy' (the person who requested it). Attribute calendar events with 'speaker'.
 
 AI Live Notes Summary: "${ctx.state.get<string>("liveSummary") ?? ""}"
 

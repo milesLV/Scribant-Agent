@@ -22,6 +22,7 @@ export interface CalendarEvent {
   error?: string;
   uncertain?: boolean;
   explicitCommand?: boolean; // speaker directly instructed this action -> eligible for auto-execute
+  speaker?: string; // speaker or participant associated with this event (in multi-speaker context)
 }
 
 export interface TaskItem {
@@ -34,6 +35,15 @@ export interface TaskItem {
   error?: string;
   uncertain?: boolean;
   explicitCommand?: boolean;
+  assignee?: string; // speaker who committed to or was assigned this task
+  requestedBy?: string; // speaker who requested or assigned this task
+}
+
+// A single speaker's spoken turn in multi-speaker dialogue
+export interface SpeakerTurn {
+  speaker: string;
+  text: string;
+  timestamp?: number;
 }
 
 // A markdown report saved to Drive (session summary / live notes) — just enough for a sandbox save

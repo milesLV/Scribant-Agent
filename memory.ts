@@ -357,6 +357,44 @@ export interface IngestTranscriptResult {
   service: "vertex_ai" | "in_memory" | "custom";
 }
 
+export interface ParsedSpeakerTurn {
+  speaker: string;
+  text: string;
+}
+
+// Parses speaker turns from formatted dialogue or meeting transcripts
+export function parseSpeakerTurns(text: string): ParsedSpeakerTurn[] {
+  if (!text || !text.trim()) return [];
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const speakerRegex = /^(?:\[(?:Meeting:\s*)?([^\]]+)\]|([A-Za-z0-9_\s]{2,25}):)\s*(.*)$/;
+
+  const turns: ParsedSpeakerTurn[] = [];
+  let currentSpeaker = "user";
+  let currentBuffer: string[] = [];
+
+  for (const line of lines) {
+    const match = line.match(speakerRegex);
+    if (match) {
+      const speaker = (match[1] || match[2] || "user").trim();
+      const content = (match[3] || "").trim();
+      if (currentBuffer.length > 0) {
+        turns.push({ speaker: currentSpeaker, text: currentBuffer.join(" ") });
+        currentBuffer = [];
+      }
+      currentSpeaker = speaker;
+      if (content) currentBuffer.push(content);
+    } else {
+      currentBuffer.push(line);
+    }
+  }
+
+  if (currentBuffer.length > 0) {
+    turns.push({ speaker: currentSpeaker, text: currentBuffer.join(" ") });
+  }
+
+  return turns.length > 0 ? turns : [{ speaker: "user", text }];
+}
+
 // Ingests transcript text and extracted actions into Vertex AI Memory Bank (or InMemoryMemoryService).
 export async function ingestTranscriptToMemoryBank(
   params: IngestTranscriptParams
@@ -397,14 +435,13 @@ export async function ingestTranscriptToMemoryBank(
   }
 
   try {
-    // Only the user transcript / thoughts are ingested to Memory Bank. Tasks and action items are not added to memory.
-    const events: any[] = [
-      {
-        author: "user",
-        content: { role: "user", parts: [{ text }] },
-        timestamp,
-      },
-    ];
+    // Ingest speaker turns into Memory Bank as attributed events
+    const turns = parseSpeakerTurns(text);
+    const events: any[] = turns.map(t => ({
+      author: t.speaker || "user",
+      content: { role: "user", parts: [{ text: t.text }] },
+      timestamp,
+    }));
 
     const isVertex = service instanceof VertexAiMemoryBankService;
 
@@ -921,6 +958,35 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
       });
       assert.equal(nonMatchingRes.count, 0);
       assert.deepEqual(nonMatchingRes.memories, []);
+
+      // Speaker turns parsing self-check
+      const parsedTurns = parseSpeakerTurns("Alice: I will prepare the roadmap presentation.\nBob: I will review it tomorrow.\nYou: Sounds like a solid plan.");
+      assert.equal(parsedTurns.length, 3);
+      assert.equal(parsedTurns[0].speaker, "Alice");
+      assert.equal(parsedTurns[0].text, "I will prepare the roadmap presentation.");
+      assert.equal(parsedTurns[1].speaker, "Bob");
+      assert.equal(parsedTurns[1].text, "I will review it tomorrow.");
+      assert.equal(parsedTurns[2].speaker, "You");
+      assert.equal(parsedTurns[2].text, "Sounds like a solid plan.");
+
+      // Multi-speaker memory ingestion self-check
+      const multiSpeakerMemService = new InMemoryMemoryService();
+      const multiIngestRes = await ingestTranscriptToMemoryBank({
+        text: "Alice: We chose TypeScript for the new backend.\nBob: I prefer Postgres for our primary database.",
+        sessionId: "run-multi-speaker",
+        userId: "team-user",
+        memoryService: multiSpeakerMemService,
+      });
+      assert.equal(multiIngestRes.ok, true);
+      assert.equal(multiIngestRes.eventCount, 2);
+
+      // Verify retrievable by speaker-attributed topic
+      const tsSearch = await retrieveFromMemoryBank("TypeScript", {
+        userId: "team-user",
+        memoryService: multiSpeakerMemService,
+      });
+      assert.ok(tsSearch.count >= 1);
+      assert.ok(tsSearch.memories.some(m => m.text.includes("TypeScript") && m.author === "Alice"));
 
       // Sync local files to memory service
       const syncMemService = new InMemoryMemoryService();

@@ -395,6 +395,39 @@ export default function AudioRecorder({
     return out;
   };
 
+  // Render raw or unproofed text with speaker tags highlighted as clean badges
+  const renderSpeakerText = (text: string) => {
+    // Matches tags like "[Meeting: Alice]", "[Meeting]", "Speaker 1:", "Alice:", "You:"
+    const regex = /(\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)/g;
+    const parts = text.split(regex);
+    if (parts.length <= 1) return text;
+
+    return parts.map((part, idx) => {
+      if (!part) return null;
+      const isMeetingTag = part.startsWith("[Meeting");
+      const isSpeakerTag = /^(?:Speaker\s*\d+|You|[A-Z][a-z]+):$/.test(part.trim());
+      if (isMeetingTag || isSpeakerTag) {
+        const rawLabel = part.replace(/^\[|\]$/g, "").replace(/:$/, "").trim();
+        const isYou = rawLabel.toLowerCase().includes("you");
+        return (
+          <span
+            key={idx}
+            className={`inline-block text-[9px] font-bold font-mono px-1.5 py-0.5 rounded mr-1.5 align-middle select-none ${
+              isYou
+                ? "bg-blue-100 text-blue-800 border border-blue-200/70"
+                : isMeetingTag
+                ? "bg-purple-100 text-purple-800 border border-purple-200/70"
+                : "bg-amber-100 text-amber-800 border border-amber-200/70"
+            }`}
+          >
+            {rawLabel}
+          </span>
+        );
+      }
+      return <span key={idx}>{part}</span>;
+    });
+  };
+
   return (
     <div id="audio-recorder-panel" className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm transition-all hover:shadow-md">
       
@@ -553,7 +586,7 @@ export default function AudioRecorder({
               >
                 {(transcript || interimTranscript) ? (
                   <span className="leading-relaxed font-sans text-stone-750">
-                    {words && transcript.startsWith(proofedTextRef.current) ? renderProofed() : transcript}
+                    {words && transcript.startsWith(proofedTextRef.current) ? renderProofed() : renderSpeakerText(transcript)}
                     {interimTranscript && (
                       <span className="text-amber-500 italic font-medium animate-pulse">
                         {(transcript && !/\s$/.test(transcript) ? " " : "") + interimTranscript}
