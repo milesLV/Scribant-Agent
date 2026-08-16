@@ -197,45 +197,43 @@ export default function Header({
 
           <div className="space-y-2">
             <label className="text-xs font-bold text-stone-600 font-sans block">Consent &amp; Autonomy:</label>
-            <div className="flex items-start gap-4">
-              <div className="flex-1 grid grid-cols-3">
-                {AUTONOMY_OPTIONS.map(opt => (
-                  <label
-                    key={opt.mode}
-                    className={`border border-stone-200 px-3 py-2.5 cursor-pointer transition-colors ${
-                      autonomyMode === opt.mode ? "bg-amber-50/40" : "hover:bg-stone-50"
-                    }`}
-                  >
-                    <span className={`block -mx-3 -mt-2.5 mb-2 px-3 py-2 border-b border-stone-200 text-[11px] font-bold font-sans ${
-                      autonomyMode === opt.mode ? "bg-amber-50 text-amber-900" : "bg-stone-50 text-stone-700"
-                    }`}>
-                      {opt.label}
-                    </span>
-                    <span className="flex items-start gap-2">
-                      <input
-                        type="radio"
-                        name="autonomy-mode"
-                        checked={autonomyMode === opt.mode}
-                        onChange={() => onSetAutonomyMode(opt.mode)}
-                        className="mt-0.5 accent-amber-600 shrink-0"
-                      />
-                      <span className="text-[10.5px] text-stone-500 leading-relaxed font-sans">{opt.description}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-              {autonomyMode === "auto" && (
-                <label className="flex flex-col items-end gap-2 pt-2 cursor-pointer shrink-0 w-40">
-                  <input
-                    type="checkbox"
-                    checked={allowUncertain}
-                    onChange={(e) => onSetAllowUncertain(e.target.checked)}
-                    className="accent-amber-600"
-                  />
-                  <span className="text-[10.5px] font-semibold text-stone-600 font-sans text-right">Include uncertain items</span>
+            <div className="grid grid-cols-3">
+              {AUTONOMY_OPTIONS.map(opt => (
+                <label
+                  key={opt.mode}
+                  className={`border border-stone-200 px-3 py-2.5 cursor-pointer transition-colors ${
+                    autonomyMode === opt.mode ? "bg-amber-50/40" : "hover:bg-stone-50"
+                  }`}
+                >
+                  <span className={`block -mx-3 -mt-2.5 mb-2 px-3 py-2 border-b border-stone-200 text-[11px] font-bold font-sans ${
+                    autonomyMode === opt.mode ? "bg-amber-50 text-amber-900" : "bg-stone-50 text-stone-700"
+                  }`}>
+                    {opt.label}
+                  </span>
+                  <span className="flex items-start gap-2">
+                    <input
+                      type="radio"
+                      name="autonomy-mode"
+                      checked={autonomyMode === opt.mode}
+                      onChange={() => onSetAutonomyMode(opt.mode)}
+                      className="mt-0.5 accent-amber-600 shrink-0"
+                    />
+                    <span className="text-[10.5px] text-stone-500 leading-relaxed font-sans">{opt.description}</span>
+                  </span>
                 </label>
-              )}
+              ))}
             </div>
+            {autonomyMode === "auto" && (
+              <label className="flex items-center gap-2 pt-1 cursor-pointer w-fit">
+                <input
+                  type="checkbox"
+                  checked={allowUncertain}
+                  onChange={(e) => onSetAllowUncertain(e.target.checked)}
+                  className="accent-amber-600"
+                />
+                <span className="text-[12.5px] font-semibold text-stone-600 font-sans">Include uncertain items</span>
+              </label>
+            )}
             {/* Lives here rather than above the live notes so that panel's header can hold the
                 Drive button. It is the only brake on the live pipeline's token spend. */}
             <label className="flex items-center gap-2 pt-1 cursor-pointer w-fit">
@@ -245,9 +243,9 @@ export default function Header({
                 onChange={(e) => onAutoRunChange(e.target.checked)}
                 className="accent-amber-600"
               />
-              <span className="text-[10.5px] font-semibold text-stone-600 font-sans">
+              <span className="text-[12.5px] font-semibold text-stone-600 font-sans">
                 Auto-run live notes while you speak
-                <span className="font-normal text-stone-400"> — off means the sparkles button runs it on demand</span>
+                <span className="font-normal text-stone-400"> — off means you have to click the sparkles button to run it on demand</span>
               </span>
             </label>
           </div>
