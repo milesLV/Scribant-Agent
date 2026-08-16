@@ -589,7 +589,7 @@ export default function TokenVisualizer({
                       key={idx}
                       onMouseEnter={() => setHoveredPoint(pt)}
                       onMouseLeave={() => setHoveredPoint(null)}
-                      className="flex-1 min-w-[20px] max-w-[48px] flex flex-col items-center gap-1 group relative h-full justify-end cursor-pointer shrink-0"
+                      className="flex-1 min-w-[20px] max-w-[48px] flex flex-col items-center gap-1.5 group relative justify-end cursor-pointer shrink-0"
                     >
                       {/* Floating Tooltip positioned cleanly above stacked bar with high z-index and border */}
                       <div
@@ -610,37 +610,43 @@ export default function TokenVisualizer({
                         </div>
                       </div>
 
-                      {/* Stacked Bar */}
-                      <div
-                        className={`w-full rounded-t-sm flex flex-col justify-end overflow-hidden transition-all duration-200 bg-stone-100 ${
-                          isHovered ? "ring-2 ring-amber-500/80 shadow-sm opacity-100" : "group-hover:opacity-90"
-                        }`}
-                        style={{ height: `${heightPercent}%` }}
-                      >
-                        {pt.thoughtsTokens > 0 && (
-                          <div
-                            className="bg-purple-500 w-full"
-                            style={{ height: `${(pt.thoughtsTokens / (total || 1)) * 100}%` }}
-                          />
-                        )}
-                        {pt.candidatesTokens > 0 && (
-                          <div
-                            className="bg-emerald-500 w-full"
-                            style={{ height: `${(pt.candidatesTokens / (total || 1)) * 100}%` }}
-                          />
-                        )}
-                        {pt.audioTokens > 0 && (
-                          <div
-                            className="bg-blue-500 w-full"
-                            style={{ height: `${(pt.audioTokens / (total || 1)) * 100}%` }}
-                          />
-                        )}
-                        {pt.promptTokens > 0 && (
-                          <div
-                            className="bg-amber-500 w-full"
-                            style={{ height: `${(pt.promptTokens / (total || 1)) * 100}%` }}
-                          />
-                        )}
+                      {/* Bar Track with explicit h-36 height */}
+                      <div className="w-full h-36 flex items-end justify-center">
+                        <div
+                          className={`w-full rounded-t-sm flex flex-col justify-end overflow-hidden transition-all duration-200 ${
+                            total > 0
+                              ? isHovered
+                                ? "ring-2 ring-amber-500/80 shadow-xs opacity-100"
+                                : "group-hover:opacity-90"
+                              : "bg-stone-200/50"
+                          }`}
+                          style={{ height: total > 0 ? `${heightPercent}%` : "3px" }}
+                        >
+                          {pt.thoughtsTokens > 0 && (
+                            <div
+                              className="bg-purple-500 w-full"
+                              style={{ height: `${(pt.thoughtsTokens / (total || 1)) * 100}%` }}
+                            />
+                          )}
+                          {pt.candidatesTokens > 0 && (
+                            <div
+                              className="bg-emerald-500 w-full"
+                              style={{ height: `${(pt.candidatesTokens / (total || 1)) * 100}%` }}
+                            />
+                          )}
+                          {pt.audioTokens > 0 && (
+                            <div
+                              className="bg-blue-500 w-full"
+                              style={{ height: `${(pt.audioTokens / (total || 1)) * 100}%` }}
+                            />
+                          )}
+                          {pt.promptTokens > 0 && (
+                            <div
+                              className="bg-amber-500 w-full"
+                              style={{ height: `${(pt.promptTokens / (total || 1)) * 100}%` }}
+                            />
+                          )}
+                        </div>
                       </div>
 
                       {/* X-axis Label */}
@@ -651,7 +657,7 @@ export default function TokenVisualizer({
                   );
                 })
               ) : (
-                <div className="w-full h-full flex items-center justify-center text-xs font-mono text-stone-500">
+                <div className="w-full h-36 flex items-center justify-center text-xs font-mono text-stone-500">
                   No telemetry recorded yet in this window. Speak into the microphone or run an analysis.
                 </div>
               )}
