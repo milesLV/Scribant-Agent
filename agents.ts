@@ -19,6 +19,16 @@ if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VER
   process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;
 }
 
+const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || "");
+if (usingVertex) {
+  // In Vertex AI mode, auth is handled via Google Cloud ADC / IAM. Clean API key env vars
+  // so the Google GenAI SDK does not log redundant precedence warnings on every agent invocation.
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_GENAI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
+}
+
+
 // Sub-agents read their input from session state rather than the user message: inside the
 // orchestrator the message is the raw transcript, but everything downstream of the proofreader must
 // reason over the CORRECTED text. `corrected` is seeded by the orchestrator for callers that skip
@@ -203,7 +213,7 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
       newMessage: { role: "user", parts },
     })) {
       emitAdkEvent(ev);
-      if (ev.errorCode) errEvent = ev;
+      if (ev.errorCode && String(ev.errorCode).toUpperCase() !== "STOP") errEvent = ev;
       const t = ev.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") ?? "";
       if (t) out = t;
       if (ev.groundingMetadata) grounding = ev.groundingMetadata;

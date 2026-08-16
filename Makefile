@@ -1,4 +1,4 @@
-.PHONY: help dev build lint check eval tf-init tf-validate tf-plan tf-apply tf-import tf-output tf-destroy clean
+.PHONY: help dev build lint check eval tf-init tf-validate tf-plan tf-apply tf-import tf-output tf-destroy setup memory-bank env clean
 
 .DEFAULT_GOAL := help
 
@@ -13,17 +13,34 @@ help: ## Display available commands
 	@echo "  make eval         - Run evaluation suite"
 	@echo "  make clean        - Remove build artifacts"
 	@echo ""
+	@echo "Environment & Memory Bank Commands:"
+	@echo "  make setup        - One-shot setup (Terraform + Memory Bank + .env configuration)"
+	@echo "  make memory-bank  - List or create Vertex AI Memory Bank in GCP project"
+	@echo "  make env          - Auto-generate/update .env from current GCP/Terraform state"
+	@echo ""
 	@echo "Terraform Infrastructure Commands:"
 	@echo "  make tf-init      - Initialize Terraform providers & modules"
 	@echo "  make tf-validate  - Validate Terraform syntax & logic"
 	@echo "  make tf-plan      - Show execution plan for GCP infrastructure"
 	@echo "  make tf-apply     - Apply Terraform changes to GCP"
-	@echo "  make tf-import    - Import an existing GCP project into state (usage: make tf-import PROJECT_ID=agentclinicep04)"
+	@echo "  make tf-import    - Import an existing GCP project into state (usage: make tf-import PROJECT_ID=my-project)"
 	@echo "  make tf-output    - Display outputs from applied Terraform state"
 	@echo "  make tf-destroy   - Destroy Terraform-managed infrastructure"
 	@echo ""
 
+setup: ## Full automated local setup
+	@$(MAKE) tf-apply
+	@npm run setup:env
+	@npm run check
+
+env: ## Regenerate .env from live state
+	@npm run setup:env
+
+memory-bank: ## Manage Memory Banks (e.g. make memory-bank CMD=list)
+	@npm run create:memory-bank $(CMD)
+
 dev:
+
 	npm run dev
 
 build:

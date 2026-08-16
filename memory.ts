@@ -157,22 +157,33 @@ export function createMemoryBankService(config?: MemoryServiceConfig): BaseMemor
 
   const projectId = config?.projectId ??
     process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID ??
-    "agentclinicep04";
+    process.env.PROJECT_ID;
+
+  if (!projectId) {
+    throw new Error(
+      "GOOGLE_CLOUD_PROJECT (or PROJECT_ID) is required in .env to connect to Vertex AI Memory Bank."
+    );
+  }
 
   const location = config?.location ??
     process.env.VERTEX_AI_LOCATION ??
     process.env.GOOGLE_CLOUD_LOCATION ??
     "us-central1";
 
+  if (projectId && location) {
+    return new VertexAiMemoryBankService({
+      agentEngineId,
+      projectId,
+      location,
+      ...(config?.client ? { client: config.client } : {}),
+    });
+  }
+
   const expressModeApiKey = config?.expressModeApiKey ??
-    process.env.VERTEX_EXPRESS_MODE_API_KEY ??
-    process.env.GEMINI_API_KEY;
+    process.env.VERTEX_EXPRESS_MODE_API_KEY;
 
   return new VertexAiMemoryBankService({
     agentEngineId,
-    projectId,
-    location,
     expressModeApiKey,
     ...(config?.client ? { client: config.client } : {}),
   });
@@ -198,10 +209,19 @@ export async function createCloudMemoryBank(options?: {
   const client = await auth.getClient();
   const token = await client.getAccessToken();
 
-  const projectId = options?.projectId ??
+  let projectId = options?.projectId ??
     process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID ??
-    "agentclinicep04";
+    process.env.PROJECT_ID;
+
+  if (!projectId) {
+    try {
+      projectId = (await auth.getProjectId()) || undefined;
+    } catch {}
+  }
+
+  if (!projectId) {
+    throw new Error("GOOGLE_CLOUD_PROJECT is required to create a Vertex AI Memory Bank.");
+  }
 
   const location = options?.location ??
     process.env.VERTEX_AI_LOCATION ??
@@ -260,10 +280,19 @@ export async function listCloudMemoryBanks(options?: {
   const client = await auth.getClient();
   const token = await client.getAccessToken();
 
-  const projectId = options?.projectId ??
+  let projectId = options?.projectId ??
     process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID ??
-    "agentclinicep04";
+    process.env.PROJECT_ID;
+
+  if (!projectId) {
+    try {
+      projectId = (await auth.getProjectId()) || undefined;
+    } catch {}
+  }
+
+  if (!projectId) {
+    throw new Error("GOOGLE_CLOUD_PROJECT is required to list Vertex AI Memory Banks.");
+  }
 
   const location = options?.location ??
     process.env.VERTEX_AI_LOCATION ??
@@ -271,6 +300,7 @@ export async function listCloudMemoryBanks(options?: {
     "us-central1";
 
   const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${location}/reasoningEngines`;
+
 
   const res = await fetch(url, {
     headers: { "Authorization": `Bearer ${token.token}` }

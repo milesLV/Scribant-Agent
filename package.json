@@ -13,6 +13,7 @@
     "test:memory-capture": "tsx --env-file-if-exists=.env test-memory-capture.ts",
     "test:synthetic-transcripts": "tsx --env-file-if-exists=.env test-synthetic-transcripts.ts",
     "create:memory-bank": "tsx --env-file-if-exists=.env scripts/create-memory-bank.ts",
+    "setup:env": "tsx scripts/setup-env.ts",
     "check": "tsc --noEmit && tsx skills.ts && tsx transcriber.ts && tsx server-utils.ts && tsx workspace-tools.ts && tsx agents.ts && tsx orchestrator.ts && tsx memory.ts && tsx adk-events.ts && tsx src/utils/transcript.ts && tsx src/utils/autonomy.ts && tsx evals/run.ts --selfcheck"
   },
   "dependencies": {

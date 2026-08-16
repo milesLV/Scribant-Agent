@@ -159,7 +159,7 @@ export async function runOrchestrator(opts: {
       stateDelta: { ...state },
     })) {
       emitAdkEvent(ev);
-      if (ev.errorCode) {
+      if (ev.errorCode && String(ev.errorCode).toUpperCase() !== "STOP") {
         const { msg } = classifyError(ev);
         // Errors are authored by the sub-agent that raised them and STAGE_OF covers the whole tree,
         // so an unknown author is not a stage to retry — it ends the run rather than spinning.

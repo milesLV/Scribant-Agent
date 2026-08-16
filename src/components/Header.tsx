@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap } from "lucide-react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap, Activity } from "lucide-react";
 import { AutonomyMode } from "../types";
+
+export type AppTab = "workspace" | "admin";
 
 interface HeaderProps {
   token: string | null;
@@ -16,8 +18,8 @@ interface HeaderProps {
   onSetAllowUncertain: (allow: boolean) => void;
   autoRun: boolean;
   onAutoRunChange: (on: boolean) => void;
-  showDebugPanel?: boolean;
-  onToggleDebugPanel?: () => void;
+  activeTab?: AppTab;
+  onTabChange?: (tab: AppTab) => void;
   eventsCount?: number;
 }
 
@@ -41,8 +43,8 @@ export default function Header({
   onSetAllowUncertain,
   autoRun,
   onAutoRunChange,
-  showDebugPanel,
-  onToggleDebugPanel,
+  activeTab = "workspace",
+  onTabChange,
   eventsCount = 0,
 }: HeaderProps) {
   const [inputClientId, setInputClientId] = useState(clientId || "");
@@ -68,9 +70,9 @@ export default function Header({
   const currentRedirectUri = window.location.origin;
 
   return (
-    <div id="app-header-container" className="space-y-4">
+    <div id="app-header-container" className="space-y-3">
 
-      <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 py-4 border-b border-stone-200">
+      <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 py-3 border-b border-stone-200">
         <div className="flex items-center gap-3">
           <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-600">
             <BrainCircuit className="w-6 h-6" />
@@ -82,27 +84,6 @@ export default function Header({
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto shrink-0 justify-between sm:justify-end">
-          {onToggleDebugPanel && (
-            <button
-              type="button"
-              onClick={onToggleDebugPanel}
-              title="Toggle Token & Memory Debug Dashboard"
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer font-mono ${
-                showDebugPanel
-                  ? "bg-amber-100/80 border-amber-300 text-amber-900 shadow-2xs"
-                  : "bg-white hover:bg-stone-50 text-stone-600 border-stone-200 hover:text-stone-800"
-              }`}
-            >
-              <Zap className="w-3.5 h-3.5 text-amber-600" />
-              <span>Token &amp; Memory</span>
-              {eventsCount > 0 && (
-                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-900 text-stone-100 font-mono font-bold">
-                  {eventsCount}
-                </span>
-              )}
-            </button>
-          )}
-
           {!token && (
             <button
               onClick={onSignIn}
@@ -131,6 +112,44 @@ export default function Header({
           </button>
         </div>
       </header>
+
+      {/* Top Application Navigation Tabs */}
+      {onTabChange && (
+        <div className="flex items-center justify-between gap-3 pt-0.5">
+          <nav className="flex items-center gap-1.5 p-1 bg-stone-100/90 border border-stone-200/90 rounded-xl shadow-2xs">
+            <button
+              type="button"
+              onClick={() => onTabChange("workspace")}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                activeTab === "workspace"
+                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+              }`}
+            >
+              <BrainCircuit className={`w-4 h-4 ${activeTab === "workspace" ? "text-amber-600" : "text-stone-400"}`} />
+              <span>Workspace</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onTabChange("admin")}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                activeTab === "admin"
+                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+              }`}
+            >
+              <Activity className={`w-4 h-4 ${activeTab === "admin" ? "text-indigo-600" : "text-stone-400"}`} />
+              <span>Administration &amp; Monitoring</span>
+              {eventsCount > 0 && (
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-900 text-stone-100 font-mono font-bold">
+                  {eventsCount}
+                </span>
+              )}
+            </button>
+          </nav>
+        </div>
+      )}
 
       <dialog
         ref={dialogRef}
