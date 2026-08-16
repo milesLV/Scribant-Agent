@@ -109,30 +109,15 @@ PORT=3000
 
 ## 5. Development Playbook & Makefile Workflows
 
-A [`Makefile`](file:///Users/luissala/development/agent-clinic-103/Scribant-Agent/Makefile) is provided for all standard application, environment, and infrastructure tasks:
+A self-documenting, LLM-friendly [`Makefile`](file:///Users/luissala/development/agent-clinic-103/Scribant-Agent/Makefile) is provided as the primary entry point for all development, environment, and infrastructure tasks.
 
-### Application Commands
-- `make dev` (or `npm run dev`): Starts development server (Express + Vite with HMR).
-- `make check` (or `npm run check`): **MANDATORY GATE**. Runs `tsc --noEmit` + all 12 submodule self-test suites.
-- `make build` (or `npm run build`): Compiles production React bundle (`dist/`) and bundles server via esbuild (`dist/server.cjs`).
-- `make start` (or `npm start`): Runs the compiled production server.
-- `make eval` (or `npm run eval`): Runs LLM-as-a-judge evaluations against `evals/data/`.
-- `make lint` (or `npm run lint`): Typechecks TypeScript without emitting files.
-- `make clean`: Removes `dist/` and build artifacts.
-
-### Environment & GCP Memory Bank Commands
-- `make setup`: Automated one-shot setup (`tf-apply` + `.env` configuration + `npm run check`).
-- `make memory-bank`: List or create Vertex AI Memory Bank instances in GCP (`make memory-bank CMD=list`).
-- `make env`: Regenerates `.env` from live GCP/Terraform state.
-
-### Terraform Infrastructure Commands
-- `make tf-init`: Initializes Terraform providers & modules.
-- `make tf-validate`: Validates Terraform syntax and configuration logic.
-- `make tf-plan`: Displays execution plan for GCP infrastructure.
-- `make tf-apply`: Applies Terraform changes to Google Cloud.
-- `make tf-import PROJECT_ID=my-project`: Imports an existing GCP project into Terraform state.
-- `make tf-output`: Displays outputs from applied Terraform state.
-- `make tf-destroy`: Destroys Terraform-managed GCP infrastructure.
+Agents should simply run `make` (or `make help`) in the terminal to inspect all available targets, parameters, and descriptions. Key targets include:
+- **`make check`**: **MANDATORY PRE-COMMIT GATE**. Runs `tsc --noEmit` + all 12 submodule self-test suites.
+- **`make dev`**: Starts the development server (Express + Vite with HMR) on port 3000.
+- **`make build`**: Compiles the production React bundle (`dist/`) and bundles `server.ts` with esbuild.
+- **`make setup`**: Full one-shot automated setup (`tf-apply` -> `setup:env` -> `check`).
+- **`make memory-bank`**: Manages Vertex AI Memory Bank in GCP (`make memory-bank CMD=list`).
+- **`make tf-plan` / `make tf-apply`**: Provisions and manages GCP Terraform resources.
 
 ---
 

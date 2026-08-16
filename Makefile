@@ -1,32 +1,39 @@
-.PHONY: help dev build lint check eval tf-init tf-validate tf-plan tf-apply tf-import tf-output tf-destroy setup memory-bank env clean
+.PHONY: help dev build start lint check eval clean setup memory-bank env tf-init tf-validate tf-plan tf-apply tf-import tf-output tf-destroy
 
 .DEFAULT_GOAL := help
 
-help: ## Display available commands
-	@echo "Available commands:"
+help: ## Show available commands with structured, LLM-friendly guidance
+	@echo "=================================================================================="
+	@echo "                      SCRIBANT AGENT DEVELOPMENT WORKFLOWS"
+	@echo "=================================================================================="
 	@echo ""
-	@echo "Application Commands:"
-	@echo "  make dev          - Start development server (Express + Vite)"
-	@echo "  make build        - Build production bundle"
-	@echo "  make lint         - Run TypeScript type checker"
-	@echo "  make check        - Run type checks and full self-check suite"
-	@echo "  make eval         - Run evaluation suite"
-	@echo "  make clean        - Remove build artifacts"
+	@echo "Application Development:"
+	@echo "  make dev          Start local dev server with hot reload (Express + Vite) on port 3000."
+	@echo "  make check        MANDATORY VALIDATION GATE. Runs typechecker (tsc --noEmit) and all"
+	@echo "                    12 submodule self-test suites. Run this before committing any changes."
+	@echo "  make build        Build production client bundle (dist/) and bundle server.ts via esbuild."
+	@echo "  make start        Run compiled production server from dist/server.cjs."
+	@echo "  make lint         Run fast TypeScript typecheck without emitting files."
+	@echo "  make eval         Run LLM-as-a-judge evaluation benchmark suite against evals/data/."
+	@echo "  make clean        Delete dist/ build directory and compiled artifacts."
 	@echo ""
-	@echo "Environment & Memory Bank Commands:"
-	@echo "  make setup        - One-shot setup (Terraform + Memory Bank + .env configuration)"
-	@echo "  make memory-bank  - List or create Vertex AI Memory Bank in GCP project"
-	@echo "  make env          - Auto-generate/update .env from current GCP/Terraform state"
+	@echo "Environment & Vertex AI Memory Bank:"
+	@echo "  make setup        One-shot end-to-end setup (tf-apply -> setup:env -> check)."
+	@echo "  make memory-bank  Manage Vertex AI Memory Bank in GCP. Options:"
+	@echo "                      make memory-bank CMD=list"
+	@echo "                      make memory-bank CMD=create NAME=<custom-name>"
+	@echo "  make env          Regenerate/update .env file from live GCP/Terraform outputs."
 	@echo ""
-	@echo "Terraform Infrastructure Commands:"
-	@echo "  make tf-init      - Initialize Terraform providers & modules"
-	@echo "  make tf-validate  - Validate Terraform syntax & logic"
-	@echo "  make tf-plan      - Show execution plan for GCP infrastructure"
-	@echo "  make tf-apply     - Apply Terraform changes to GCP"
-	@echo "  make tf-import    - Import an existing GCP project into state (usage: make tf-import PROJECT_ID=my-project)"
-	@echo "  make tf-output    - Display outputs from applied Terraform state"
-	@echo "  make tf-destroy   - Destroy Terraform-managed infrastructure"
-	@echo ""
+	@echo "Terraform GCP Infrastructure:"
+	@echo "  make tf-init      Initialize Terraform providers and local backend."
+	@echo "  make tf-validate  Validate Terraform syntax and configuration."
+	@echo "  make tf-plan      Generate and display GCP infrastructure execution plan."
+	@echo "  make tf-apply     Apply Terraform changes to provision GCP resources."
+	@echo "  make tf-import    Import existing GCP project into state:"
+	@echo "                      make tf-import PROJECT_ID=<gcp-project-id>"
+	@echo "  make tf-output    Display structured output variables from Terraform state."
+	@echo "  make tf-destroy   Tear down and destroy Terraform-managed GCP infrastructure."
+	@echo "=================================================================================="
 
 setup: ## Full automated local setup
 	@$(MAKE) tf-apply
@@ -40,11 +47,13 @@ memory-bank: ## Manage Memory Banks (e.g. make memory-bank CMD=list)
 	@npm run create:memory-bank $(CMD)
 
 dev:
-
 	npm run dev
 
 build:
 	npm run build
+
+start:
+	npm start
 
 lint:
 	npm run lint
