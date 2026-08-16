@@ -28,16 +28,7 @@ const PLAN_MIN_GROWTH = 80;
 const LIVE_QUIET_MS = 2000;
 const LIVE_MAX_WAIT_MS = 6000;
 
-// How often the raw dictation gets archived to disk as its own JSONL segment (POST
-// /api/transcript-segment), independent of the proofread/summarize/classify cycle above — a pure
-// disk write, so this can run on a fixed cadence without touching Gemini quota at all.
-const SEGMENT_FLUSH_MS = 15000;
 
-// Single-user app — no per-account or per-browser identity to resolve for the transcript archive.
-// One fixed user, one fixed session; "active" vs "inactive" is just whether liveTranscript is
-// currently non-empty, not a new id minted per recording.
-const TRANSCRIPT_USER_ID = "default_user";
-const TRANSCRIPT_SESSION_ID = "session";
 
 // State that's just mirrored to localStorage verbatim (no expiry/removal branching like the token
 // has) — one hook instead of a bespoke init-then-useEffect pair per field. Old plain-string values
@@ -108,33 +99,10 @@ export default function App() {
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
-
-  // How many characters of liveTranscript have already been sent as segments — the delta past this
-  // point is what the next flush sends, never the whole growing transcript again. Resets to 0
-  // whenever liveTranscript goes back to empty (recording stopped/cleared).
-  const flushedLenRef = useRef(0);
-  // Mirrors liveTranscript for the segment-flush interval (created once on mount, so its closure
-  // would otherwise see a stale value) — same "assign during render" idiom AudioRecorder.tsx uses
-  // for transcriptRef/editingRef.
-  const liveTranscriptRef = useRef("");
-  liveTranscriptRef.current = liveTranscript;
-
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
   };
-
-  // Fire-and-forget archive write for one segment of raw dictation — never blocks or fails the
-  // capture loop; a lost segment just means a smaller gap in the archive, not a broken session.
-  const flushTranscriptSegment = (text: string) => {
-    if (!text.trim()) return;
-    fetch("/api/transcript-segment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: TRANSCRIPT_USER_ID, sessionId: TRANSCRIPT_SESSION_ID, text }),
-    }).catch(e => console.warn("[transcript-segment] flush failed:", e));
-  };
-
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage).
   const toAnalysisResult = (rawRes: any, rawText: string): AnalysisResult => ({
     summary: rawRes.ideasSummary || "",
@@ -297,10 +265,6 @@ export default function App() {
   useEffect(() => {
     const text = liveTranscript.trim();
     if (!text) {
-      // Recording stopped/cleared — catch up any trailing text the 15s interval hasn't flushed
-      // yet before resetting, so the last few seconds aren't lost.
-      flushTranscriptSegment(liveTranscript.slice(flushedLenRef.current));
-      flushedLenRef.current = 0;
       setLiveDraft(null);
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
@@ -320,19 +284,7 @@ export default function App() {
     return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
   }, [liveTranscript, autoRun]);
 
-  // Raw-dictation archive, entirely independent of the debounced proofread/summary/plan cycle
-  // above: flushes whatever's new since the last tick as its own segment every SEGMENT_FLUSH_MS,
-  // regardless of pauses or autoRun. One interval for the app's lifetime — reads refs, not state,
-  // so it never needs to be recreated as liveTranscript changes.
-  useEffect(() => {
-    const id = setInterval(() => {
-      const text = liveTranscriptRef.current;
-      if (text.length <= flushedLenRef.current) return; // nothing new since the last flush
-      flushTranscriptSegment(text.slice(flushedLenRef.current));
-      flushedLenRef.current = text.length;
-    }, SEGMENT_FLUSH_MS);
-    return () => clearInterval(id);
-  }, []);
+
 
   // Sync selectedRunId to live-draft or fallback to archive
   useEffect(() => {

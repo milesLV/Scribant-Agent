@@ -2,10 +2,7 @@
 // extracted action items, one file per session, nothing smarter yet. No LLM extraction beyond what
 // the intent classifier already produces, no querying. Phase 2 wires this up to Vertex AI Memory
 // Bank, which does the fact/preference extraction itself once these records are synced to it (see
-// the plan for details). Single-user app, so there's no per-user scoping here. Paired with a
-// separate raw-text-only `data/transcripts/` archive (server-utils.ts's logUserTranscript): that
-// one is written every 15s straight off the live transcript, independent of this session-level,
-// plan-triggered capture, so it survives even if the analyze/plan pipeline never fires.
+// the plan for details). Single-user app, so there's no per-user scoping here.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

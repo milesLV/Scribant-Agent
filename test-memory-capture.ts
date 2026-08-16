@@ -13,12 +13,8 @@ import { hourBucket } from "./server-utils";
 
 const BASE = process.env.EVAL_BASE_URL || "http://localhost:3000";
 
-// ONE file per session now — logUserTranscript/data/transcripts was dropped once memoryFile's
-// record already carried the full text, making a second file pure duplication.
 const memoryFile = (sessionId: string) =>
   path.join(process.cwd(), "data", "memory", hourBucket(new Date()), `${sessionId}.jsonl`);
-const legacyTranscriptFile = (sessionId: string) =>
-  path.join(process.cwd(), "data", "transcripts", hourBucket(new Date()), `${sessionId}.jsonl`);
 const lastLine = (file: string) => JSON.parse(fs.readFileSync(file, "utf8").trim().split("\n").pop()!);
 const lineCount = (file: string) => fs.readFileSync(file, "utf8").trim().split("\n").length;
 
@@ -50,7 +46,6 @@ async function testFinalizeOnly() {
 
   const mFile = memoryFile(sessionId);
   assert.ok(fs.existsSync(mFile), `expected memory capture at ${mFile}`);
-  assert.ok(!fs.existsSync(legacyTranscriptFile(sessionId)), "a separate transcripts file should no longer be written");
 
   const memoryLine = lastLine(mFile);
   assert.equal(memoryLine.sessionId, sessionId);
@@ -100,7 +95,6 @@ async function testLiveAutosave() {
   assert.deepEqual(lastLine(mFile).actionItems, {
     todos: plan.tasks ?? [], calendarEvents: plan.calendarEvents ?? [], searchQueries: plan.searchQueries ?? [],
   });
-  assert.ok(!fs.existsSync(legacyTranscriptFile(sessionId)), "a separate transcripts file should no longer be written");
 
   console.log("live-loop autosave (2 ticks + finalize, one session file, always 1 line) ✓");
   console.log(`  memory: ${mFile} (${lineCount(mFile)} line)`);

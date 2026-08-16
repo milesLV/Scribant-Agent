@@ -3,7 +3,7 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import { splitTiers, logUserTranscript, safeSeg, estimateTokens, computeCompaction } from "./server-utils";
+import { splitTiers, safeSeg, estimateTokens, computeCompaction } from "./server-utils";
 import {
   captureMemoryEvent,
   getMemoryService,
@@ -108,22 +108,7 @@ app.post("/api/analyze", async (req, res) => {
   }
 });
 
-// Thin, model-free archive write: one 15s segment (or a catch-up flush) of raw dictation, appended
-// as its own JSONL line. Safe to call constantly — no orchestrator/Gemini call, no quota spent.
-app.post("/api/transcript-segment", async (req, res) => {
-  try {
-    const { userId, sessionId, text } = req.body;
-    if (!text || typeof text !== "string") {
-      res.status(400).json({ error: "text is required and must be a string." });
-      return;
-    }
-    logUserTranscript(userId, sessionId, text);
-    res.json({ ok: true });
-  } catch (error: any) {
-    console.error("Transcript segment log failed:", error);
-    res.status(500).json({ error: error.message || "Failed to log transcript segment." });
-  }
-});
+
 
 app.post("/api/transcribe-correct", async (req, res) => {
   try {
