@@ -363,11 +363,19 @@ export default function AudioRecorder({
       if (finalStr) {
         setTranscript((prev: string) => {
           const cleanedPrev = prev.trim();
-          // Collapse internal whitespace — the recognizer prefixes continued results with a space,
-          // which doubles up against the space we append and reflows the line.
           const cleanedFinal = finalStr.replace(/\s+/g, " ").trim();
-          if (!cleanedPrev) return cleanedFinal + " ";
-          return cleanedPrev + " " + cleanedFinal + " ";
+          if (!cleanedPrev) return cleanedFinal;
+
+          // Insert linebreaks regularly for legibility:
+          // 1. If previous text ended with sentence punctuation (.!?)
+          // 2. Or if the current paragraph exceeds ~16 words
+          const lastParagraph = cleanedPrev.split(/\n+/).pop() || "";
+          const lastWordCount = lastParagraph.trim().split(/\s+/).length;
+          const endsWithSentence = /[.!?]$/.test(cleanedPrev);
+          const needsBreak = endsWithSentence || lastWordCount >= 16;
+
+          const separator = needsBreak ? "\n\n" : " ";
+          return cleanedPrev + separator + cleanedFinal;
         });
       }
 
@@ -573,14 +581,27 @@ export default function AudioRecorder({
     return out;
   };
 
-  // Render raw or unproofed text formatted as structured dialogue turns
+  // Render raw or unproofed text formatted as structured dialogue turns or paragraphs
   const renderSpeakerText = (text: string) => {
     if (!text || !text.trim()) return null;
 
     // Check if the text contains speaker turn patterns
     const speakerRegex = /(?:\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)/;
     if (!speakerRegex.test(text)) {
-      return <span className="whitespace-pre-wrap">{text}</span>;
+      const paragraphs = text.split(/\n\s*\n|\n/);
+      return (
+        <div className="space-y-2.5">
+          {paragraphs.map((p, pIdx) => {
+            const trimmed = p.trim();
+            if (!trimmed) return null;
+            return (
+              <p key={pIdx} className="leading-relaxed text-stone-750 font-sans">
+                {trimmed}
+              </p>
+            );
+          })}
+        </div>
+      );
     }
 
     // Split text into distinct turns across newlines or speaker boundaries
