@@ -29,42 +29,22 @@ export type AdkEventListener = (event: AdkEvent) => void;
  * Classifies an ADK Event into a canonical event type string for filtering.
  */
 export function classifyAdkEventType(event: AdkEvent): string {
-  const anyEvt = event as any;
+  const delta = event.actions?.stateDelta || {};
 
-  // 1. Direct type property if present
-  if (typeof anyEvt.type === "string" && anyEvt.type && anyEvt.type !== "event") {
-    return anyEvt.type;
+  // 1. Explicit event type in ADK state delta
+  if (typeof delta.eventType === "string" && delta.eventType) {
+    return delta.eventType;
   }
 
-  // 2. Explicit event type in state delta or metadata
-  const delta = event.actions?.stateDelta || anyEvt.actions?.state_delta || anyEvt.stateDelta || {};
-  const stateEventType =
-    delta.eventType ||
-    delta.event_type ||
-    anyEvt.eventType ||
-    event.customMetadata?.eventType ||
-    anyEvt.customMetadata?.event_type;
-
-  if (typeof stateEventType === "string" && stateEventType) {
-    return stateEventType;
-  }
-
-  // 3. Check memory author
-  if (event.author === "memory" || anyEvt.author === "memory_service") {
-    const hasQuery = delta.query || anyEvt.query;
-    const isRetrieveText = event.content?.parts?.some((p) => typeof p.text === "string" && p.text.includes("[Memory Retrieve]"));
-    if (hasQuery || isRetrieveText) {
+  // 2. Memory author operations
+  if (event.author === "memory") {
+    if (delta.query || event.content?.parts?.some((p) => typeof p.text === "string" && p.text.includes("[Memory Retrieve]"))) {
       return "memory:retrieve";
     }
     return "memory:insert";
   }
 
-  // 4. Error code
-  if (event.errorCode || anyEvt.error) {
-    return "error";
-  }
-
-  // 5. ADK Structured Events inspection
+  // 3. ADK Structured Events inspection
   const structured = toStructuredEvents(event);
   if (structured.some((s) => s.type === EventType.TOOL_CALL)) {
     return "tool_call";
@@ -78,7 +58,7 @@ export function classifyAdkEventType(event: AdkEvent): string {
   if (structured.some((s) => s.type === EventType.CALL_CODE || s.type === EventType.CODE_RESULT)) {
     return "code_exec";
   }
-  if (structured.some((s) => s.type === EventType.ERROR)) {
+  if (structured.some((s) => s.type === EventType.ERROR) || event.errorCode) {
     return "error";
   }
   if (structured.some((s) => s.type === EventType.CONTENT)) {
@@ -88,7 +68,7 @@ export function classifyAdkEventType(event: AdkEvent): string {
     return "finished";
   }
 
-  // 6. Fallback to author or generic agent
+  // 4. Fallback to author or generic agent
   return event.author || "agent";
 }
 
@@ -306,29 +286,7 @@ export class AdkEventStream {
     };
   }
 
-  /**
-   * Updates the latest event matching a predicate (e.g. adding synthesized answers).
-   * Also appends the updated event to disk.
-   */
-  updateLatest(
-    predicate: (event: AdkEvent) => boolean,
-    updater: (event: AdkEvent) => void
-  ): AdkEvent | null {
-    const target = this.history.find(predicate);
-    if (target) {
-      updater(target);
-      logAdkEventToDisk(target, this.diskRoot);
-      for (const listener of this.listeners) {
-        try {
-          listener(target);
-        } catch (err) {
-          console.warn("[adk-events] Listener error on update:", err);
-        }
-      }
-      return target;
-    }
-    return null;
-  }
+
 
   /**
    * Returns event history with optional type/author/status/limit filters.
