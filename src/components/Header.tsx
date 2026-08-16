@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap, Activity } from "lucide-react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap, Activity, BookOpen } from "lucide-react";
 import { AutonomyMode } from "../types";
 
-export type AppTab = "workspace" | "admin";
+export type AppTab = "workspace" | "admin" | "docs";
 
 interface HeaderProps {
   token: string | null;
@@ -146,6 +146,19 @@ export default function Header({
                   {eventsCount}
                 </span>
               )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onTabChange("docs")}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                activeTab === "docs"
+                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+              }`}
+            >
+              <BookOpen className={`w-4 h-4 ${activeTab === "docs" ? "text-purple-600" : "text-stone-400"}`} />
+              <span>API Documentation</span>
             </button>
           </nav>
         </div>

@@ -4,6 +4,7 @@ import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
 import AdminMonitoring from "./components/AdminMonitoring";
+import ApiDocsView from "./components/ApiDocsView";
 import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
@@ -683,6 +684,13 @@ export default function App() {
               rawTranscript={liveTranscript}
               liveSummary={liveSummary}
             />
+          </div>
+        )}
+
+        {/* View 3: API Documentation Tab */}
+        {activeTab === "docs" && (
+          <div id="api-docs-section" className="pt-2">
+            <ApiDocsView />
           </div>
         )}
 

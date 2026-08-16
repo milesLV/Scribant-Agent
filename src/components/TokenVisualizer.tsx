@@ -6,20 +6,15 @@ import {
   ArrowRight,
   Sparkles,
   TrendingDown,
-  Clock,
-  CheckCircle2,
-  Cpu,
   BarChart3,
   Search,
   ShieldCheck,
   RefreshCw,
   BrainCircuit,
+  Cpu,
 } from "lucide-react";
 import {
   AdkEvent,
-  CompactionMetrics,
-  ArchiveTokenMetrics,
-  MemoryEfficiencyReport,
   TokenStatsResponse,
 } from "../types";
 
@@ -134,86 +129,86 @@ export default function TokenVisualizer({
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-stone-950 text-stone-100 p-4 space-y-4 overflow-y-auto font-sans">
+    <div className="p-5 space-y-5 font-sans bg-stone-50/40">
       
       {/* Top 3 Real-time Metric Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 shrink-0">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         
-        {/* Card 1: Live Inference Footprint */}
-        <div className="bg-stone-900/90 border border-stone-800 rounded-xl p-3.5 flex flex-col justify-between space-y-2.5">
+        {/* Card 1: Active Prompt Tokens */}
+        <div className="bg-white border border-stone-200/90 rounded-2xl p-4 shadow-2xs space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-400 flex items-center gap-1.5">
-              <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span className="text-[11px] font-mono font-bold uppercase text-stone-500 flex items-center gap-1.5">
+              <Zap className="w-3.5 h-3.5 text-amber-500" />
               Active Prompt Tokens
             </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 font-bold">
               Live Tick
             </span>
           </div>
           <div>
-            <div className="text-2xl font-mono font-extrabold text-stone-100 tracking-tight">
+            <div className="text-2xl font-mono font-extrabold text-stone-900 tracking-tight">
               {simulatedMode === "memory_bank" ? memoryBankTotalTokens.toLocaleString() : legacyTotalTokens.toLocaleString()}
-              <span className="text-xs text-stone-400 font-normal ml-1 font-mono">tokens</span>
+              <span className="text-xs text-stone-500 font-normal ml-1 font-mono">tokens</span>
             </div>
-            <div className="text-[10px] text-stone-400 flex items-center gap-2 mt-1">
-              <span>Base: <b className="text-stone-300 font-mono">{basePromptTokens}</b></span>
+            <div className="text-[11px] text-stone-600 flex items-center gap-2 mt-1">
+              <span>Base: <b className="text-stone-800 font-mono">{basePromptTokens}</b></span>
               <span>•</span>
-              <span>Memory: <b className="text-emerald-400 font-mono">{simulatedMode === "memory_bank" ? `+${injectedMemoryTokens}` : `+${archiveTokens.toLocaleString()}`}</b></span>
+              <span>Memory: <b className="text-emerald-700 font-mono">{simulatedMode === "memory_bank" ? `+${injectedMemoryTokens}` : `+${archiveTokens.toLocaleString()}`}</b></span>
             </div>
           </div>
-          <div className="w-full bg-stone-800 rounded-full h-1.5 overflow-hidden flex">
-            <div style={{ width: "40%" }} className="bg-blue-500 h-full" title="Base Prompt & Tools" />
+          <div className="w-full bg-stone-100 rounded-full h-1.5 overflow-hidden flex">
+            <div style={{ width: "40%" }} className="bg-sky-500 h-full" title="Base Prompt & Tools" />
             <div style={{ width: simulatedMode === "memory_bank" ? "10%" : "55%" }} className={simulatedMode === "memory_bank" ? "bg-emerald-500 h-full" : "bg-red-500 h-full"} title="Injected Memory" />
             <div style={{ width: "50%" }} className="bg-amber-500 h-full" title="Active Transcript" />
           </div>
         </div>
 
         {/* Card 2: Context Compaction Ratio */}
-        <div className="bg-stone-900/90 border border-stone-800 rounded-xl p-3.5 flex flex-col justify-between space-y-2.5">
+        <div className="bg-white border border-stone-200/90 rounded-2xl p-4 shadow-2xs space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-400 flex items-center gap-1.5">
-              <TrendingDown className="w-3.5 h-3.5 text-blue-400" />
+            <span className="text-[11px] font-mono font-bold uppercase text-stone-500 flex items-center gap-1.5">
+              <TrendingDown className="w-3.5 h-3.5 text-sky-600" />
               Context Compaction
             </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/20">
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 border border-sky-200 font-bold">
               Live Summarizer
             </span>
           </div>
           <div>
-            <div className="text-2xl font-mono font-extrabold text-blue-400 tracking-tight">
+            <div className="text-2xl font-mono font-extrabold text-sky-700 tracking-tight">
               ⚡ {compactionRatio}%
-              <span className="text-xs text-stone-400 font-normal ml-1.5 font-sans">compacted</span>
+              <span className="text-xs text-stone-500 font-normal ml-1.5 font-sans">compacted</span>
             </div>
-            <div className="text-[10px] text-stone-400 mt-1">
-              Raw: <b className="text-stone-300 font-mono">{rawTokens} tok</b> <ArrowRight className="w-2.5 h-2.5 inline mx-0.5" /> Compact: <b className="text-blue-300 font-mono">{summaryTokens} tok</b>
+            <div className="text-[11px] text-stone-600 mt-1">
+              Raw: <b className="text-stone-800 font-mono">{rawTokens} tok</b> <ArrowRight className="w-2.5 h-2.5 inline mx-0.5 text-stone-400" /> Compact: <b className="text-sky-700 font-mono">{summaryTokens} tok</b>
             </div>
           </div>
-          <div className="w-full bg-stone-800 rounded-full h-1.5 overflow-hidden">
-            <div style={{ width: `${compactionRatio}%` }} className="bg-blue-500 h-full rounded-full transition-all duration-500" />
+          <div className="w-full bg-stone-100 rounded-full h-1.5 overflow-hidden">
+            <div style={{ width: `${compactionRatio}%` }} className="bg-sky-500 h-full rounded-full transition-all duration-500" />
           </div>
         </div>
 
         {/* Card 3: Vertex AI Memory Bank Savings */}
-        <div className="bg-stone-900/90 border border-stone-800 rounded-xl p-3.5 flex flex-col justify-between space-y-2.5">
+        <div className="bg-white border border-stone-200/90 rounded-2xl p-4 shadow-2xs space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-400 flex items-center gap-1.5">
-              <Database className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[11px] font-mono font-bold uppercase text-stone-500 flex items-center gap-1.5">
+              <Database className="w-3.5 h-3.5 text-emerald-600" />
               Memory Bank Efficiency
             </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-bold">
+            <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold">
               {efficiencyMultiplier}x Gain
             </span>
           </div>
           <div>
-            <div className="text-2xl font-mono font-extrabold text-emerald-400 tracking-tight">
+            <div className="text-2xl font-mono font-extrabold text-emerald-700 tracking-tight">
               {tokenSavingsPercent}%
-              <span className="text-xs text-stone-400 font-normal ml-1 font-sans">token reduction</span>
+              <span className="text-xs text-stone-500 font-normal ml-1 font-sans">token reduction</span>
             </div>
-            <div className="text-[10px] text-stone-400 mt-1">
-              Saved <b className="text-emerald-300 font-mono">{(legacyTotalTokens - memoryBankTotalTokens).toLocaleString()} tokens</b> per prompt turn
+            <div className="text-[11px] text-stone-600 mt-1">
+              Saved <b className="text-emerald-700 font-mono">{(legacyTotalTokens - memoryBankTotalTokens).toLocaleString()} tokens</b> per prompt turn
             </div>
           </div>
-          <div className="w-full bg-stone-800 rounded-full h-1.5 overflow-hidden">
+          <div className="w-full bg-stone-100 rounded-full h-1.5 overflow-hidden">
             <div style={{ width: `${tokenSavingsPercent}%` }} className="bg-emerald-500 h-full rounded-full transition-all duration-500" />
           </div>
         </div>
@@ -221,44 +216,44 @@ export default function TokenVisualizer({
       </div>
 
       {/* Navigation Tabs for Visualizer Sub-views */}
-      <div className="flex items-center justify-between border-b border-stone-800 pb-2 shrink-0">
-        <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center justify-between border-b border-stone-200/90 pb-3 gap-3">
+        <div className="flex items-center gap-2 bg-stone-100 p-1 rounded-xl border border-stone-200/80">
           <button
             type="button"
             onClick={() => setActiveTab("comparison")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
               activeTab === "comparison"
-                ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
-                : "text-stone-400 hover:text-stone-200 hover:bg-stone-900"
+                ? "bg-white text-stone-900 shadow-2xs font-bold border border-stone-200"
+                : "text-stone-600 hover:text-stone-900"
             }`}
           >
-            <BarChart3 className="w-3.5 h-3.5" />
+            <BarChart3 className="w-3.5 h-3.5 text-amber-600" />
             <span>Memory Bank: Before vs After</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab("compaction")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
               activeTab === "compaction"
-                ? "bg-blue-500/20 text-blue-300 border border-blue-500/30"
-                : "text-stone-400 hover:text-stone-200 hover:bg-stone-900"
+                ? "bg-white text-stone-900 shadow-2xs font-bold border border-stone-200"
+                : "text-stone-600 hover:text-stone-900"
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
+            <Layers className="w-3.5 h-3.5 text-sky-600" />
             <span>Context Compaction Funnel</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab("subagents")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
               activeTab === "subagents"
-                ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                : "text-stone-400 hover:text-stone-200 hover:bg-stone-900"
+                ? "bg-white text-stone-900 shadow-2xs font-bold border border-stone-200"
+                : "text-stone-600 hover:text-stone-900"
             }`}
           >
-            <Cpu className="w-3.5 h-3.5" />
+            <Cpu className="w-3.5 h-3.5 text-purple-600" />
             <span>Agent Pipeline Breakdown</span>
           </button>
         </div>
@@ -267,38 +262,38 @@ export default function TokenVisualizer({
           type="button"
           onClick={fetchTokenStats}
           disabled={loading}
-          className="p-1.5 text-stone-400 hover:text-stone-200 hover:bg-stone-900 rounded-lg transition-colors cursor-pointer"
+          className="p-2 text-stone-500 hover:text-stone-800 hover:bg-white rounded-xl border border-stone-200/80 transition-all cursor-pointer shadow-2xs"
           title="Refresh token stats"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-amber-400" : ""}`} />
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-amber-600" : ""}`} />
         </button>
       </div>
 
       {/* TAB 1: BEFORE VS AFTER MEMORY BANK COMPARISON */}
       {activeTab === "comparison" && (
-        <div className="space-y-4">
+        <div className="space-y-4 font-sans">
           
-          {/* Interactive A/B Toggle Switch for the Demo Video */}
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          {/* Interactive A/B Toggle Switch */}
+          <div className="bg-white border border-stone-200/90 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-stone-200 uppercase tracking-wide font-mono">
+                <span className="text-xs font-bold text-stone-800 uppercase tracking-wide font-mono">
                   Live Showcase Mode
                 </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-stone-800 text-stone-300 border border-stone-700 font-mono">
+                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-stone-100 text-stone-700 border border-stone-200 font-mono font-bold">
                   {sessionCount} Historical Sessions Archived ({archiveTokens.toLocaleString()} tokens)
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center bg-stone-950 p-1 rounded-xl border border-stone-800 shrink-0">
+            <div className="flex items-center bg-stone-100 p-1 rounded-xl border border-stone-200/80 shrink-0">
               <button
                 type="button"
                 onClick={() => setSimulatedMode("legacy_stuffing")}
                 className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
                   simulatedMode === "legacy_stuffing"
-                    ? "bg-red-950/80 text-red-300 border border-red-700/60 shadow-inner"
-                    : "text-stone-400 hover:text-stone-200"
+                    ? "bg-red-100 text-red-900 border border-red-200 shadow-2xs"
+                    : "text-stone-600 hover:text-stone-900"
                 }`}
               >
                 🔴 Before: Context Stuffing
@@ -308,8 +303,8 @@ export default function TokenVisualizer({
                 onClick={() => setSimulatedMode("memory_bank")}
                 className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
                   simulatedMode === "memory_bank"
-                    ? "bg-emerald-950/80 text-emerald-300 border border-emerald-600/60 shadow-inner"
-                    : "text-stone-400 hover:text-stone-200"
+                    ? "bg-emerald-100 text-emerald-900 border border-emerald-200 shadow-2xs"
+                    : "text-stone-600 hover:text-stone-900"
                 }`}
               >
                 🟢 After: Vertex AI Memory Bank
@@ -321,31 +316,31 @@ export default function TokenVisualizer({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             
             {/* BEFORE: Legacy Full Archive Dump */}
-            <div className={`rounded-xl p-4 border transition-all ${
+            <div className={`rounded-2xl p-5 border transition-all shadow-2xs ${
               simulatedMode === "legacy_stuffing"
-                ? "bg-red-950/20 border-red-500/40 ring-1 ring-red-500/30"
-                : "bg-stone-900/40 border-stone-800 opacity-60"
+                ? "bg-red-50/50 border-red-300 ring-1 ring-red-200"
+                : "bg-white border-stone-200/90 opacity-70"
             }`}>
-              <div className="flex items-center justify-between pb-2 border-b border-stone-800/80">
-                <span className="text-xs font-bold text-red-400 font-mono flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-red-400" />
+              <div className="flex items-center justify-between pb-3 border-b border-stone-200/80">
+                <span className="text-xs font-bold text-red-700 font-mono flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-red-500" />
                   BEFORE: Monolithic Prompt Injection
                 </span>
-                <span className="text-xs font-mono font-bold text-red-300">
+                <span className="text-xs font-mono font-bold text-red-800">
                   {legacyTotalTokens.toLocaleString()} tokens
                 </span>
               </div>
 
-              <div className="py-3 space-y-2">
-                <div className="text-[11px] text-stone-300 leading-relaxed">
+              <div className="py-3 space-y-3">
+                <div className="text-xs text-stone-700 leading-relaxed">
                   Sends the entire history of <b>{sessionCount} past sessions</b> into the context window on every turn.
                 </div>
-                <div className="space-y-1.5 pt-1 text-[10px] font-mono text-stone-400">
+                <div className="space-y-1.5 text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-xl border border-stone-200/80">
                   <div className="flex justify-between">
                     <span>Base Instructions:</span>
                     <span>{basePromptTokens} tokens</span>
                   </div>
-                  <div className="flex justify-between text-red-400 font-semibold">
+                  <div className="flex justify-between text-red-700 font-semibold">
                     <span>Full Past Transcripts ({sessionCount} sessions):</span>
                     <span>+{archiveTokens.toLocaleString()} tokens</span>
                   </div>
@@ -355,7 +350,7 @@ export default function TokenVisualizer({
                   </div>
                 </div>
 
-                <div className="mt-3 p-2 bg-stone-950/80 rounded-lg border border-red-900/30 text-[10px] text-red-300/80 space-y-0.5">
+                <div className="p-3 bg-red-50/80 rounded-xl border border-red-200 text-xs text-red-900 space-y-1">
                   <div>⚠️ <b>Latency:</b> ~2.8s – 3.5s per turn</div>
                   <div>⚠️ <b>Cost Scaling:</b> $O(N)$ linear growth with session history</div>
                   <div>⚠️ <b>Attention Risk:</b> Lost-in-the-middle context dilution</div>
@@ -364,31 +359,31 @@ export default function TokenVisualizer({
             </div>
 
             {/* AFTER: Vertex AI Memory Bank */}
-            <div className={`rounded-xl p-4 border transition-all ${
+            <div className={`rounded-2xl p-5 border transition-all shadow-2xs ${
               simulatedMode === "memory_bank"
-                ? "bg-emerald-950/20 border-emerald-500/40 ring-1 ring-emerald-500/30"
-                : "bg-stone-900/40 border-stone-800 opacity-60"
+                ? "bg-emerald-50/50 border-emerald-300 ring-1 ring-emerald-200"
+                : "bg-white border-stone-200/90 opacity-70"
             }`}>
-              <div className="flex items-center justify-between pb-2 border-b border-stone-800/80">
-                <span className="text-xs font-bold text-emerald-400 font-mono flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <div className="flex items-center justify-between pb-3 border-b border-stone-200/80">
+                <span className="text-xs font-bold text-emerald-800 font-mono flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   AFTER: Vertex AI Memory Bank
                 </span>
-                <span className="text-xs font-mono font-bold text-emerald-300">
+                <span className="text-xs font-mono font-bold text-emerald-800">
                   {memoryBankTotalTokens.toLocaleString()} tokens
                 </span>
               </div>
 
-              <div className="py-3 space-y-2">
-                <div className="text-[11px] text-stone-300 leading-relaxed">
+              <div className="py-3 space-y-3">
+                <div className="text-xs text-stone-700 leading-relaxed">
                   Queries Vertex AI Memory Bank via ADK callback and injects only <b>the top 2 relevant facts</b>.
                 </div>
-                <div className="space-y-1.5 pt-1 text-[10px] font-mono text-stone-400">
+                <div className="space-y-1.5 text-xs font-mono text-stone-600 bg-stone-50 p-3 rounded-xl border border-stone-200/80">
                   <div className="flex justify-between">
                     <span>Base Instructions:</span>
                     <span>{basePromptTokens} tokens</span>
                   </div>
-                  <div className="flex justify-between text-emerald-400 font-semibold">
+                  <div className="flex justify-between text-emerald-700 font-semibold">
                     <span>Targeted Memory Recall:</span>
                     <span>+{injectedMemoryTokens} tokens</span>
                   </div>
@@ -398,30 +393,30 @@ export default function TokenVisualizer({
                   </div>
                 </div>
 
-                <div className="mt-3 p-2 bg-stone-950/80 rounded-lg border border-emerald-900/30 text-[10px] text-emerald-300/80 space-y-0.5">
+                <div className="p-3 bg-emerald-50/80 rounded-xl border border-emerald-200 text-xs text-emerald-900 space-y-1">
                   <div>⚡ <b>Latency:</b> Sub-second (~0.4s response)</div>
                   <div>⚡ <b>Cost Scaling:</b> $O(1)$ constant flat token overhead forever</div>
                   <div>⚡ <b>Precision:</b> 100% focused semantic grounding</div>
                 </div>
 
                 {/* Explicit Visual Box showing exact data fetched from Memory Bank */}
-                <div className="mt-2.5 p-2.5 bg-stone-950/90 rounded-lg border border-emerald-500/40 space-y-1.5">
-                  <div className="flex items-center justify-between text-[10.5px] font-mono text-emerald-400 font-bold border-b border-emerald-900/50 pb-1">
-                    <span className="flex items-center gap-1">
-                      <BrainCircuit className="w-3 h-3 text-emerald-400" />
+                <div className="p-3 bg-white rounded-xl border border-emerald-200 space-y-2 shadow-2xs">
+                  <div className="flex items-center justify-between text-xs font-mono text-emerald-800 font-bold border-b border-emerald-100 pb-1.5">
+                    <span className="flex items-center gap-1.5">
+                      <BrainCircuit className="w-3.5 h-3.5 text-emerald-600" />
                       Data Fetched from Memory Bank:
                     </span>
-                    <span className="text-[9.5px] text-emerald-300 bg-emerald-950 px-1.5 py-0.2 rounded border border-emerald-700/60">
+                    <span className="text-[10px] text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md border border-emerald-200">
                       +{injectedMemoryTokens} tokens
                     </span>
                   </div>
-                  <div className="space-y-1">
+                  <div className="space-y-1.5">
                     {displayedMemories.slice(0, 2).map((m: any, idx: number) => (
-                      <div key={idx} className="p-1.5 bg-emerald-950/20 rounded border border-emerald-900/30 text-[11px] font-mono text-emerald-200">
-                        <span className="text-[9.5px] text-emerald-400/80 font-bold block mb-0.5">
+                      <div key={idx} className="p-2 bg-emerald-50/50 rounded-lg border border-emerald-100 text-xs font-mono text-stone-800">
+                        <span className="text-[10px] text-emerald-700 font-bold block mb-0.5">
                           • {m.author ? `[Author: ${m.author}]` : "[Memory Fact]"} {m.timestamp ? `(${new Date(m.timestamp).toLocaleDateString()})` : ""}:
                         </span>
-                        <span className="text-stone-200 font-sans text-[11px] leading-tight block">{m.text}</span>
+                        <span className="text-stone-700 font-sans text-xs leading-normal block">{m.text}</span>
                       </div>
                     ))}
                   </div>
@@ -432,13 +427,13 @@ export default function TokenVisualizer({
           </div>
 
           {/* Interactive Semantic Recall Playground */}
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-3.5 space-y-3">
+          <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-3 shadow-2xs">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-stone-200 font-mono flex items-center gap-1.5">
-                <Search className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-xs font-bold text-stone-800 font-mono flex items-center gap-1.5">
+                <Search className="w-3.5 h-3.5 text-amber-600" />
                 Live Semantic Recall Tester
               </span>
-              <span className="text-[10px] font-mono text-stone-400">
+              <span className="text-[10px] font-mono text-stone-500">
                 ADK beforeModelCallback Simulation
               </span>
             </div>
@@ -449,35 +444,35 @@ export default function TokenVisualizer({
                 value={queryInput}
                 onChange={(e) => setQueryInput(e.target.value)}
                 placeholder="Search semantic memory (e.g. 'green tea', 'Kyoto', 'roadmap presentation')..."
-                className="flex-1 bg-stone-950 border border-stone-700 rounded-lg px-3 py-1.5 text-xs text-stone-100 font-mono focus:outline-none focus:border-amber-500"
+                className="flex-1 bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-xs text-stone-800 font-sans focus:outline-none focus:border-amber-500"
               />
               <button
                 type="button"
                 onClick={handleTestMemoryRecall}
                 disabled={testingQuery || !queryInput.trim()}
-                className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-stone-950 font-mono font-bold text-xs rounded-lg transition-colors disabled:opacity-50 cursor-pointer shrink-0 flex items-center gap-1"
+                className="px-3.5 py-2 bg-stone-900 hover:bg-stone-800 text-white font-sans font-bold text-xs rounded-xl transition-all disabled:opacity-50 cursor-pointer shrink-0 flex items-center gap-1.5 shadow-2xs"
               >
-                {testingQuery ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                {testingQuery ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
                 <span>Recall Memory</span>
               </button>
             </div>
 
             {testResult && (
-              <div className="p-3 bg-stone-950 rounded-lg border border-stone-800 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-stone-400 border-b border-stone-800/60 pb-1.5">
+              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+                <div className="flex items-center justify-between text-xs font-mono text-stone-600 border-b border-stone-200 pb-1.5">
                   <span>Found {testResult.count || 0} matching memory fragment(s)</span>
-                  <span className="text-emerald-400 font-bold">
+                  <span className="text-emerald-700 font-bold">
                     Injected Tokens: ~{testResult.efficiency?.injectedMemoryTokens || 45} tok
                   </span>
                 </div>
                 {testResult.memories && testResult.memories.length > 0 ? (
                   <div className="space-y-1.5">
                     {testResult.memories.map((m: any, idx: number) => (
-                      <div key={idx} className="p-2 bg-stone-900/80 rounded border border-stone-800 text-xs font-mono text-stone-200">
-                        <span className="text-[10px] text-amber-400 font-bold block mb-0.5">
+                      <div key={idx} className="p-2.5 bg-white rounded-lg border border-stone-200/80 text-xs font-mono text-stone-800">
+                        <span className="text-[10px] text-amber-700 font-bold block mb-0.5">
                           Author: {m.author} • {new Date(m.timestamp).toLocaleTimeString()}
                         </span>
-                        {m.text}
+                        <span className="font-sans text-stone-700">{m.text}</span>
                       </div>
                     ))}
                   </div>
@@ -493,43 +488,43 @@ export default function TokenVisualizer({
 
       {/* TAB 2: CONTEXT COMPACTION FUNNEL */}
       {activeTab === "compaction" && (
-        <div className="space-y-4">
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-4 space-y-3">
-            <div className="flex items-center justify-between border-b border-stone-800 pb-2">
-              <span className="text-xs font-bold text-blue-400 font-mono flex items-center gap-1.5">
-                <Layers className="w-4 h-4 text-blue-400" />
+        <div className="space-y-4 font-sans">
+          <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-4 shadow-2xs">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <span className="text-xs font-bold text-sky-800 font-mono flex items-center gap-1.5">
+                <Layers className="w-4 h-4 text-sky-600" />
                 Live Context Compaction Pipeline
               </span>
-              <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-700/50 px-2 py-0.5 rounded-full">
+              <span className="text-xs font-mono font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
                 ⚡ {compactionRatio}% Compression
               </span>
             </div>
 
-            <p className="text-xs text-stone-300 leading-relaxed">
+            <p className="text-xs text-stone-600 leading-relaxed">
               Instead of streaming raw speech history into expensive reasoning sub-agents on every 15-second tick, the <b>Live Summarizer</b> continuously compacts spoken dialogue into dense, structured markdown bullet points.
             </p>
 
             {/* Visual Funnel Comparison */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
               
               {/* Raw Speech Input */}
-              <div className="p-3 bg-stone-950 rounded-xl border border-stone-800 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-stone-400 border-b border-stone-800/80 pb-1">
+              <div className="p-4 bg-stone-50 rounded-2xl border border-stone-200/80 space-y-2">
+                <div className="flex items-center justify-between text-xs font-mono text-stone-600 border-b border-stone-200 pb-1.5">
                   <span>1. Raw Speech Stream (Noisy)</span>
-                  <span className="text-amber-400 font-bold">{rawTokens} tokens</span>
+                  <span className="text-amber-700 font-bold">{rawTokens} tokens</span>
                 </div>
-                <div className="text-xs font-sans text-stone-300 italic max-h-36 overflow-y-auto leading-relaxed bg-stone-900/40 p-2.5 rounded-lg border border-stone-800/50">
+                <div className="text-xs font-sans text-stone-700 leading-relaxed bg-white p-3 rounded-xl border border-stone-200/80">
                   {rawTranscript || "Today was super busy. We talked about building the new token counter and integrating Vertex AI Memory Bank. Alice said she will prepare the slide deck, and Bob mentioned reviewing backend API performance..."}
                 </div>
               </div>
 
               {/* Compacted Output */}
-              <div className="p-3 bg-stone-950 rounded-xl border border-blue-900/40 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-stone-400 border-b border-stone-800/80 pb-1">
+              <div className="p-4 bg-sky-50/40 rounded-2xl border border-sky-200 space-y-2">
+                <div className="flex items-center justify-between text-xs font-mono text-stone-600 border-b border-sky-200 pb-1.5">
                   <span>2. Compacted Working State</span>
-                  <span className="text-blue-400 font-bold">{summaryTokens} tokens</span>
+                  <span className="text-sky-700 font-bold">{summaryTokens} tokens</span>
                 </div>
-                <div className="text-xs font-sans text-stone-200 max-h-36 overflow-y-auto leading-relaxed bg-blue-950/20 p-2.5 rounded-lg border border-blue-900/30">
+                <div className="text-xs font-sans text-stone-800 leading-relaxed bg-white p-3 rounded-xl border border-sky-100">
                   {liveSummary || "• Token Counter & Vertex AI Memory Bank integration underway\n• Alice to prepare roadmap slide deck\n• Bob reviewing backend API performance"}
                 </div>
               </div>
@@ -537,13 +532,13 @@ export default function TokenVisualizer({
             </div>
 
             {/* Engineering Takeaway */}
-            <div className="p-3 bg-blue-950/30 rounded-lg border border-blue-800/40 text-xs text-blue-200 space-y-1">
+            <div className="p-3.5 bg-sky-50 rounded-xl border border-sky-200 text-xs text-sky-900 space-y-1">
               <div className="font-bold flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+                <ShieldCheck className="w-4 h-4 text-sky-600" />
                 Engineering Principle: State-Driven Multi-Agent Design
               </div>
-              <p className="text-[11px] text-stone-300 leading-relaxed">
-                Downstream sub-agents (e.g. <code>intentClassifier</code>) receive the compacted state with <code>includeContents: 'none'</code>, eliminating quadratic context growth.
+              <p className="text-xs text-stone-600 leading-relaxed">
+                Downstream sub-agents (e.g. <code className="text-stone-800 font-mono">intentClassifier</code>) receive the compacted state with <code className="text-stone-800 font-mono">includeContents: 'none'</code>, eliminating quadratic context growth.
               </p>
             </div>
 
@@ -553,53 +548,53 @@ export default function TokenVisualizer({
 
       {/* TAB 3: AGENT PIPELINE BREAKDOWN */}
       {activeTab === "subagents" && (
-        <div className="space-y-3">
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-4 space-y-3">
-            <div className="flex items-center justify-between border-b border-stone-800 pb-2">
-              <span className="text-xs font-bold text-purple-400 font-mono flex items-center gap-1.5">
-                <Cpu className="w-4 h-4 text-purple-400" />
+        <div className="space-y-4 font-sans">
+          <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-4 shadow-2xs">
+            <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+              <span className="text-xs font-bold text-purple-800 font-mono flex items-center gap-1.5">
+                <Cpu className="w-4 h-4 text-purple-600" />
                 Sub-Agent Token & Execution Breakdown
               </span>
-              <span className="text-[10px] font-mono text-stone-400">
+              <span className="text-[10px] font-mono text-stone-500">
                 ADK Ephemeral Runner Pipeline
               </span>
             </div>
 
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               
               {/* Proofreader */}
-              <div className="p-3 bg-stone-950 rounded-lg border border-stone-800 flex items-center justify-between">
+              <div className="p-4 bg-stone-50 rounded-xl border border-stone-200/80 flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <div className="text-xs font-mono font-bold text-stone-200">1. Proofreader Sub-Agent</div>
-                  <div className="text-[11px] text-stone-400">Fast word confidence scoring & acoustic phonetic fixes</div>
+                  <div className="text-xs font-sans font-bold text-stone-800">1. Proofreader Sub-Agent</div>
+                  <div className="text-xs text-stone-500">Fast word confidence scoring & acoustic phonetic fixes</div>
                 </div>
                 <div className="text-right font-mono">
-                  <div className="text-xs font-bold text-amber-400">~120 tokens</div>
-                  <div className="text-[10px] text-stone-500">Latency: 0.25s</div>
+                  <div className="text-xs font-bold text-amber-700">~120 tokens</div>
+                  <div className="text-[10px] text-stone-400">Latency: 0.25s</div>
                 </div>
               </div>
 
               {/* Live Summarizer */}
-              <div className="p-3 bg-stone-950 rounded-lg border border-stone-800 flex items-center justify-between">
+              <div className="p-4 bg-stone-50 rounded-xl border border-stone-200/80 flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <div className="text-xs font-mono font-bold text-stone-200">2. Live Summarizer (Compaction)</div>
-                  <div className="text-[11px] text-stone-400">Rolling markdown synthesis & context compaction</div>
+                  <div className="text-xs font-sans font-bold text-stone-800">2. Live Summarizer (Compaction)</div>
+                  <div className="text-xs text-stone-500">Rolling markdown synthesis & context compaction</div>
                 </div>
                 <div className="text-right font-mono">
-                  <div className="text-xs font-bold text-blue-400">~{summaryTokens + 180} tokens</div>
-                  <div className="text-[10px] text-stone-500">Latency: 0.45s</div>
+                  <div className="text-xs font-bold text-sky-700">~{summaryTokens + 180} tokens</div>
+                  <div className="text-[10px] text-stone-400">Latency: 0.45s</div>
                 </div>
               </div>
 
               {/* Intent Classifier */}
-              <div className="p-3 bg-stone-950 rounded-lg border border-stone-800 flex items-center justify-between">
+              <div className="p-4 bg-stone-50 rounded-xl border border-stone-200/80 flex items-center justify-between">
                 <div className="space-y-0.5">
-                  <div className="text-xs font-mono font-bold text-stone-200">3. Intent Classifier & Resolver</div>
-                  <div className="text-[11px] text-stone-400">Extracts calendar events, tasks, search queries with speaker attribution</div>
+                  <div className="text-xs font-sans font-bold text-stone-800">3. Intent Classifier & Resolver</div>
+                  <div className="text-xs text-stone-500">Extracts calendar events, tasks, search queries with speaker attribution</div>
                 </div>
                 <div className="text-right font-mono">
-                  <div className="text-xs font-bold text-purple-400">~380 tokens</div>
-                  <div className="text-[10px] text-stone-500">Latency: 0.60s</div>
+                  <div className="text-xs font-bold text-purple-700">~380 tokens</div>
+                  <div className="text-[10px] text-stone-400">Latency: 0.60s</div>
                 </div>
               </div>
 
