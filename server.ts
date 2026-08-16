@@ -22,11 +22,29 @@ import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspac
 import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
+import {
+  registerOpenApiRoutes,
+  validatePayload,
+  AnalyzeRequestSchema,
+  TranscribeCorrectRequestSchema,
+  LivePipelineRequestSchema,
+  MemoryIngestRequestSchema,
+  MemoryRetrieveQuerySchema,
+  SearchRequestSchema,
+  TranscribeAudioRequestSchema,
+  ExecuteRequestSchema,
+  TokenStatsQuerySchema,
+  EventsQuerySchema,
+  EventsClearRequestSchema,
+} from "./openapi";
 
 const app = express();
 // 15mb covers a base64-encoded ~8-10s audio chunk (see /api/transcribe-audio) with headroom; every
 // other route here sends plain text, well under that.
 app.use(express.json({ limit: "15mb" }));
+
+// OpenAPI specification (/api/openapi.json) and interactive API reference (/docs)
+registerOpenApiRoutes(app);
 
 // 3000 by default: the OAuth redirect URI registered in Google Cloud is per-port.
 const PORT = Number(process.env.PORT) || 3000;
@@ -72,11 +90,12 @@ app.get("/api/config", async (_req, res) => {
 
 app.post("/api/analyze", async (req, res) => {
   try {
-    const { text, currentLocalTime, liveSummary, sessionId } = req.body;
-    if (!text || typeof text !== "string") {
+    const v = validatePayload(AnalyzeRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
+    const { text, currentLocalTime, liveSummary, sessionId } = v.data;
 
     // Auto-retrieve relevant past memories for this transcript
     safeRetrieve("analyze", text, { sessionId: safeSeg(sessionId, "session") });
@@ -127,11 +146,12 @@ app.post("/api/transcript-segment", async (req, res) => {
 
 app.post("/api/transcribe-correct", async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || typeof text !== "string") {
+    const v = validatePayload(TranscribeCorrectRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "Text is required and must be a string." });
       return;
     }
+    const { text } = v.data;
     const { proof } = await runOrchestrator({
       stages: new Set<Stage>(["proof"]),
       text,
@@ -152,11 +172,12 @@ app.post("/api/transcribe-correct", async (req, res) => {
 // Additive by design: /api/analyze, /api/transcribe-correct and /api/search keep their contracts
 // (the evals and the "Analyze Thoughts" finalize button still use them).
 app.post("/api/live", async (req, res) => {
-  const { text, currentLocalTime, liveSummary, withPlan, sessionId } = req.body;
-  if (!text || typeof text !== "string") {
+  const v = validatePayload(LivePipelineRequestSchema, req.body);
+  if (!v.success) {
     res.status(400).json({ error: "Text is required and must be a string." });
     return;
   }
+  const { text, currentLocalTime, liveSummary, withPlan, sessionId } = v.data;
 
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
@@ -205,11 +226,12 @@ app.post("/api/live", async (req, res) => {
 // Memory Bank: Ingest a transcript or session explicitly into Vertex AI Memory Bank
 app.post("/api/memory/ingest", async (req, res) => {
   try {
-    const { text, sessionId, userId, plan, timestamp } = req.body;
-    if (!text || typeof text !== "string") {
+    const v = validatePayload(MemoryIngestRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "text is required and must be a string." });
       return;
     }
+    const { text, sessionId, userId, plan, timestamp } = v.data;
     const result = await ingestTranscriptToMemoryBank({
       text,
       sessionId: safeSeg(sessionId, "session"),
@@ -227,12 +249,14 @@ app.post("/api/memory/ingest", async (req, res) => {
 // Memory Bank: Retrieve memories/facts matching a query from Vertex AI Memory Bank
 const handleMemoryRetrieve = async (req: express.Request, res: express.Response) => {
   try {
-    const query = String((req.method === "POST" ? req.body.query : req.query.query) || "").trim();
-    const userId = String((req.method === "POST" ? req.body.userId : req.query.userId) || "").trim();
-    if (!query) {
+    const rawQuery = String((req.method === "POST" ? req.body.query : req.query.query) || "").trim();
+    const rawUserId = String((req.method === "POST" ? req.body.userId : req.query.userId) || "").trim();
+    const v = validatePayload(MemoryRetrieveQuerySchema, { query: rawQuery, userId: rawUserId || undefined });
+    if (!v.success) {
       res.status(400).json({ error: "query is required." });
       return;
     }
+    const { query, userId } = v.data;
     const result = await retrieveFromMemoryBank(query, {
       userId: userId ? safeSeg(userId, "default_user") : undefined,
     });
@@ -452,11 +476,12 @@ DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`)
 
 app.post("/api/search", async (req, res) => {
   try {
-    const { query } = req.body;
-    if (!query || typeof query !== "string") {
+    const v = validatePayload(SearchRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "Query is required and must be a string." });
       return;
     }
+    const { query } = v.data;
 
     res.json(await groundedSearch(query));
   } catch (error: any) {
@@ -469,11 +494,12 @@ app.post("/api/search", async (req, res) => {
 // expected to POST per-chunk (~8-10s of opus, base64), never accumulate a whole session client-side.
 app.post("/api/transcribe-audio", async (req, res) => {
   try {
-    const { audio, mimeType, source } = req.body;
-    if (!audio || typeof audio !== "string") {
+    const v = validatePayload(TranscribeAudioRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "audio (base64) is required and must be a string." });
       return;
     }
+    const { audio, mimeType, source } = v.data;
     const { text } = await askAgentParts(audioTranscriber, [
       { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: audio } },
     ]);
