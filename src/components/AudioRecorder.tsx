@@ -220,9 +220,12 @@ export default function AudioRecorder({
   // transcript to be a list of tagged segments instead of one flat string.
   const { isSharing: isSharingTab, start: startTabAudio, stop: stopTabAudio } = useTabAudioCapture({
     onChunk: ({ text }) => {
-      setTranscript(prev => {
+      setTranscript((prev) => {
         const cleanedPrev = prev.trim();
-        return (cleanedPrev ? cleanedPrev + " " : "") + `[Meeting] ${text}` + " ";
+        if (!cleanedPrev) return text;
+        const isDialogue = text.includes("Speaker ") || cleanedPrev.includes("Speaker ") || text.startsWith("[Meeting");
+        const separator = isDialogue ? "\n\n" : " ";
+        return cleanedPrev + separator + text;
       });
     },
     onError: (msg) => setTabAudioError(msg),
@@ -347,6 +350,14 @@ export default function AudioRecorder({
         } else {
           interimStr += text + " ";
         }
+      }
+
+      if (isDiarizationActive()) {
+        // In Diarization mode: Web Speech provides instant live typing preview,
+        // while Cloud STT V2 provides authoritative diarized turns into transcript.
+        const preview = (finalStr + " " + interimStr).replace(/\s+/g, " ").trim();
+        setInterimTranscript(preview);
+        return;
       }
 
       if (finalStr) {
@@ -567,17 +578,17 @@ export default function AudioRecorder({
     if (!text || !text.trim()) return null;
 
     // Check if the text contains speaker turn patterns
-    const speakerRegex = /(?:^|\n\n|\n)(?:\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)\s*/;
+    const speakerRegex = /(?:\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)/;
     if (!speakerRegex.test(text)) {
-      return <span>{text}</span>;
+      return <span className="whitespace-pre-wrap">{text}</span>;
     }
 
-    // Split text into distinct turns
-    const turns = text.split(/(?=\n\n|\n)(?:(?=\[(?:Meeting(?::\s*[^\]]+)?)\])|(?=\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):))/g);
+    // Split text into distinct turns across newlines or speaker boundaries
+    const rawTurns = text.split(/(?=(?:\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):))/g);
 
     return (
       <div className="space-y-3">
-        {turns.map((turn, tIdx) => {
+        {rawTurns.map((turn, tIdx) => {
           const trimmed = turn.trim();
           if (!trimmed) return null;
 
@@ -773,14 +784,15 @@ export default function AudioRecorder({
                 title={isListening ? "Listening..." : "Click anywhere to edit transcript text"}
               >
                 {(transcript || interimTranscript) ? (
-                  <span className="leading-relaxed font-sans text-stone-750">
-                    {words && transcript.startsWith(proofedTextRef.current) ? renderProofed() : renderSpeakerText(transcript)}
+                  <div className="leading-relaxed font-sans text-stone-750">
+                    {renderSpeakerText(transcript)}
                     {interimTranscript && (
-                      <span className="text-amber-500 italic font-medium animate-pulse">
-                        {(transcript && !/\s$/.test(transcript) ? " " : "") + interimTranscript}
-                      </span>
+                      <div className="mt-2 text-[11px] text-amber-600 italic font-medium animate-pulse flex items-center gap-1.5 bg-amber-50/70 p-1.5 rounded-lg border border-amber-200/60">
+                        <Radio className="w-3 h-3 text-amber-500 animate-spin shrink-0" />
+                        <span className="line-clamp-1">{interimTranscript}...</span>
+                      </div>
                     )}
-                  </span>
+                  </div>
                 ) : (
                   <span className="text-stone-400 italic font-sans leading-normal">
                     No thoughts captured yet. Click the microphone below to start speaking or click anywhere to type.
