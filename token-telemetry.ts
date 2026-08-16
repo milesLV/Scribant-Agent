@@ -114,28 +114,85 @@ export interface TimeSeriesQueryOptions {
   sessionId?: string;
 }
 
-// Pricing table (USD per 1 Million Tokens)
-// Defaults based on standard Gemini 2.0 / 3.7 Flash tiers
-const PRICING_PER_MILLION = {
-  textInput: 0.075,
-  audioInput: 0.7,
-  cachedInput: 0.01875,
-  candidatesOutput: 0.3,
-  thoughtsOutput: 0.3,
+// Official Google Gemini API Pricing Table (USD per 1 Million Tokens)
+// Based on Google AI Developer (ai.google.dev) official pricing schedules
+export interface ModelPricingTier {
+  textInput: number; // USD per 1M tokens
+  audioInput: number; // USD per 1M tokens (32 tokens/sec encoding)
+  cachedInput: number; // USD per 1M tokens (context caching)
+  candidatesOutput: number; // USD per 1M tokens
+  thoughtsOutput: number; // USD per 1M tokens (billed at candidate output rate)
+}
+
+export const MODEL_PRICING_REGISTRY: Record<string, ModelPricingTier> = {
+  // Gemini 3.7 Flash (Active intro tier)
+  "gemini-3.7-flash": {
+    textInput: 0.75,
+    audioInput: 0.75,
+    cachedInput: 0.1875,
+    candidatesOutput: 3.75,
+    thoughtsOutput: 3.75,
+  },
+  // Gemini 3.6 Flash / 3.5 Flash (Standard tier)
+  "gemini-3.6-flash": {
+    textInput: 1.5,
+    audioInput: 1.5,
+    cachedInput: 0.375,
+    candidatesOutput: 7.5,
+    thoughtsOutput: 7.5,
+  },
+  "gemini-3.5-flash": {
+    textInput: 1.5,
+    audioInput: 1.5,
+    cachedInput: 0.375,
+    candidatesOutput: 9.0,
+    thoughtsOutput: 9.0,
+  },
+  // Gemini 3.1 Flash-Lite
+  "gemini-3.1-flash-lite": {
+    textInput: 0.25,
+    audioInput: 0.5,
+    cachedInput: 0.0625,
+    candidatesOutput: 1.5,
+    thoughtsOutput: 1.5,
+  },
+  // Gemini 2.5 Flash
+  "gemini-2.5-flash": {
+    textInput: 0.3,
+    audioInput: 0.7,
+    cachedInput: 0.075,
+    candidatesOutput: 2.5,
+    thoughtsOutput: 2.5,
+  },
 };
 
-export function estimateCostUsd(record: {
-  textInputTokens: number;
-  audioInputTokens: number;
-  cachedTokens: number;
-  candidatesTokens: number;
-  thoughtsTokens: number;
-}): number {
-  const textCost = (record.textInputTokens / 1_000_000) * PRICING_PER_MILLION.textInput;
-  const audioCost = (record.audioInputTokens / 1_000_000) * PRICING_PER_MILLION.audioInput;
-  const cachedCost = (record.cachedTokens / 1_000_000) * PRICING_PER_MILLION.cachedInput;
-  const outCost = (record.candidatesTokens / 1_000_000) * PRICING_PER_MILLION.candidatesOutput;
-  const thoughtCost = (record.thoughtsTokens / 1_000_000) * PRICING_PER_MILLION.thoughtsOutput;
+export const DEFAULT_PRICING_TIER: ModelPricingTier = MODEL_PRICING_REGISTRY["gemini-3.7-flash"];
+
+export function getPricingTierForModel(modelName?: string): ModelPricingTier {
+  if (!modelName) return DEFAULT_PRICING_TIER;
+  const normalized = modelName.toLowerCase().trim();
+  for (const [key, tier] of Object.entries(MODEL_PRICING_REGISTRY)) {
+    if (normalized.includes(key)) return tier;
+  }
+  return DEFAULT_PRICING_TIER;
+}
+
+export function estimateCostUsd(
+  record: {
+    textInputTokens: number;
+    audioInputTokens: number;
+    cachedTokens: number;
+    candidatesTokens: number;
+    thoughtsTokens: number;
+  },
+  modelName?: string
+): number {
+  const tier = getPricingTierForModel(modelName);
+  const textCost = (record.textInputTokens / 1_000_000) * tier.textInput;
+  const audioCost = (record.audioInputTokens / 1_000_000) * tier.audioInput;
+  const cachedCost = (record.cachedTokens / 1_000_000) * tier.cachedInput;
+  const outCost = (record.candidatesTokens / 1_000_000) * tier.candidatesOutput;
+  const thoughtCost = (record.thoughtsTokens / 1_000_000) * tier.thoughtsOutput;
 
   return Number((textCost + audioCost + cachedCost + outCost + thoughtCost).toFixed(8));
 }
@@ -232,13 +289,17 @@ export function recordTokenUsage(params: {
   const cachedTokens = usage.cachedContentTokenCount ?? 0;
   const totalTokens = usage.totalTokenCount ?? (promptTokens + candidatesTokens + thoughtsTokens);
 
-  const cost = estimateCostUsd({
-    textInputTokens: textTokens,
-    audioInputTokens: audioTokens,
-    cachedTokens,
-    candidatesTokens,
-    thoughtsTokens,
-  });
+  const modelName = params.model || process.env.GEMINI_MODEL || "gemini-3.7-flash";
+  const cost = estimateCostUsd(
+    {
+      textInputTokens: textTokens,
+      audioInputTokens: audioTokens,
+      cachedTokens,
+      candidatesTokens,
+      thoughtsTokens,
+    },
+    modelName
+  );
 
   const record: TokenMetricRecord = {
     id: `tok-${now}-${crypto.randomBytes(4).toString("hex")}`,
