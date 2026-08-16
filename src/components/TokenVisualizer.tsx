@@ -570,11 +570,11 @@ export default function TokenVisualizer({
             </div>
 
             {/* Bar Chart Canvas */}
-            <div className="relative min-h-[200px] flex items-end gap-2 pt-8 pb-2 border-b border-stone-100 overflow-visible">
+            <div className="relative min-h-[220px] flex items-end gap-1.5 pt-14 pb-2 border-b border-stone-100 overflow-x-auto">
               {timeSeries.length > 0 ? (
                 timeSeries.map((pt, idx) => {
                   const total = pt.totalTokens;
-                  const heightPercent = total > 0 ? Math.max(12, Math.round((total / maxBucketTokens) * 100)) : 4;
+                  const heightPercent = total > 0 ? Math.max(14, Math.round((total / maxBucketTokens) * 100)) : 4;
                   const isHovered = hoveredPoint === pt;
                   // Clamp tooltip alignment so edge bars don't clip off left or right
                   const alignClass =
@@ -589,7 +589,7 @@ export default function TokenVisualizer({
                       key={idx}
                       onMouseEnter={() => setHoveredPoint(pt)}
                       onMouseLeave={() => setHoveredPoint(null)}
-                      className="flex-1 min-w-[28px] max-w-[48px] flex flex-col items-center gap-1 group relative h-full justify-end cursor-pointer"
+                      className="flex-1 min-w-[20px] max-w-[48px] flex flex-col items-center gap-1 group relative h-full justify-end cursor-pointer shrink-0"
                     >
                       {/* Floating Tooltip positioned cleanly above stacked bar with high z-index and border */}
                       <div
@@ -644,7 +644,7 @@ export default function TokenVisualizer({
                       </div>
 
                       {/* X-axis Label */}
-                      <span className={`text-[9px] font-mono truncate w-full text-center ${isHovered ? "text-amber-700 font-bold" : "text-stone-500"}`}>
+                      <span className={`text-[8px] sm:text-[9px] font-mono truncate w-full text-center ${isHovered ? "text-amber-700 font-bold" : "text-stone-500"}`}>
                         {pt.timeLabel}
                       </span>
                     </div>

@@ -108,10 +108,11 @@ export interface TokenAggregateStats {
 export interface TimeSeriesQueryOptions {
   from?: number; // Epoch ms
   to?: number; // Epoch ms
-  interval?: "1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "24h" | "7d";
+  interval?: "1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "24h" | "7d" | string;
   agent?: string;
   model?: string;
   sessionId?: string;
+  rootDiskDir?: string;
 }
 
 // Official Google Gemini API Pricing Table (USD per 1 Million Tokens)
@@ -474,7 +475,7 @@ export function queryTokenTimeSeries(
   const from = options.from || to - 30 * intervalMs; // Default 30 intervals back
 
   // Get combined records from disk and memory
-  const allRecords = getCombinedRecords(from, to, recordsSource);
+  const allRecords = getCombinedRecords(from, to, recordsSource, options.rootDiskDir);
 
   // Filter records
   const filtered = allRecords.filter((r) => {
@@ -549,14 +550,14 @@ export function queryTokenTimeSeries(
 }
 
 export function queryTokenAggregate(
-  options: { from?: number; to?: number; sessionId?: string } = {},
+  options: { from?: number; to?: number; sessionId?: string; rootDiskDir?: string } = {},
   recordsSource: TokenMetricRecord[] = memoryBuffer
 ): TokenAggregateStats {
   const now = Date.now();
   const to = options.to || now;
   const from = options.from || 0; // Default all history in buffer
 
-  const allRecords = getCombinedRecords(from, to, recordsSource);
+  const allRecords = getCombinedRecords(from, to, recordsSource, options.rootDiskDir);
 
   const filtered = allRecords.filter((r) => {
     if (r.timestampMs < from || r.timestampMs > to) return false;
@@ -701,7 +702,7 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
     assert(rec2.totalTokens === 630, "totalTokens should be 630");
 
     // 3. Test Time-Series Query
-    const tsRes = queryTokenTimeSeries({ interval: "1m" });
+    const tsRes = queryTokenTimeSeries({ interval: "1m", rootDiskDir: testRoot });
     assert(tsRes.ok === true, "time-series response should be ok");
     assert(tsRes.points.length > 0, "should have time points");
     const activePoint = tsRes.points.find((p) => p.requestCount > 0);
@@ -710,7 +711,7 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
     assert(activePoint!.audioTokens === 250, "active point audio tokens should be 250");
 
     // 4. Test Aggregate Query
-    const aggRes = queryTokenAggregate();
+    const aggRes = queryTokenAggregate({ rootDiskDir: testRoot });
     assert(aggRes.totalTokens === 955, "aggregate totalTokens should match 955");
     assert(aggRes.totalAudioTokens === 250, "aggregate audioTokens should match 250");
     assert(aggRes.requestCount === 2, "aggregate requestCount should be 2");
