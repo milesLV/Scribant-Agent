@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus, ScreenShare, ScreenShareOff } from "lucide-react";
+import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus, ScreenShare, ScreenShareOff, Radio, Users } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
 import { applyCorrections, CONFIDENCE_THRESHOLD } from "../utils/transcript";
@@ -60,6 +60,23 @@ function caretOffsetFromPoint(x: number, y: number, container: Node): number | n
   return total;
 }
 
+function pickMimeType(): string {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
+  return candidates.find((t) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) || "";
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
 export default function AudioRecorder({
   onAnalyze,
   isProcessing,
@@ -78,6 +95,85 @@ export default function AudioRecorder({
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [useKeyboard, setUseKeyboard] = useState(false);
   const [tabAudioError, setTabAudioError] = useState<string | null>(null);
+
+  // Mic MediaRecorder refs for Cloud STT Diarization mode
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micRecorderRef = useRef<MediaRecorder | null>(null);
+  const micStoppingRef = useRef(false);
+
+  // Helper to check if Diarization is toggled on in settings
+  const isDiarizationActive = () => {
+    try {
+      const saved = localStorage.getItem("scribant_stt_config");
+      if (saved) return Boolean(JSON.parse(saved).enableDiarization);
+    } catch {}
+    return false;
+  };
+
+  // Uploads a mic audio chunk directly to Cloud STT /api/transcribe-audio
+  const uploadMicChunk = async (blob: Blob) => {
+    if (blob.size === 0) return;
+    try {
+      const base64 = await blobToBase64(blob);
+      let enableDiarization = true;
+      let minSpeakers = 1;
+      let maxSpeakers = 5;
+      try {
+        const saved = localStorage.getItem("scribant_stt_config");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          enableDiarization = Boolean(parsed.enableDiarization);
+          if (parsed.minSpeakers) minSpeakers = Number(parsed.minSpeakers);
+          if (parsed.maxSpeakers) maxSpeakers = Number(parsed.maxSpeakers);
+        }
+      } catch {}
+
+      const res = await fetch("/api/transcribe-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audio: base64,
+          mimeType: blob.type || "audio/webm",
+          source: "mic",
+          enableDiarization,
+          minSpeakers,
+          maxSpeakers,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const text = String(data.text || "").trim();
+      if (text) {
+        setTranscript((prev) => {
+          const cleanedPrev = prev.trim();
+          return (cleanedPrev ? cleanedPrev + " " : "") + text + " ";
+        });
+        setInterimTranscript("");
+      }
+    } catch (err) {
+      console.warn("[mic-chunk] diarization chunk transcription failed:", err);
+    }
+  };
+
+  // Loops recording chunks while mic is active in diarization mode
+  const recordNextMicChunk = () => {
+    const stream = micStreamRef.current;
+    if (!stream || micStoppingRef.current) return;
+    const rec = new MediaRecorder(stream, { mimeType: pickMimeType() });
+    const parts: Blob[] = [];
+    rec.ondataavailable = (e) => {
+      if (e.data.size > 0) parts.push(e.data);
+    };
+    rec.onstop = () => {
+      uploadMicChunk(new Blob(parts, { type: rec.mimeType }));
+      recordNextMicChunk();
+    };
+    micRecorderRef.current = rec;
+    rec.start();
+    setTimeout(() => {
+      if (rec.state === "recording") rec.stop();
+    }, 8000);
+  };
 
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
@@ -303,7 +399,7 @@ export default function AudioRecorder({
     else startTabAudio();
   };
 
-  const handleToggleListening = () => {
+  const handleToggleListening = async () => {
     if (isListening || shouldListenRef.current) {
       shouldListenRef.current = false;
       setIsListening(false);
@@ -313,20 +409,42 @@ export default function AudioRecorder({
       } catch {
         try { recognitionRef.current?.stop(); } catch {}
       }
+      // Stop mic MediaRecorder if running in diarization mode
+      micStoppingRef.current = true;
+      if (micRecorderRef.current?.state === "recording") micRecorderRef.current.stop();
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
     } else {
       shouldListenRef.current = true;
       ignoreSpeechResultsRef.current = false;
       setRecognitionError(null);
       setIsEditingTranscript(false);
+      setIsListening(true);
+
+      // Start Cloud STT chunking loop if Diarization mode is active
+      if (isDiarizationActive()) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          micStreamRef.current = stream;
+          micStoppingRef.current = false;
+          recordNextMicChunk();
+        } catch (err: any) {
+          console.warn("[mic-chunk] Failed to get mic stream for diarization:", err);
+        }
+      }
+
+      // Also start Web Speech API for instant client-side preview
       try {
-        // Resume onto the existing transcript instead of wiping it (use "Clear Text" to reset).
         setInterimTranscript("");
         recognitionRef.current?.start();
       } catch (err: any) {
-        console.error("Failed to start voice recognition:", err);
-        setRecognitionError("Could not initialize microphone. Please reload or dump your thoughts directly in the typewriter box.");
-        shouldListenRef.current = false;
-        setIsListening(false);
+        // If Web Speech API fails, but MediaRecorder is running, continue with MediaRecorder
+        if (!micStreamRef.current) {
+          console.error("Failed to start voice recognition:", err);
+          setRecognitionError("Could not initialize microphone. Please reload or dump your thoughts directly in the typewriter box.");
+          shouldListenRef.current = false;
+          setIsListening(false);
+        }
       }
     }
   };
@@ -341,6 +459,10 @@ export default function AudioRecorder({
       setIsListening(false);
       setInterimTranscript("");
       try { recognitionRef.current?.abort(); } catch {}
+      micStoppingRef.current = true;
+      if (micRecorderRef.current?.state === "recording") micRecorderRef.current.stop();
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
     }
 
     setIsEditingTranscript(false);
@@ -352,6 +474,10 @@ export default function AudioRecorder({
     setIsListening(false);
     ignoreSpeechResultsRef.current = true;
     try { recognitionRef.current?.abort(); } catch {}
+    micStoppingRef.current = true;
+    if (micRecorderRef.current?.state === "recording") micRecorderRef.current.stop();
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
     setTranscript("");
     setInterimTranscript("");
     setIsEditingTranscript(false);
@@ -505,6 +631,12 @@ export default function AudioRecorder({
               <p className="mt-3 text-[10px] font-semibold text-stone-500 text-center uppercase tracking-wider font-mono">
                 {isListening ? "Click to Pause Speech Capture" : "Click to Speak Thoughts"}
               </p>
+              {isDiarizationActive() && (
+                <span className="mt-1 px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200/80 text-indigo-700 text-[9px] font-mono font-bold flex items-center gap-1">
+                  <Radio className={`w-2.5 h-2.5 text-indigo-600 ${isListening ? "animate-pulse" : ""}`} />
+                  <span>Diarization Active</span>
+                </span>
+              )}
             </div>
 
             {/* Shared-tab audio capture — a separate pipeline from the mic above (see
