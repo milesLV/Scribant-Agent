@@ -97,6 +97,8 @@ export default function TokenVisualizer({
   // Time-Range & Resolution States
   const [timeRange, setTimeRange] = useState<TimeRangePreset>("30m");
   const [interval, setInterval] = useState<string>("1m");
+  const [diarizationFilter, setDiarizationFilter] = useState<"all" | "diarized" | "non_diarized">("all");
+  const [providerFilter, setProviderFilter] = useState<"all" | "gemini" | "google_cloud_stt">("all");
   const [customFrom, setCustomFrom] = useState<string>("");
   const [customTo, setCustomTo] = useState<string>("");
   const [showCustomPicker, setShowCustomPicker] = useState<boolean>(false);
@@ -115,15 +117,25 @@ export default function TokenVisualizer({
     return { from: now - (preset?.durationMs || 1800000), to: now };
   };
 
+  // Build filter query string
+  const buildQuerySuffix = () => {
+    let s = "";
+    if (diarizationFilter === "diarized") s += "&diarization=true";
+    if (diarizationFilter === "non_diarized") s += "&diarization=false";
+    if (providerFilter !== "all") s += `&provider=${encodeURIComponent(providerFilter)}`;
+    return s;
+  };
+
   // Fetch standard token & compaction stats with time boundaries
   const fetchTokenStats = async () => {
     try {
       setLoading(true);
       const { from, to } = getTimeBounds();
+      const querySuffix = buildQuerySuffix();
       const [statsRes, tsRes, aggRes] = await Promise.all([
         fetch(`/api/tokens/stats?text=${encodeURIComponent(rawTranscript)}&summary=${encodeURIComponent(liveSummary)}`),
-        fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}`),
-        fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}`),
+        fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}${querySuffix}`),
+        fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}${querySuffix}`),
       ]);
 
       if (statsRes.ok) {
@@ -147,7 +159,7 @@ export default function TokenVisualizer({
 
   useEffect(() => {
     fetchTokenStats();
-  }, [rawTranscript, liveSummary, timeRange, interval]);
+  }, [rawTranscript, liveSummary, timeRange, interval, diarizationFilter, providerFilter]);
 
   const handleSelectPreset = (p: TimeRangePreset) => {
     setTimeRange(p);
@@ -184,11 +196,12 @@ export default function TokenVisualizer({
             setLiveRecords((prev) => [record, ...prev.slice(0, 49)]);
             // Refresh time-series and aggregate stats on new record
             const { from, to } = getTimeBounds();
-            fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}`)
+            const querySuffix = buildQuerySuffix();
+            fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}${querySuffix}`)
               .then((r) => r.json())
               .then((d) => setTimeSeries(d.points || []))
               .catch(() => {});
-            fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}`)
+            fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}${querySuffix}`)
               .then((r) => r.json())
               .then((d) => setAggregate(d))
               .catch(() => {});
@@ -403,6 +416,82 @@ export default function TokenVisualizer({
 
         {activeTab === "timeseries" && (
           <div className="flex flex-wrap items-center gap-2">
+            {/* Diarization Filter */}
+            <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+              <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Diarization:</span>
+              <button
+                type="button"
+                onClick={() => setDiarizationFilter("all")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                  diarizationFilter === "all"
+                    ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
+                    : "text-stone-600 hover:text-stone-900"
+                }`}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => setDiarizationFilter("diarized")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                  diarizationFilter === "diarized"
+                    ? "bg-emerald-600 text-white font-bold shadow-2xs"
+                    : "text-emerald-750 hover:text-emerald-900"
+                }`}
+              >
+                Diarized Only
+              </button>
+              <button
+                type="button"
+                onClick={() => setDiarizationFilter("non_diarized")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                  diarizationFilter === "non_diarized"
+                    ? "bg-stone-800 text-white font-bold shadow-2xs"
+                    : "text-stone-600 hover:text-stone-900"
+                }`}
+              >
+                Non-Diarized
+              </button>
+            </div>
+
+            {/* Provider Filter */}
+            <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+              <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Provider:</span>
+              <button
+                type="button"
+                onClick={() => setProviderFilter("all")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                  providerFilter === "all"
+                    ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
+                    : "text-stone-600 hover:text-stone-900"
+                }`}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => setProviderFilter("gemini")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                  providerFilter === "gemini"
+                    ? "bg-amber-600 text-white font-bold shadow-2xs"
+                    : "text-amber-800 hover:text-amber-900"
+                }`}
+              >
+                Gemini
+              </button>
+              <button
+                type="button"
+                onClick={() => setProviderFilter("google_cloud_stt")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                  providerFilter === "google_cloud_stt"
+                    ? "bg-indigo-600 text-white font-bold shadow-2xs"
+                    : "text-indigo-750 hover:text-indigo-900"
+                }`}
+              >
+                Cloud STT
+              </button>
+            </div>
+
             {/* Time Range Preset Buttons */}
             <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
               {(["10m", "30m", "1h", "4h", "24h", "7d"] as const).map((p) => (
@@ -682,6 +771,7 @@ export default function TokenVisualizer({
                   <tr className="border-b border-stone-200 text-stone-500 text-[10.5px]">
                     <th className="pb-2 font-medium">Timestamp</th>
                     <th className="pb-2 font-medium">Agent / Stage</th>
+                    <th className="pb-2 font-medium">Features / Tags</th>
                     <th className="pb-2 font-medium">Modality</th>
                     <th className="pb-2 font-medium">Model</th>
                     <th className="pb-2 font-medium text-right">Prompt</th>
@@ -702,6 +792,36 @@ export default function TokenVisualizer({
                         <td className="py-2">
                           <span className="font-semibold text-stone-900">{r.agent}</span>
                           <span className="text-stone-500 text-[10px] block">{r.stage}</span>
+                        </td>
+                        <td className="py-2">
+                          <div className="flex flex-wrap items-center gap-1">
+                            {r.diarizationEnabled && (
+                              <span className="px-1.5 py-0.5 rounded text-[9.5px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                Diarized
+                              </span>
+                            )}
+                            {r.provider && (
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono ${
+                                  r.provider === "google_cloud_stt"
+                                    ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
+                                    : "bg-amber-50 text-amber-700 border border-amber-200"
+                                }`}
+                              >
+                                {r.provider === "google_cloud_stt" ? "Cloud STT" : "Gemini"}
+                              </span>
+                            )}
+                            {r.source && (
+                              <span className="px-1.5 py-0.5 rounded text-[9.5px] font-mono bg-stone-100 text-stone-600 border border-stone-200">
+                                {r.source}
+                              </span>
+                            )}
+                            {r.metadata?.speakerCount && (
+                              <span className="text-[9.5px] text-stone-500 font-mono">
+                                {r.metadata.speakerCount} spk
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="py-2">
                           <span
@@ -737,7 +857,7 @@ export default function TokenVisualizer({
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={10} className="py-6 text-center text-stone-500 italic">
+                      <td colSpan={11} className="py-6 text-center text-stone-500 italic">
                         No live model receipts received yet. Speak to trigger automatic agent invocations.
                       </td>
                     </tr>
@@ -830,6 +950,61 @@ export default function TokenVisualizer({
                 </div>
               </div>
             )}
+
+            {/* Diarization & Provider Breakdown Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Diarization Breakdown */}
+              {aggregate?.byDiarization && Object.keys(aggregate.byDiarization).length > 0 && (
+                <div className="p-3 bg-emerald-50/50 border border-emerald-200/80 rounded-xl space-y-2">
+                  <span className="text-[11px] font-mono font-bold uppercase text-emerald-850 flex items-center gap-1">
+                    <Radio className="w-3 h-3 text-emerald-700" />
+                    Diarization Mode Breakdown
+                  </span>
+                  <div className="space-y-2">
+                    {Object.entries(aggregate.byDiarization).map(([mode, data]) => (
+                      <div key={mode} className="p-2.5 bg-white rounded-lg border border-emerald-100 flex justify-between items-center font-mono text-xs">
+                        <div>
+                          <span className="font-bold capitalize text-stone-900">
+                            {mode === "diarized" ? "🎙️ Diarized (Multi-Speaker)" : "👤 Non-Diarized (Single Stream)"}
+                          </span>
+                          <span className="text-[10px] text-stone-500 block">{data.requests} requests • ${data.costUsd.toFixed(5)}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="font-bold text-emerald-700">{data.tokens.toLocaleString()} tok</span>
+                          <span className="text-[10px] text-stone-500 block">{data.percent}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Provider Breakdown */}
+              {aggregate?.byProvider && Object.keys(aggregate.byProvider).length > 0 && (
+                <div className="p-3 bg-indigo-50/50 border border-indigo-200/80 rounded-xl space-y-2">
+                  <span className="text-[11px] font-mono font-bold uppercase text-indigo-850 flex items-center gap-1">
+                    <Cpu className="w-3 h-3 text-indigo-700" />
+                    Model Provider Breakdown
+                  </span>
+                  <div className="space-y-2">
+                    {Object.entries(aggregate.byProvider).map(([prov, data]) => (
+                      <div key={prov} className="p-2.5 bg-white rounded-lg border border-indigo-100 flex justify-between items-center font-mono text-xs">
+                        <div>
+                          <span className="font-bold capitalize text-stone-900">
+                            {prov === "google_cloud_stt" ? "Google Cloud STT V2" : "Gemini Models"}
+                          </span>
+                          <span className="text-[10px] text-stone-500 block">{data.requests} requests • ${data.costUsd.toFixed(5)}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="font-bold text-indigo-700">{data.tokens.toLocaleString()} tok</span>
+                          <span className="text-[10px] text-stone-500 block">{data.percent}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
 
           </div>
         </div>

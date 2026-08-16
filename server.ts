@@ -45,6 +45,7 @@ import {
   queryTokenAggregate,
   subscribeTokenStream,
   getMemoryBufferSnapshot,
+  recordTokenUsage,
 } from "./token-telemetry";
 
 const app = express();
@@ -337,6 +338,7 @@ app.get("/api/tokens/telemetry/timeseries", (req, res) => {
       return;
     }
     const query = validation.data;
+    const diarizationFilter = query.diarizationEnabled !== undefined ? query.diarizationEnabled : query.diarization;
     const result = queryTokenTimeSeries({
       from: query.from,
       to: query.to,
@@ -344,6 +346,11 @@ app.get("/api/tokens/telemetry/timeseries", (req, res) => {
       agent: query.agent,
       model: query.model,
       sessionId: query.sessionId,
+      diarizationEnabled: diarizationFilter,
+      provider: query.provider,
+      source: query.source,
+      modality: query.modality,
+      stage: query.stage,
     });
     res.json(result);
   } catch (error: any) {
@@ -361,10 +368,14 @@ app.get("/api/tokens/telemetry/aggregate", (req, res) => {
       return;
     }
     const query = validation.data;
+    const diarizationFilter = query.diarizationEnabled !== undefined ? query.diarizationEnabled : query.diarization;
     const result = queryTokenAggregate({
       from: query.from,
       to: query.to,
       sessionId: query.sessionId,
+      diarizationEnabled: diarizationFilter,
+      provider: query.provider,
+      source: query.source,
     });
     res.json(result);
   } catch (error: any) {
@@ -554,10 +565,32 @@ app.post("/api/transcribe-audio", async (req, res) => {
                 speakerCount: cloudResult.speakerCount,
                 wordCount: cloudResult.words.length,
                 turnCount: cloudResult.speakerTurns.length,
+                diarizationEnabled: true,
+                source: source === "tab" ? "tab" : "mic",
               },
             }),
           })
         );
+
+        // Record Token Telemetry Record
+        recordTokenUsage({
+          model: "chirp_2",
+          agent: "google_cloud_stt",
+          stage: "stt",
+          modality: "audio",
+          diarizationEnabled: true,
+          provider: "google_cloud_stt",
+          source: source === "tab" ? "tab" : "mic",
+          metadata: {
+            speakerCount: cloudResult.speakerCount,
+            wordCount: cloudResult.words.length,
+            turnCount: cloudResult.speakerTurns.length,
+            minSpeakers: minSpeakers ?? 1,
+            maxSpeakers: maxSpeakers ?? 5,
+          },
+          promptTokensFallback: Math.ceil(cloudResult.words.length * 1.6),
+          candidatesTokensFallback: Math.ceil(cloudResult.words.length * 1.3),
+        });
 
         res.json({
           text: cloudResult.text,
@@ -574,9 +607,19 @@ app.post("/api/transcribe-audio", async (req, res) => {
 
     // Default / fallback to Gemini multimodal audio transcriber
     console.log(`[STT] Transcribing audio chunk (${source || "mic"}) via Gemini multimodal audio transcriber...`);
-    const { text } = await askAgentParts(audioTranscriber, [
-      { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: cleanAudio } },
-    ]);
+    const { text } = await askAgentParts(
+      audioTranscriber,
+      [{ inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: cleanAudio } }],
+      {
+        diarizationEnabled: Boolean(enableDiarization),
+        source: source === "tab" ? "tab" : "mic",
+        metadata: {
+          requestedDiarization: Boolean(enableDiarization),
+          minSpeakers,
+          maxSpeakers,
+        },
+      }
+    );
 
     console.log(`[STT] ✓ Gemini transcription complete (${text.trim().length} chars)`);
 

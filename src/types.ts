@@ -190,6 +190,12 @@ export interface TokenMetricRecord {
   textInputTokens: number;
   durationMs: number;
   costEstimateUsd: number;
+
+  // Invocation Metadata & Telemetry Tags
+  diarizationEnabled?: boolean;
+  provider?: "gemini" | "google_cloud_stt" | string;
+  source?: "mic" | "tab" | "upload" | "pipeline" | string;
+  metadata?: Record<string, any>;
 }
 
 export interface TimeSeriesPoint {
@@ -226,6 +232,8 @@ export interface TokenAggregateStats {
   byModel: Record<string, AggregateDimensionStats>;
   byModality: Record<string, AggregateDimensionStats>;
   byStage: Record<string, AggregateDimensionStats>;
+  byDiarization?: Record<string, AggregateDimensionStats>;
+  byProvider?: Record<string, AggregateDimensionStats>;
 }
 
 export type MemoryEvent = AdkEvent;

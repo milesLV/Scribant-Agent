@@ -142,6 +142,16 @@ export const TokenTelemetryTimeSeriesQuerySchema = z.object({
   agent: z.string().optional().describe("Filter by agent label"),
   model: z.string().optional().describe("Filter by model name"),
   sessionId: z.string().optional().describe("Filter by session ID"),
+  diarization: z
+    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
+    .describe("Filter by whether diarization was enabled"),
+  diarizationEnabled: z
+    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
+    .describe("Filter by whether diarization was enabled"),
+  provider: z.string().optional().describe("Filter by provider (gemini, google_cloud_stt)"),
+  source: z.string().optional().describe("Filter by audio/pipeline source (mic, tab, pipeline)"),
+  modality: z.string().optional().describe("Filter by modality (audio, text)"),
+  stage: z.string().optional().describe("Filter by pipeline stage"),
 });
 
 export const TokenTimeSeriesPointSchema = z.object({
@@ -167,6 +177,14 @@ export const TokenTelemetryAggregateQuerySchema = z.object({
   from: z.coerce.number().optional().describe("Start epoch timestamp in ms"),
   to: z.coerce.number().optional().describe("End epoch timestamp in ms"),
   sessionId: z.string().optional().describe("Filter by session ID"),
+  diarization: z
+    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
+    .describe("Filter by whether diarization was enabled"),
+  diarizationEnabled: z
+    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
+    .describe("Filter by whether diarization was enabled"),
+  provider: z.string().optional().describe("Filter by provider"),
+  source: z.string().optional().describe("Filter by source"),
 });
 
 export const AggregateDimensionStatsSchema = z.object({
@@ -190,6 +208,8 @@ export const TokenTelemetryAggregateResponseSchema = z.object({
   byModel: z.record(z.string(), AggregateDimensionStatsSchema),
   byModality: z.record(z.string(), AggregateDimensionStatsSchema),
   byStage: z.record(z.string(), AggregateDimensionStatsSchema),
+  byDiarization: z.record(z.string(), AggregateDimensionStatsSchema).optional(),
+  byProvider: z.record(z.string(), AggregateDimensionStatsSchema).optional(),
 });
 
 export const EventsQuerySchema = z.object({
@@ -742,6 +762,9 @@ export function getOpenApiSpec() {
             { name: "agent", in: "query", schema: { type: "string" }, description: "Filter by agent label" },
             { name: "model", in: "query", schema: { type: "string" }, description: "Filter by model name" },
             { name: "sessionId", in: "query", schema: { type: "string" }, description: "Filter by session ID" },
+            { name: "diarization", in: "query", schema: { type: "boolean" }, description: "Filter by whether diarization was active" },
+            { name: "provider", in: "query", schema: { type: "string" }, description: "Filter by provider (gemini, google_cloud_stt)" },
+            { name: "source", in: "query", schema: { type: "string" }, description: "Filter by audio/pipeline source (mic, tab, pipeline)" },
           ],
           responses: {
             "200": {
@@ -788,6 +811,9 @@ export function getOpenApiSpec() {
             { name: "from", in: "query", schema: { type: "number" }, description: "Start timestamp in ms" },
             { name: "to", in: "query", schema: { type: "number" }, description: "End timestamp in ms" },
             { name: "sessionId", in: "query", schema: { type: "string" }, description: "Filter by session ID" },
+            { name: "diarization", in: "query", schema: { type: "boolean" }, description: "Filter by whether diarization was active" },
+            { name: "provider", in: "query", schema: { type: "string" }, description: "Filter by provider" },
+            { name: "source", in: "query", schema: { type: "string" }, description: "Filter by source" },
           ],
           responses: {
             "200": {

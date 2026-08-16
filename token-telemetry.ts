@@ -67,6 +67,12 @@ export interface TokenMetricRecord {
   // Latency & Economics
   durationMs: number;
   costEstimateUsd: number;
+
+  // Invocation Metadata & Telemetry Tags
+  diarizationEnabled?: boolean;
+  provider?: "gemini" | "google_cloud_stt" | string;
+  source?: "mic" | "tab" | "upload" | "pipeline" | string;
+  metadata?: Record<string, any>;
 }
 
 export interface TimeSeriesPoint {
@@ -103,6 +109,8 @@ export interface TokenAggregateStats {
   byModel: Record<string, AggregateDimensionStats>;
   byModality: Record<string, AggregateDimensionStats>;
   byStage: Record<string, AggregateDimensionStats>;
+  byDiarization: Record<string, AggregateDimensionStats>;
+  byProvider: Record<string, AggregateDimensionStats>;
 }
 
 export interface TimeSeriesQueryOptions {
@@ -112,6 +120,11 @@ export interface TimeSeriesQueryOptions {
   agent?: string;
   model?: string;
   sessionId?: string;
+  diarizationEnabled?: boolean;
+  provider?: string;
+  source?: string;
+  modality?: string;
+  stage?: string;
   rootDiskDir?: string;
 }
 
@@ -278,6 +291,10 @@ export function recordTokenUsage(params: {
   usage?: RawUsageMetadata;
   promptTokensFallback?: number;
   candidatesTokensFallback?: number;
+  diarizationEnabled?: boolean;
+  provider?: "gemini" | "google_cloud_stt" | string;
+  source?: "mic" | "tab" | "upload" | "pipeline" | string;
+  metadata?: Record<string, any>;
   rootDiskDir?: string;
 }): TokenMetricRecord {
   const now = Date.now();
@@ -323,6 +340,10 @@ export function recordTokenUsage(params: {
     textInputTokens: textTokens,
     durationMs: Math.max(0, params.durationMs || 0),
     costEstimateUsd: cost,
+    diarizationEnabled: params.diarizationEnabled,
+    provider: params.provider || (params.agent === "google_cloud_stt" ? "google_cloud_stt" : "gemini"),
+    source: params.source,
+    metadata: params.metadata,
   };
 
   // 1. In-memory circular buffer
@@ -483,6 +504,11 @@ export function queryTokenTimeSeries(
     if (options.agent && r.agent !== options.agent) return false;
     if (options.model && r.model !== options.model) return false;
     if (options.sessionId && r.sessionId !== options.sessionId) return false;
+    if (options.diarizationEnabled !== undefined && Boolean(r.diarizationEnabled) !== options.diarizationEnabled) return false;
+    if (options.provider && (r.provider || "gemini") !== options.provider) return false;
+    if (options.source && r.source !== options.source) return false;
+    if (options.modality && r.modality !== options.modality) return false;
+    if (options.stage && r.stage !== options.stage) return false;
     return true;
   });
 
@@ -550,7 +576,15 @@ export function queryTokenTimeSeries(
 }
 
 export function queryTokenAggregate(
-  options: { from?: number; to?: number; sessionId?: string; rootDiskDir?: string } = {},
+  options: {
+    from?: number;
+    to?: number;
+    sessionId?: string;
+    diarizationEnabled?: boolean;
+    provider?: string;
+    source?: string;
+    rootDiskDir?: string;
+  } = {},
   recordsSource: TokenMetricRecord[] = memoryBuffer
 ): TokenAggregateStats {
   const now = Date.now();
@@ -562,6 +596,9 @@ export function queryTokenAggregate(
   const filtered = allRecords.filter((r) => {
     if (r.timestampMs < from || r.timestampMs > to) return false;
     if (options.sessionId && r.sessionId !== options.sessionId) return false;
+    if (options.diarizationEnabled !== undefined && Boolean(r.diarizationEnabled) !== options.diarizationEnabled) return false;
+    if (options.provider && (r.provider || "gemini") !== options.provider) return false;
+    if (options.source && r.source !== options.source) return false;
     return true;
   });
 
@@ -577,6 +614,8 @@ export function queryTokenAggregate(
   const modelMap = new Map<string, { tokens: number; requests: number; cost: number }>();
   const modalityMap = new Map<string, { tokens: number; requests: number; cost: number }>();
   const stageMap = new Map<string, { tokens: number; requests: number; cost: number }>();
+  const diarizationMap = new Map<string, { tokens: number; requests: number; cost: number }>();
+  const providerMap = new Map<string, { tokens: number; requests: number; cost: number }>();
 
   const accumulate = (
     map: Map<string, { tokens: number; requests: number; cost: number }>,
@@ -603,6 +642,8 @@ export function queryTokenAggregate(
     accumulate(modelMap, r.model, r);
     accumulate(modalityMap, r.modality, r);
     accumulate(stageMap, r.stage, r);
+    accumulate(diarizationMap, r.diarizationEnabled ? "diarized" : "non_diarized", r);
+    accumulate(providerMap, r.provider || (r.agent === "google_cloud_stt" ? "google_cloud_stt" : "gemini"), r);
   }
 
   const buildDimStats = (map: Map<string, { tokens: number; requests: number; cost: number }>) => {
@@ -632,6 +673,8 @@ export function queryTokenAggregate(
     byModel: buildDimStats(modelMap),
     byModality: buildDimStats(modalityMap),
     byStage: buildDimStats(stageMap),
+    byDiarization: buildDimStats(diarizationMap),
+    byProvider: buildDimStats(providerMap),
   };
 }
 
@@ -654,13 +697,17 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
   try {
     clearMemoryBuffer();
 
-    // 1. Test record creation with modality breakdown
+    // 1. Test record creation with modality breakdown and diarization metadata
     const rec1 = recordTokenUsage({
       model: "gemini-3.7-flash",
       agent: "audio_transcriber",
       stage: "stt",
       modality: "audio",
       durationMs: 350,
+      diarizationEnabled: true,
+      provider: "google_cloud_stt",
+      source: "mic",
+      metadata: { speakerCount: 3, wordCount: 45 },
       usage: {
         promptTokenCount: 300,
         candidatesTokenCount: 25,
@@ -679,14 +726,20 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
     assert(rec1.audioInputTokens === 250, "audio tokens should match 250");
     assert(rec1.textInputTokens === 50, "text tokens should match 50");
     assert(rec1.costEstimateUsd > 0, "costEstimateUsd should be positive");
+    assert(rec1.diarizationEnabled === true, "diarizationEnabled should be true");
+    assert(rec1.provider === "google_cloud_stt", "provider should be google_cloud_stt");
+    assert(rec1.metadata?.speakerCount === 3, "metadata speakerCount should be 3");
 
-    // 2. Test text reasoning agent with thoughts
+    // 2. Test text reasoning agent with thoughts (non-diarized)
     const rec2 = recordTokenUsage({
       model: "gemini-3.7-flash",
       agent: "intent_classifier",
       stage: "plan",
       modality: "text",
       durationMs: 650,
+      diarizationEnabled: false,
+      provider: "gemini",
+      source: "pipeline",
       usage: {
         promptTokenCount: 400,
         candidatesTokenCount: 80,
@@ -700,8 +753,9 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
 
     assert(rec2.thoughtsTokens === 150, "thoughtsTokens should be 150");
     assert(rec2.totalTokens === 630, "totalTokens should be 630");
+    assert(rec2.diarizationEnabled === false, "diarizationEnabled should be false");
 
-    // 3. Test Time-Series Query
+    // 3. Test Time-Series Query with and without diarization filter
     const tsRes = queryTokenTimeSeries({ interval: "1m", rootDiskDir: testRoot });
     assert(tsRes.ok === true, "time-series response should be ok");
     assert(tsRes.points.length > 0, "should have time points");
@@ -710,13 +764,21 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
     assert(activePoint!.totalTokens === 325 + 630, "active point tokens should sum to 955");
     assert(activePoint!.audioTokens === 250, "active point audio tokens should be 250");
 
-    // 4. Test Aggregate Query
+    const tsDiarizedOnly = queryTokenTimeSeries({ interval: "1m", diarizationEnabled: true, rootDiskDir: testRoot });
+    const diarizedPoint = tsDiarizedOnly.points.find((p) => p.requestCount > 0);
+    assert(diarizedPoint?.totalTokens === 325, "diarized-only filter should only include 325 tokens");
+
+    // 4. Test Aggregate Query with byDiarization and byProvider
     const aggRes = queryTokenAggregate({ rootDiskDir: testRoot });
     assert(aggRes.totalTokens === 955, "aggregate totalTokens should match 955");
     assert(aggRes.totalAudioTokens === 250, "aggregate audioTokens should match 250");
     assert(aggRes.requestCount === 2, "aggregate requestCount should be 2");
     assert(aggRes.byAgent["audio_transcriber"] !== undefined, "byAgent should include audio_transcriber");
     assert(aggRes.byAgent["intent_classifier"] !== undefined, "byAgent should include intent_classifier");
+    assert(aggRes.byDiarization["diarized"]?.tokens === 325, "byDiarization diarized should be 325 tokens");
+    assert(aggRes.byDiarization["non_diarized"]?.tokens === 630, "byDiarization non_diarized should be 630 tokens");
+    assert(aggRes.byProvider["google_cloud_stt"]?.requests === 1, "byProvider google_cloud_stt should have 1 request");
+    assert(aggRes.byProvider["gemini"]?.requests === 1, "byProvider gemini should have 1 request");
 
     // 5. Test SSE Subscriber
     let streamReceived = false;

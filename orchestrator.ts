@@ -124,9 +124,15 @@ export async function runOrchestrator(opts: {
   text: string;
   refISO: string;
   liveSummary?: string;
+  diarizationEnabled?: boolean;
+  source?: string;
+  sessionId?: string;
+  userId?: string;
   onStage?: (stage: Stage, payload: any) => void;
 }): Promise<OrchestratorResult> {
   const { stages, text, refISO, liveSummary = "", onStage } = opts;
+  const isDiarized = opts.diarizationEnabled ?? /(?:\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)/.test(text);
+
   // Seeded once, then carried across retries: whatever a completed stage produced is handed back in
   // so the rebuilt tree doesn't recompute it. Callers without a proof stage get `corrected` up front,
   // so every downstream agent reads exactly one key.
@@ -156,7 +162,7 @@ export async function runOrchestrator(opts: {
     const failures = new Map<Stage, any>();
     const iterStartTime = Date.now();
     for await (const ev of runner.runEphemeral({
-      userId: "local",
+      userId: opts.userId || "local",
       newMessage: { role: "user", parts: [{ text }] },
       stateDelta: { ...state },
     })) {
@@ -171,6 +177,11 @@ export async function runOrchestrator(opts: {
           modality: "text",
           durationMs: Date.now() - iterStartTime,
           usage: ev.usageMetadata,
+          diarizationEnabled: isDiarized,
+          provider: "gemini",
+          source: opts.source || "pipeline",
+          sessionId: opts.sessionId,
+          userId: opts.userId,
         });
       }
       if (ev.errorCode && String(ev.errorCode).toUpperCase() !== "STOP") {

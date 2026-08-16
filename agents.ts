@@ -195,14 +195,22 @@ export function classifyError(errEvent: { errorCode?: unknown; errorMessage?: un
 // Stateless agent call: ephemeral session per request, drain events, keep the last text and any
 // grounding metadata. ADK reports model failures as error EVENTS (errorCode/errorMessage), not
 // throws — they must be surfaced here or a 429 looks like an empty answer.
-export async function askAgent(make: AgentFactory, text: string): Promise<{ text: string; grounding?: any }> {
-  return askAgentParts(make, [{ text }]);
+export async function askAgent(
+  make: AgentFactory,
+  text: string,
+  options?: { diarizationEnabled?: boolean; source?: string; metadata?: Record<string, any>; sessionId?: string; userId?: string; stage?: string }
+): Promise<{ text: string; grounding?: any }> {
+  return askAgentParts(make, [{ text }], options);
 }
 
 // Same call, but for a caller (audioTranscriber) whose input isn't plain text — an inlineData part
 // carrying an audio clip instead. Kept as a separate entry point rather than an overload so every
 // existing askAgent call site stays untouched.
-export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{ text: string; grounding?: any }> {
+export async function askAgentParts(
+  make: AgentFactory,
+  parts: any[],
+  options?: { diarizationEnabled?: boolean; source?: string; metadata?: Record<string, any>; sessionId?: string; userId?: string; stage?: string }
+): Promise<{ text: string; grounding?: any }> {
   for (let attempt = 1; ; attempt++) {
     const agent = make(keyCursor.current());
     const runner = new Runner({ appName: "scribant", agent, sessionService, memoryService: getMemoryService() });
@@ -211,7 +219,7 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
     let errEvent: any = null;
     const startTime = Date.now();
     for await (const ev of runner.runEphemeral({
-      userId: "local",
+      userId: options?.userId || "local",
       newMessage: { role: "user", parts },
     })) {
       emitAdkEvent(ev);
@@ -223,10 +231,16 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
         recordTokenUsage({
           model: MODEL,
           agent: agent.name,
-          stage: agent.name === "audio_transcriber" ? "stt" : "standalone_analyze",
+          stage: options?.stage || (agent.name === "audio_transcriber" ? "stt" : "standalone_analyze"),
           modality: agent.name === "audio_transcriber" ? "audio" : "text",
           durationMs: Date.now() - startTime,
           usage: ev.usageMetadata,
+          diarizationEnabled: options?.diarizationEnabled,
+          provider: "gemini",
+          source: options?.source,
+          sessionId: options?.sessionId,
+          userId: options?.userId,
+          metadata: options?.metadata,
         });
       }
     }
