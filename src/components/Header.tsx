@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X } from "lucide-react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap, Activity, BookOpen } from "lucide-react";
 import { AutonomyMode } from "../types";
+
+export type AppTab = "workspace" | "admin" | "docs";
 
 interface HeaderProps {
   token: string | null;
@@ -16,6 +18,9 @@ interface HeaderProps {
   onSetAllowUncertain: (allow: boolean) => void;
   autoRun: boolean;
   onAutoRunChange: (on: boolean) => void;
+  activeTab?: AppTab;
+  onTabChange?: (tab: AppTab) => void;
+  eventsCount?: number;
 }
 
 const AUTONOMY_OPTIONS: { mode: AutonomyMode; label: string; description: string }[] = [
@@ -37,7 +42,10 @@ export default function Header({
   allowUncertain,
   onSetAllowUncertain,
   autoRun,
-  onAutoRunChange
+  onAutoRunChange,
+  activeTab = "workspace",
+  onTabChange,
+  eventsCount = 0,
 }: HeaderProps) {
   const [inputClientId, setInputClientId] = useState(clientId || "");
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -62,9 +70,9 @@ export default function Header({
   const currentRedirectUri = window.location.origin;
 
   return (
-    <div id="app-header-container" className="space-y-4">
+    <div id="app-header-container" className="space-y-3">
 
-      <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 py-4 border-b border-stone-200">
+      <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 py-3 border-b border-stone-200">
         <div className="flex items-center gap-3">
           <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-600">
             <BrainCircuit className="w-6 h-6" />
@@ -104,6 +112,57 @@ export default function Header({
           </button>
         </div>
       </header>
+
+      {/* Top Application Navigation Tabs */}
+      {onTabChange && (
+        <div className="flex items-center justify-between gap-3 pt-0.5">
+          <nav className="flex items-center gap-1.5 p-1 bg-stone-100/90 border border-stone-200/90 rounded-xl shadow-2xs">
+            <button
+              type="button"
+              onClick={() => onTabChange("workspace")}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                activeTab === "workspace"
+                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+              }`}
+            >
+              <BrainCircuit className={`w-4 h-4 ${activeTab === "workspace" ? "text-amber-600" : "text-stone-400"}`} />
+              <span>Workspace</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onTabChange("admin")}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                activeTab === "admin"
+                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+              }`}
+            >
+              <Activity className={`w-4 h-4 ${activeTab === "admin" ? "text-indigo-600" : "text-stone-400"}`} />
+              <span>Administration &amp; Monitoring</span>
+              {eventsCount > 0 && (
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-900 text-stone-100 font-mono font-bold">
+                  {eventsCount}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onTabChange("docs")}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                activeTab === "docs"
+                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+              }`}
+            >
+              <BookOpen className={`w-4 h-4 ${activeTab === "docs" ? "text-purple-600" : "text-stone-400"}`} />
+              <span>API Documentation</span>
+            </button>
+          </nav>
+        </div>
+      )}
 
       <dialog
         ref={dialogRef}

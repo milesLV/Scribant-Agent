@@ -3,16 +3,56 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import { splitTiers, logUserTranscript } from "./server-utils";
-import { captureMemoryEvent } from "./memory";
+import { splitTiers, safeSeg, estimateTokens, computeCompaction } from "./server-utils";
+import {
+  captureMemoryEvent,
+  getMemoryService,
+  ingestTranscriptToMemoryBank,
+  retrieveFromMemoryBank,
+  syncLocalMemoriesToMemoryBank,
+  VertexAiMemoryBankService,
+  getMemoryEvents,
+  clearMemoryEvents,
+  subscribeToMemoryEvents,
+  memoryEvents,
+  getArchiveTokenMetrics,
+  computeMemoryEfficiency,
+} from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber } from "./agents";
+import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
+import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
+import {
+  registerOpenApiRoutes,
+  validatePayload,
+  AnalyzeRequestSchema,
+  TranscribeCorrectRequestSchema,
+  LivePipelineRequestSchema,
+  MemoryIngestRequestSchema,
+  MemoryRetrieveQuerySchema,
+  SearchRequestSchema,
+  TranscribeAudioRequestSchema,
+  ExecuteRequestSchema,
+  TokenStatsQuerySchema,
+  TokenTelemetryTimeSeriesQuerySchema,
+  TokenTelemetryAggregateQuerySchema,
+  EventsQuerySchema,
+  EventsClearRequestSchema,
+} from "./openapi";
+import {
+  queryTokenTimeSeries,
+  queryTokenAggregate,
+  subscribeTokenStream,
+  getMemoryBufferSnapshot,
+} from "./token-telemetry";
 
 const app = express();
 // 15mb covers a base64-encoded ~8-10s audio chunk (see /api/transcribe-audio) with headroom; every
 // other route here sends plain text, well under that.
 app.use(express.json({ limit: "15mb" }));
+
+// OpenAPI specification (/api/openapi.json) and interactive API reference (/docs)
+registerOpenApiRoutes(app);
 
 // 3000 by default: the OAuth redirect URI registered in Google Cloud is per-port.
 const PORT = Number(process.env.PORT) || 3000;
@@ -24,6 +64,22 @@ setLogLevel(LogLevel.WARN); // silence ADK's per-event INFO logging
 const safeCapture = (tag: string, sessionId: unknown, entry: { text: string; plan?: unknown }) => {
   try { captureMemoryEvent(sessionId, entry); }
   catch (e: any) { console.warn(`[${tag}] memory capture failed:`, e?.message || e); }
+};
+
+// Non-blocking Vertex AI Memory Bank ingestion helper
+const safeIngest = (tag: string, sessionId: unknown, entry: { text: string }) => {
+  ingestTranscriptToMemoryBank({
+    text: entry.text,
+    sessionId: safeSeg(sessionId, "session"),
+  }).catch(e => console.warn(`[${tag}] memory bank ingest failed:`, e?.message || e));
+};
+
+// Non-blocking Vertex AI Memory Bank retrieval helper
+const safeRetrieve = (tag: string, query: string, options?: { userId?: string; sessionId?: string }) => {
+  if (!query || !query.trim()) return;
+  retrieveFromMemoryBank(query.trim(), {
+    userId: options?.userId,
+  }).catch(e => console.warn(`[${tag}] memory bank retrieve failed:`, e?.message || e));
 };
 
 // Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
@@ -42,11 +98,15 @@ app.get("/api/config", async (_req, res) => {
 
 app.post("/api/analyze", async (req, res) => {
   try {
-    const { text, currentLocalTime, liveSummary, sessionId } = req.body;
-    if (!text || typeof text !== "string") {
+    const v = validatePayload(AnalyzeRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "Text prompt is required and must be a string." });
       return;
     }
+    const { text, currentLocalTime, liveSummary, sessionId } = v.data;
+
+    // Auto-retrieve relevant past memories for this transcript
+    safeRetrieve("analyze", text, { sessionId: safeSeg(sessionId, "session") });
 
     // Durably save the raw transcript BEFORE calling the model, so the user's words survive even if
     // the plan call below fails — `plan` is omitted for now, filled in once it resolves below. A
@@ -66,6 +126,7 @@ app.post("/api/analyze", async (req, res) => {
     // Phase 2 to eventually sync into Memory Bank. Same "never fail the response over a side write"
     // treatment as the pre-model save above.
     safeCapture("analyze", sessionId, { text, plan: parsed });
+    safeIngest("analyze", sessionId, { text });
 
     res.json(parsed);
   } catch (error: any) {
@@ -74,30 +135,16 @@ app.post("/api/analyze", async (req, res) => {
   }
 });
 
-// Thin, model-free archive write: one 15s segment (or a catch-up flush) of raw dictation, appended
-// as its own JSONL line. Safe to call constantly — no orchestrator/Gemini call, no quota spent.
-app.post("/api/transcript-segment", async (req, res) => {
-  try {
-    const { userId, sessionId, text } = req.body;
-    if (!text || typeof text !== "string") {
-      res.status(400).json({ error: "text is required and must be a string." });
-      return;
-    }
-    logUserTranscript(userId, sessionId, text);
-    res.json({ ok: true });
-  } catch (error: any) {
-    console.error("Transcript segment log failed:", error);
-    res.status(500).json({ error: error.message || "Failed to log transcript segment." });
-  }
-});
+
 
 app.post("/api/transcribe-correct", async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || typeof text !== "string") {
+    const v = validatePayload(TranscribeCorrectRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "Text is required and must be a string." });
       return;
     }
+    const { text } = v.data;
     const { proof } = await runOrchestrator({
       stages: new Set<Stage>(["proof"]),
       text,
@@ -118,11 +165,12 @@ app.post("/api/transcribe-correct", async (req, res) => {
 // Additive by design: /api/analyze, /api/transcribe-correct and /api/search keep their contracts
 // (the evals and the "Analyze Thoughts" finalize button still use them).
 app.post("/api/live", async (req, res) => {
-  const { text, currentLocalTime, liveSummary, withPlan, sessionId } = req.body;
-  if (!text || typeof text !== "string") {
+  const v = validatePayload(LivePipelineRequestSchema, req.body);
+  if (!v.success) {
     res.status(400).json({ error: "Text is required and must be a string." });
     return;
   }
+  const { text, currentLocalTime, liveSummary, withPlan, sessionId } = v.data;
 
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
@@ -153,7 +201,13 @@ app.post("/api/live", async (req, res) => {
     // seconds apart (LIVE_QUIET_MS/LIVE_MAX_WAIT_MS in App.tsx), so this doubles as the auto-save
     // cadence without a second timer. `sessionId` is only set once a recording is underway, so
     // evals and other callers that don't send one simply don't autosave.
-    if (sessionId) safeCapture("live", sessionId, { text, plan: latestPlan });
+    if (sessionId) {
+      safeCapture("live", sessionId, { text, plan: latestPlan });
+      safeIngest("live", sessionId, { text });
+      if (text.length >= 15 && withPlan !== false) {
+        safeRetrieve("live", text, { sessionId: safeSeg(sessionId, "session") });
+      }
+    }
   } catch (error: any) {
     console.error("Live API failed:", error);
     send({ stage: "fatal", error: error?.message || "Live pipeline failed." });
@@ -161,6 +215,267 @@ app.post("/api/live", async (req, res) => {
     res.end();
   }
 });
+
+// Memory Bank: Ingest a transcript or session explicitly into Vertex AI Memory Bank
+app.post("/api/memory/ingest", async (req, res) => {
+  try {
+    const v = validatePayload(MemoryIngestRequestSchema, req.body);
+    if (!v.success) {
+      res.status(400).json({ error: "text is required and must be a string." });
+      return;
+    }
+    const { text, sessionId, userId, plan, timestamp } = v.data;
+    const result = await ingestTranscriptToMemoryBank({
+      text,
+      sessionId: safeSeg(sessionId, "session"),
+      userId: safeSeg(userId, "default_user"),
+      plan,
+      timestamp,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error: any) {
+    console.error("Memory bank ingest failed:", error);
+    res.status(500).json({ error: error.message || "Failed to ingest into memory bank." });
+  }
+});
+
+// Memory Bank: Retrieve memories/facts matching a query from Vertex AI Memory Bank
+const handleMemoryRetrieve = async (req: express.Request, res: express.Response) => {
+  try {
+    const rawQuery = String((req.method === "POST" ? req.body.query : req.query.query) || "").trim();
+    const rawUserId = String((req.method === "POST" ? req.body.userId : req.query.userId) || "").trim();
+    const v = validatePayload(MemoryRetrieveQuerySchema, { query: rawQuery, userId: rawUserId || undefined });
+    if (!v.success) {
+      res.status(400).json({ error: "query is required." });
+      return;
+    }
+    const { query, userId } = v.data;
+    const result = await retrieveFromMemoryBank(query, {
+      userId: userId ? safeSeg(userId, "default_user") : undefined,
+    });
+
+    let answer: string | null = null;
+    if (result.memories.length > 0) {
+      try {
+        const memoryContext = result.memories.map((m, i) => `[Memory ${i + 1} (${m.timestamp})]: ${m.text}`).join("\n\n");
+        const prompt = `User Question: "${query}"\n\nPast Recorded Memories from Vertex AI Memory Bank:\n${memoryContext}\n\nAnswer the user's question directly based on these past memories in 1-2 clear sentences.`;
+        const ans = await askAgent(memoryAnswerer, prompt);
+        answer = ans.text.trim() || null;
+        if (answer) {
+          emitAdkEvent(
+            createEvent({
+              author: "memory",
+              invocationId: `answer-${Date.now()}`,
+              content: {
+                role: "model",
+                parts: [{ text: `[Memory Answer]: ${answer}` }],
+              },
+              actions: createEventActions({
+                stateDelta: {
+                  eventType: "memory:retrieve",
+                  query,
+                  answer,
+                  status: "success",
+                },
+              }),
+            })
+          );
+        }
+      } catch (e: any) {
+        console.warn("[memory] Failed to synthesize direct answer:", e?.message || e);
+      }
+    }
+
+    res.json({ ok: true, answer, ...result });
+  } catch (error: any) {
+    console.error("Memory bank retrieval failed:", error);
+    res.status(500).json({ error: error.message || "Failed to retrieve from memory bank." });
+  }
+};
+app.post("/api/memory/retrieve", handleMemoryRetrieve);
+app.post("/api/memory/search", handleMemoryRetrieve);
+app.get("/api/memory/retrieve", handleMemoryRetrieve);
+app.get("/api/memory/search", handleMemoryRetrieve);
+
+// Memory Bank: Synchronize all local session files to Vertex AI Memory Bank
+app.post("/api/memory/sync", async (_req, res) => {
+  try {
+    const result = await syncLocalMemoriesToMemoryBank();
+    res.json({ ok: true, ...result });
+  } catch (error: any) {
+    console.error("Memory bank sync failed:", error);
+    res.status(500).json({ error: error.message || "Failed to sync local memory to memory bank." });
+  }
+});
+
+// Token Telemetry & Context Compaction metrics API
+app.get("/api/tokens/stats", (req, res) => {
+  try {
+    const rawText = String(req.query.text || "").trim();
+    const summaryText = String(req.query.summary || "").trim();
+    const compaction = computeCompaction(rawText, summaryText);
+    const archive = getArchiveTokenMetrics();
+    const efficiency = computeMemoryEfficiency([], rawText);
+    res.json({
+      ok: true,
+      compaction,
+      archive,
+      efficiency,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to fetch token stats" });
+  }
+});
+
+// Real-time Token Telemetry Time-Series endpoint (minute, second, or hourly buckets)
+app.get("/api/tokens/telemetry/timeseries", (req, res) => {
+  try {
+    const validation = validatePayload(TokenTelemetryTimeSeriesQuerySchema, req.query);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error });
+      return;
+    }
+    const query = validation.data;
+    const result = queryTokenTimeSeries({
+      from: query.from,
+      to: query.to,
+      interval: query.interval,
+      agent: query.agent,
+      model: query.model,
+      sessionId: query.sessionId,
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error("Token telemetry time-series query failed:", error);
+    res.status(500).json({ error: error.message || "Failed to query token time-series" });
+  }
+});
+
+// Aggregated Token Telemetry endpoint (by model, sub-agent, modality, and pipeline stage)
+app.get("/api/tokens/telemetry/aggregate", (req, res) => {
+  try {
+    const validation = validatePayload(TokenTelemetryAggregateQuerySchema, req.query);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error });
+      return;
+    }
+    const query = validation.data;
+    const result = queryTokenAggregate({
+      from: query.from,
+      to: query.to,
+      sessionId: query.sessionId,
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error("Token telemetry aggregate query failed:", error);
+    res.status(500).json({ error: error.message || "Failed to query token aggregate" });
+  }
+});
+
+// Real-Time Token Telemetry Server-Sent Events (SSE) Stream
+app.get("/api/tokens/telemetry/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  // Send initial snapshot of recent records
+  const recent = getMemoryBufferSnapshot().slice(-20);
+  for (const rec of recent) {
+    res.write(`data: ${JSON.stringify(rec)}\n\n`);
+  }
+
+  // Subscribe to live token events
+  const unsubscribe = subscribeTokenStream((rec) => {
+    try {
+      res.write(`data: ${JSON.stringify(rec)}\n\n`);
+    } catch {
+      // Ignore write errors on disconnected clients
+    }
+  });
+
+  req.on("close", () => {
+    unsubscribe();
+  });
+});
+
+// Memory Bank Archive & Efficiency summary API
+app.get("/api/memory/stats", (_req, res) => {
+  try {
+    const archive = getArchiveTokenMetrics();
+    const efficiency = computeMemoryEfficiency([], "");
+    res.json({ ok: true, archive, efficiency });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to fetch memory stats" });
+  }
+});
+
+// Memory & ADK Events: Query events with multi-dimensional filtering (in-memory or disk)
+const handleGetEvents = (req: any, res: any) => {
+  try {
+    const type = req.query.type as string | undefined;
+    const author = req.query.author as string | undefined;
+    const status = req.query.status as string | undefined;
+    const search = (req.query.search || req.query.q) as string | undefined;
+    const sessionId = (req.query.sessionId || req.query.session) as string | undefined;
+    const fromDisk = req.query.fromDisk === "true" || req.query.source === "disk";
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const events = getMemoryEvents({ type, author, status, search, sessionId, fromDisk, limit });
+    res.json({ ok: true, count: events.length, events });
+  } catch (error: any) {
+    console.error("Failed to fetch memory/adk events:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch events." });
+  }
+};
+app.get("/api/memory/events", handleGetEvents);
+app.get("/api/adk/events", handleGetEvents);
+
+// Memory & ADK Events: Clear recorded events history (optionally on disk)
+const handleClearEvents = (req: any, res: any) => {
+  try {
+    const clearDisk = req.body?.clearDisk === true || req.query.clearDisk === "true";
+    clearMemoryEvents({ clearDisk });
+    res.json({ ok: true, clearedDisk: clearDisk });
+  } catch (error: any) {
+    console.error("Failed to clear memory events:", error);
+    res.status(500).json({ error: error.message || "Failed to clear memory events." });
+  }
+};
+app.post("/api/memory/events/clear", handleClearEvents);
+app.post("/api/adk/events/clear", handleClearEvents);
+
+// Memory & ADK Events: Real-time Server-Sent Events (SSE) stream
+const handleEventStream = (req: any, res: any) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  // Send initial history
+  const initialEvents = getMemoryEvents({ limit: 100 });
+  res.write(`data: ${JSON.stringify({ type: "init", events: initialEvents })}\n\n`);
+
+  // Subscribe to real-time events
+  const unsubscribe = subscribeToMemoryEvents((event) => {
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ type: "event", event })}\n\n`);
+    }
+  });
+
+  // Keep-alive heartbeat ping every 15s
+  const pingInterval = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(": ping\n\n");
+    }
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(pingInterval);
+    unsubscribe();
+  });
+};
+app.get("/api/memory/events/stream", handleEventStream);
+app.get("/api/adk/events/stream", handleEventStream);
 
 // Grounded search: agent answer + the sources it grounded on, split into the two UI tiers.
 async function groundedSearch(query: string) {
@@ -182,11 +497,12 @@ DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`)
 
 app.post("/api/search", async (req, res) => {
   try {
-    const { query } = req.body;
-    if (!query || typeof query !== "string") {
+    const v = validatePayload(SearchRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "Query is required and must be a string." });
       return;
     }
+    const { query } = v.data;
 
     res.json(await groundedSearch(query));
   } catch (error: any) {
@@ -199,11 +515,12 @@ app.post("/api/search", async (req, res) => {
 // expected to POST per-chunk (~8-10s of opus, base64), never accumulate a whole session client-side.
 app.post("/api/transcribe-audio", async (req, res) => {
   try {
-    const { audio, mimeType, source } = req.body;
-    if (!audio || typeof audio !== "string") {
+    const v = validatePayload(TranscribeAudioRequestSchema, req.body);
+    if (!v.success) {
       res.status(400).json({ error: "audio (base64) is required and must be a string." });
       return;
     }
+    const { audio, mimeType, source } = v.data;
     const { text } = await askAgentParts(audioTranscriber, [
       { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: audio } },
     ]);
@@ -214,54 +531,164 @@ app.post("/api/transcribe-audio", async (req, res) => {
   }
 });
 
-// Execute ONE reviewed item. The review-then-act gate is the client UI: this is only called after
-// a human approves an item, with their OAuth token forwarded per request. Sandbox mode never
-// reaches here (the client simulates locally when signed out).
+// Execute ONE reviewed item. Supports both authenticated Google Workspace calls and sandbox mode.
 app.post("/api/execute", async (req, res) => {
   try {
     const { kind, item, accessToken, action, id } = req.body;
-    if (!accessToken || typeof accessToken !== "string") {
-      res.status(400).json({ error: "accessToken is required (sandbox mode executes client-side)." });
-      return;
-    }
-    // Undo: delete exactly the resource a previous create returned the id for. Keyed by the action
-    // being undone; Drive saves have no undo.
+    const isSandbox = !accessToken || accessToken === "sandbox";
+
+    // 1. Emit tool_call Event
+    emitAdkEvent(
+      createEvent({
+        author: "workspace_tools",
+        invocationId: `tool-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionCall: {
+                name: action === "delete" ? `delete_${kind}` : kind,
+                args: action === "delete" ? { id, kind } : item || {},
+                id: `call-${Date.now()}`,
+              },
+            },
+          ],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "tool_call",
+            toolName: kind,
+            action: action || "execute",
+            args: item,
+            mode: isSandbox ? "sandbox" : "google_api",
+          },
+        }),
+      })
+    );
+
+    // Undo: delete exactly the resource a previous create returned the id for.
     if (action === "delete") {
-      const del = { create_calendar_event: gcalDeleteEvent, create_task: gtasksDeleteTask }[kind as string];
-      if (!del) {
-        res.status(400).json({ error: `Unknown kind "${kind}" (expected "create_calendar_event" or "create_task").` });
-        return;
+      if (!isSandbox) {
+        const del = { create_calendar_event: gcalDeleteEvent, create_task: gtasksDeleteTask }[kind as string];
+        if (!del) {
+          res.status(400).json({ error: `Unknown kind "${kind}" (expected "create_calendar_event" or "create_task").` });
+          return;
+        }
+        if (!id || typeof id !== "string") {
+          res.status(400).json({ error: "delete requires the created resource id." });
+          return;
+        }
+        await del(accessToken, id);
       }
-      if (!id || typeof id !== "string") {
-        res.status(400).json({ error: "delete requires the created resource id." });
-        return;
-      }
-      await del(accessToken, id);
+
+      emitAdkEvent(
+        createEvent({
+          author: "workspace_tools",
+          invocationId: `tool-${Date.now()}`,
+          content: {
+            role: "model",
+            parts: [
+              {
+                functionResponse: {
+                  name: `delete_${kind}`,
+                  response: { ok: true, id, status: "deleted", mode: isSandbox ? "sandbox" : "google_api" },
+                  id: `call-${Date.now()}`,
+                },
+              },
+            ],
+          },
+          actions: createEventActions({
+            stateDelta: {
+              eventType: "tool_result",
+              toolName: `delete_${kind}`,
+              status: "success",
+            },
+          }),
+        })
+      );
+
       res.json({ ok: true });
       return;
     }
+
     if (!item || typeof item !== "object") {
       res.status(400).json({ error: "item is required." });
       return;
     }
+
     // `kind` IS the registry action name — the client sends what the agent would call.
     const workspaceAction = WORKSPACE_ACTIONS[kind as string];
     if (!workspaceAction) {
       res.status(400).json({ error: `Unknown kind "${kind}" (expected ${Object.keys(WORKSPACE_ACTIONS).map(k => `"${k}"`).join(", ")}).` });
       return;
     }
-    // The action's own schema is the request validation: an item shape the model could not have
-    // proposed is one this endpoint will not execute either.
+
+    // The action's own schema is the request validation
     const parsed = workspaceAction.parameters.safeParse(item);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       res.status(400).json({ error: `${kind} item is invalid: ${issue.path.join(".") || "item"} — ${issue.message}.` });
       return;
     }
-    const result = await workspaceAction.run(accessToken, parsed.data);
-    res.json({ id: result.eventId ?? result.taskId ?? result.folderId ?? result.fileId });
+
+    let resultId: string;
+    if (isSandbox) {
+      resultId = `mock-${kind}-${Date.now()}`;
+    } else {
+      const result: any = await workspaceAction.run(accessToken, parsed.data);
+      resultId = String(result.eventId ?? result.taskId ?? result.folderId ?? result.fileId ?? `id-${Date.now()}`);
+    }
+
+    // Emit tool_result Event
+    emitAdkEvent(
+      createEvent({
+        author: "workspace_tools",
+        invocationId: `tool-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [
+            {
+              functionResponse: {
+                name: kind,
+                response: { id: resultId, ...parsed.data, status: "created", mode: isSandbox ? "sandbox" : "google_api" },
+                id: `call-${Date.now()}`,
+              },
+            },
+          ],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "tool_result",
+            toolName: kind,
+            status: "success",
+            resultId,
+            item: parsed.data,
+            mode: isSandbox ? "sandbox" : "google_api",
+          },
+        }),
+      })
+    );
+
+    res.json({ id: resultId });
   } catch (error: any) {
     console.error("Execute API failed:", error);
+    emitAdkEvent(
+      createEvent({
+        author: "workspace_tools",
+        invocationId: `tool-${Date.now()}`,
+        content: {
+          role: "model",
+          parts: [{ text: `Tool execution failed: ${error.message || String(error)}` }],
+        },
+        actions: createEventActions({
+          stateDelta: {
+            eventType: "tool_result",
+            status: "error",
+            error: error.message || String(error),
+          },
+        }),
+      })
+    );
     res.status(500).json({ error: error.message || "Failed to execute action." });
   }
 });
@@ -296,11 +723,23 @@ async function main() {
     });
   }
 
+  // Automatically sync local disk sessions to Vertex AI Memory Bank on startup
+  syncLocalMemoriesToMemoryBank().then(({ syncedCount }) => {
+    if (syncedCount > 0) {
+      console.log(`[memory] Synced ${syncedCount} session(s) from disk into Vertex AI Memory Bank.`);
+    }
+  }).catch(e => console.warn("[memory] Startup memory sync failed:", e?.message || e));
+
   app.listen(PORT, "127.0.0.1", () => {
+    const memService = getMemoryService();
+    const isVertexMem = memService instanceof VertexAiMemoryBankService;
+    const memDesc = isVertexMem
+      ? `Vertex AI Memory Bank (${process.env.VERTEX_AI_AGENT_ENGINE_ID || process.env.AGENT_ENGINE_ID || "active"})`
+      : "Custom Memory Bank";
     const authDesc = usingVertex
       ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`
       : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""} | Model: ${MODEL}`;
-    console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc})`);
+    console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc} | ${memDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
   });
 }

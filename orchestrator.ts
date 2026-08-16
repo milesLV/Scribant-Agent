@@ -21,11 +21,14 @@ import type { Event, InvocationContext } from "@google/adk";
 import { createEvent, createEventActions } from "@google/adk";
 import {
   KEYS, keyCursor, nextAttempt, classifyError, sleep, sessionService,
-  proofreader, liveSummarizer, intentClassifier,
+  proofreader, liveSummarizer, intentClassifier, MODEL,
 } from "./agents";
 import { buildProofreadPrompt, parseProofread } from "./transcriber";
 import { applyCorrections } from "./src/utils/transcript";
 import { cleanJsonString, resolvePlanDates } from "./server-utils";
+import { getMemoryService } from "./memory";
+import { emitAdkEvent } from "./adk-events";
+import { recordTokenUsage } from "./token-telemetry";
 
 export type Stage = "proof" | "summary" | "plan";
 
@@ -144,18 +147,33 @@ export async function runOrchestrator(opts: {
       appName: "scribant",
       agent: buildOrchestrator(keyCursor.current(), remaining),
       sessionService,
+      memoryService: getMemoryService(),
     });
 
     // Drain the whole run even after an error: a failing sub-agent's PARALLEL sibling may still be
     // in flight, and abandoning the generator there would throw away a summary that succeeded — and
     // then re-bill it on the retry. Downstream steps stay silent when their input never arrived.
     const failures = new Map<Stage, any>();
+    const iterStartTime = Date.now();
     for await (const ev of runner.runEphemeral({
       userId: "local",
       newMessage: { role: "user", parts: [{ text }] },
       stateDelta: { ...state },
     })) {
-      if (ev.errorCode) {
+      emitAdkEvent(ev);
+      if (ev.usageMetadata) {
+        const author = ev.author || "orchestrator";
+        const stage = STAGE_OF[author] || "orchestrator";
+        recordTokenUsage({
+          model: MODEL,
+          agent: author,
+          stage,
+          modality: "text",
+          durationMs: Date.now() - iterStartTime,
+          usage: ev.usageMetadata,
+        });
+      }
+      if (ev.errorCode && String(ev.errorCode).toUpperCase() !== "STOP") {
         const { msg } = classifyError(ev);
         // Errors are authored by the sub-agent that raised them and STAGE_OF covers the whole tree,
         // so an unknown author is not a stage to retry — it ends the run rather than spinning.

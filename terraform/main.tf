@@ -85,13 +85,15 @@ resource "local_file" "credentials_json" {
   count    = var.org_id != "" ? 1 : 0
   filename = "${path.module}/../credentials.json"
   content  = jsonencode({
-    installed = {
+    web = {
       client_id                   = google_iap_client.project_client[0].client_id
       project_id                  = google_project.project.project_id
       auth_uri                    = "https://accounts.google.com/o/oauth2/auth"
       token_uri                   = "https://oauth2.googleapis.com/token"
       auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
       client_secret               = google_iap_client.project_client[0].secret
+      redirect_uris               = ["http://localhost:3000", "http://127.0.0.1:3000"]
+      javascript_origins          = ["http://localhost:3000", "http://127.0.0.1:3000"]
     }
   })
   file_permission = "0600"

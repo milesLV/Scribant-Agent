@@ -65,6 +65,7 @@ variable "gcp_services" {
 variable "support_email" {
   type        = string
   default     = ""
-  description = "Support email for the internal OAuth consent screen (must be your email address or an organization Google Group)."
+  description = "Support email for the internal OAuth consent screen (must be your email address or an organization Google Group). If empty, defaults to active gcloud identity."
 }
+
 

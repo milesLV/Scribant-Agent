@@ -82,8 +82,8 @@ export default function AudioRecorder({
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
 
-  // Web Speech stops itself on silence; we auto-restart unless the user (or a fatal error) stopped it.
-  const manualStopRef = useRef(false);
+  // Persistent desired listening state. Web Speech stops itself on silence; we auto-restart only if shouldListenRef is true.
+  const shouldListenRef = useRef(false);
 
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
   // Where to place the cursor once the read-only view swaps for the textarea — computed from the
@@ -210,13 +210,18 @@ export default function AudioRecorder({
     rec.lang = "en-US";
 
     rec.onstart = () => {
+      if (!shouldListenRef.current) {
+        try { rec.abort(); } catch {}
+        setIsListening(false);
+        return;
+      }
       ignoreSpeechResultsRef.current = false;
       setIsListening(true);
       setRecognitionError(null);
     };
 
     rec.onresult = (event: any) => {
-      if (ignoreSpeechResultsRef.current) return;
+      if (ignoreSpeechResultsRef.current || !shouldListenRef.current) return;
 
       let finalStr = "";
       let interimStr = "";
@@ -247,21 +252,25 @@ export default function AudioRecorder({
     };
 
     rec.onerror = (event: any) => {
+      // If the user intentionally stopped/aborted speech recognition, suppress the expected error
+      if (!shouldListenRef.current || event.error === "aborted") {
+        return;
+      }
       console.error("Speech recognition error:", event.error);
       if (event.error === "not-allowed" || event.error === "service-not-allowed" || event.error === "audio-capture") {
-        manualStopRef.current = true; // fatal — don't auto-restart
+        shouldListenRef.current = false;
+        setIsListening(false);
         setRecognitionError("Microphone access denied. Please grant microphone permissions or type your thoughts below!");
       } else if (event.error === "no-speech") {
-        // Safe to ignore minor timeouts — onend will auto-restart.
+        // Safe to ignore minor timeouts — onend will auto-restart only if shouldListenRef is true.
       } else {
         setRecognitionError(`Speech recognition error: ${event.error}`);
       }
     };
 
     rec.onend = () => {
-      // Keep listening through silence-driven stops; only quit when manually stopped.
-      if (manualStopRef.current) {
-        manualStopRef.current = false;
+      // Auto-restart only if the user explicitly wants to keep listening
+      if (!shouldListenRef.current) {
         setIsListening(false);
         return;
       }
@@ -269,6 +278,7 @@ export default function AudioRecorder({
         rec.start();
       } catch {
         setIsListening(false);
+        shouldListenRef.current = false;
       }
     };
 
@@ -276,8 +286,8 @@ export default function AudioRecorder({
 
     return () => {
       if (recognitionRef.current) {
-        manualStopRef.current = true; // unmounting — don't let onend restart
-        recognitionRef.current.abort();
+        shouldListenRef.current = false;
+        try { recognitionRef.current.abort(); } catch {}
       }
     };
   }, []);
@@ -294,10 +304,17 @@ export default function AudioRecorder({
   };
 
   const handleToggleListening = () => {
-    if (isListening) {
-      manualStopRef.current = true;
-      recognitionRef.current?.stop();
+    if (isListening || shouldListenRef.current) {
+      shouldListenRef.current = false;
+      setIsListening(false);
+      setInterimTranscript("");
+      try {
+        recognitionRef.current?.abort();
+      } catch {
+        try { recognitionRef.current?.stop(); } catch {}
+      }
     } else {
+      shouldListenRef.current = true;
       ignoreSpeechResultsRef.current = false;
       setRecognitionError(null);
       setIsEditingTranscript(false);
@@ -308,6 +325,8 @@ export default function AudioRecorder({
       } catch (err: any) {
         console.error("Failed to start voice recognition:", err);
         setRecognitionError("Could not initialize microphone. Please reload or dump your thoughts directly in the typewriter box.");
+        shouldListenRef.current = false;
+        setIsListening(false);
       }
     }
   };
@@ -317,9 +336,11 @@ export default function AudioRecorder({
     const fullText = (transcript + " " + interimTranscript).trim();
     if (!fullText) return;
 
-    if (isListening) {
-      manualStopRef.current = true;
-      recognitionRef.current?.stop();
+    if (isListening || shouldListenRef.current) {
+      shouldListenRef.current = false;
+      setIsListening(false);
+      setInterimTranscript("");
+      try { recognitionRef.current?.abort(); } catch {}
     }
 
     setIsEditingTranscript(false);
@@ -327,6 +348,10 @@ export default function AudioRecorder({
   };
 
   const handleClear = () => {
+    shouldListenRef.current = false;
+    setIsListening(false);
+    ignoreSpeechResultsRef.current = true;
+    try { recognitionRef.current?.abort(); } catch {}
     setTranscript("");
     setInterimTranscript("");
     setIsEditingTranscript(false);
@@ -393,6 +418,39 @@ export default function AudioRecorder({
     // Text spoken/typed after the last proofread isn't scored yet — render it plain (no highlight).
     if (transcript.length > base.length) out.push(<span key="unproofed">{transcript.slice(base.length)}</span>);
     return out;
+  };
+
+  // Render raw or unproofed text with speaker tags highlighted as clean badges
+  const renderSpeakerText = (text: string) => {
+    // Matches tags like "[Meeting: Alice]", "[Meeting]", "Speaker 1:", "Alice:", "You:"
+    const regex = /(\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)/g;
+    const parts = text.split(regex);
+    if (parts.length <= 1) return text;
+
+    return parts.map((part, idx) => {
+      if (!part) return null;
+      const isMeetingTag = part.startsWith("[Meeting");
+      const isSpeakerTag = /^(?:Speaker\s*\d+|You|[A-Z][a-z]+):$/.test(part.trim());
+      if (isMeetingTag || isSpeakerTag) {
+        const rawLabel = part.replace(/^\[|\]$/g, "").replace(/:$/, "").trim();
+        const isYou = rawLabel.toLowerCase().includes("you");
+        return (
+          <span
+            key={idx}
+            className={`inline-block text-[9px] font-bold font-mono px-1.5 py-0.5 rounded mr-1.5 align-middle select-none ${
+              isYou
+                ? "bg-blue-100 text-blue-800 border border-blue-200/70"
+                : isMeetingTag
+                ? "bg-purple-100 text-purple-800 border border-purple-200/70"
+                : "bg-amber-100 text-amber-800 border border-amber-200/70"
+            }`}
+          >
+            {rawLabel}
+          </span>
+        );
+      }
+      return <span key={idx}>{part}</span>;
+    });
   };
 
   return (
@@ -553,7 +611,7 @@ export default function AudioRecorder({
               >
                 {(transcript || interimTranscript) ? (
                   <span className="leading-relaxed font-sans text-stone-750">
-                    {words && transcript.startsWith(proofedTextRef.current) ? renderProofed() : transcript}
+                    {words && transcript.startsWith(proofedTextRef.current) ? renderProofed() : renderSpeakerText(transcript)}
                     {interimTranscript && (
                       <span className="text-amber-500 italic font-medium animate-pulse">
                         {(transcript && !/\s$/.test(transcript) ? " " : "") + interimTranscript}

@@ -10,12 +10,25 @@ import type { ReadonlyContext } from "@google/adk";
 import { z } from "zod";
 import { SKILLS, skillSchemaProperties } from "./skills";
 import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcriber";
+import { getMemoryService, autoMemoryIngestCallback, memoryBankBeforeModelCallback } from "./memory";
+import { emitAdkEvent } from "./adk-events";
+import { recordTokenUsage } from "./token-telemetry";
 
 export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.6-flash";
 
 if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
   process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;
 }
+
+const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || "");
+if (usingVertex) {
+  // In Vertex AI mode, auth is handled via Google Cloud ADC / IAM. Clean API key env vars
+  // so the Google GenAI SDK does not log redundant precedence warnings on every agent invocation.
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_GENAI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
+}
+
 
 // Sub-agents read their input from session state rather than the user message: inside the
 // orchestrator the message is the raw transcript, but everything downstream of the proofreader must
@@ -81,8 +94,16 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
 export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
   name: "audio_transcriber",
   model: new Gemini({ model: MODEL, apiKey }),
-  instruction: `Transcribe the spoken audio verbatim as plain text. No markdown, no speaker labels, no timestamps, no commentary — just the words said, in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
+  instruction: `Transcribe the spoken audio verbatim. If multiple distinct speakers are talking, separate their turns and prefix each turn with a clear speaker label (e.g., 'Speaker 1: ...', 'Speaker 2: ...'). If speakers introduce themselves or address each other by name (e.g., 'Hi Alice', 'Thanks Bob'), use their actual names as the speaker label. If only one person is speaking, transcribe verbatim without speaker labels. No markdown formatting, timestamps, or commentary — return only the transcribed speech in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
   includeContents: "none",
+});
+
+// Answers user questions synthesized from retrieved past session memories
+export const memoryAnswerer: AgentFactory = (apiKey) => new LlmAgent({
+  name: "memory_answerer",
+  model: new Gemini({ model: MODEL, apiKey }),
+  instruction: "You are a helpful personal memory assistant. Based strictly on the user's past session memories provided in the prompt, answer their question directly, clearly, and concisely (1-2 sentences). If the memories do not contain the answer, say so politely.",
+  includeContents: "default",
 });
 
 // Prompt criteria + schema are generated once from the skill registry (skills.ts). Order is fixed:
@@ -104,8 +125,9 @@ export const intentClassifier: AgentFactory = (apiKey) => new LlmAgent({
   name: "intent_classifier",
   model: new Gemini({ model: MODEL, apiKey }),
   instruction: (ctx) => `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
-The user is speaking or writing their thoughts in an unfiltered "brain dump" format.
-Analyze the provided stream of thoughts and categorize segments into different structured action buckets.
+The user is speaking or writing their thoughts in an unfiltered "brain dump" format or recording a meeting with multiple speakers.
+Analyze the provided stream of thoughts/dialogue and categorize segments into different structured action buckets.
+If speaker labels are present in the transcript (e.g., 'You:', 'Alice:', 'Speaker 1:'), attribute extracted tasks with the responsible speaker in 'assignee' (the person who volunteered or was assigned) and 'requestedBy' (the person who requested it). Attribute calendar events with 'speaker'.
 
 AI Live Notes Summary: "${ctx.state.get<string>("liveSummary") ?? ""}"
 
@@ -124,6 +146,7 @@ Stream of thoughts:
   includeContents: "none",
   disallowTransferToParent: true,
   disallowTransferToPeers: true,
+  beforeModelCallback: memoryBankBeforeModelCallback,
 });
 
 // ---- the runner ------------------------------------------------------------
@@ -182,18 +205,30 @@ export async function askAgent(make: AgentFactory, text: string): Promise<{ text
 export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{ text: string; grounding?: any }> {
   for (let attempt = 1; ; attempt++) {
     const agent = make(keyCursor.current());
-    const runner = new Runner({ appName: "scribant", agent, sessionService });
+    const runner = new Runner({ appName: "scribant", agent, sessionService, memoryService: getMemoryService() });
     let out = "";
     let grounding: any;
     let errEvent: any = null;
+    const startTime = Date.now();
     for await (const ev of runner.runEphemeral({
       userId: "local",
       newMessage: { role: "user", parts },
     })) {
-      if (ev.errorCode) errEvent = ev;
+      emitAdkEvent(ev);
+      if (ev.errorCode && String(ev.errorCode).toUpperCase() !== "STOP") errEvent = ev;
       const t = ev.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") ?? "";
       if (t) out = t;
       if (ev.groundingMetadata) grounding = ev.groundingMetadata;
+      if (ev.usageMetadata) {
+        recordTokenUsage({
+          model: MODEL,
+          agent: agent.name,
+          stage: agent.name === "audio_transcriber" ? "stt" : "standalone_analyze",
+          modality: agent.name === "audio_transcriber" ? "audio" : "text",
+          durationMs: Date.now() - startTime,
+          usage: ev.usageMetadata,
+        });
+      }
     }
     if (!errEvent) return { text: out, grounding };
 
@@ -243,6 +278,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(keyOf(liveSummarizer("k-test")), "k-test");
   assert.equal(keyOf(intentClassifier("k-2")), "k-2");
   assert.equal(keyOf(proofreader("k-3")), "k-3");
+  assert.equal(intentClassifier("k").canonicalBeforeModelCallbacks.length, 1);
 
   // Sub-agents read their input from state, not from the user message — an instruction that ignored
   // state would silently summarize/classify an empty transcript inside the orchestrator.

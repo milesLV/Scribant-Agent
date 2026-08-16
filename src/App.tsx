@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from "react";
-import Header from "./components/Header";
+import Header, { AppTab } from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
+import AdminMonitoring from "./components/AdminMonitoring";
+import ApiDocsView from "./components/ApiDocsView";
 import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
@@ -27,16 +29,7 @@ const PLAN_MIN_GROWTH = 80;
 const LIVE_QUIET_MS = 2000;
 const LIVE_MAX_WAIT_MS = 6000;
 
-// How often the raw dictation gets archived to disk as its own JSONL segment (POST
-// /api/transcript-segment), independent of the proofread/summarize/classify cycle above — a pure
-// disk write, so this can run on a fixed cadence without touching Gemini quota at all.
-const SEGMENT_FLUSH_MS = 15000;
 
-// Single-user app — no per-account or per-browser identity to resolve for the transcript archive.
-// One fixed user, one fixed session; "active" vs "inactive" is just whether liveTranscript is
-// currently non-empty, not a new id minted per recording.
-const TRANSCRIPT_USER_ID = "default_user";
-const TRANSCRIPT_SESSION_ID = "session";
 
 // State that's just mirrored to localStorage verbatim (no expiry/removal branching like the token
 // has) — one hook instead of a bespoke init-then-useEffect pair per field. Old plain-string values
@@ -81,6 +74,8 @@ export default function App() {
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
+  const [activeTab, setActiveTab] = useLocalStorage<AppTab>("active_app_tab", "workspace");
+  const [eventsCount, setEventsCount] = useState(0);
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -109,33 +104,10 @@ export default function App() {
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
-
-  // How many characters of liveTranscript have already been sent as segments — the delta past this
-  // point is what the next flush sends, never the whole growing transcript again. Resets to 0
-  // whenever liveTranscript goes back to empty (recording stopped/cleared).
-  const flushedLenRef = useRef(0);
-  // Mirrors liveTranscript for the segment-flush interval (created once on mount, so its closure
-  // would otherwise see a stale value) — same "assign during render" idiom AudioRecorder.tsx uses
-  // for transcriptRef/editingRef.
-  const liveTranscriptRef = useRef("");
-  liveTranscriptRef.current = liveTranscript;
-
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
   };
-
-  // Fire-and-forget archive write for one segment of raw dictation — never blocks or fails the
-  // capture loop; a lost segment just means a smaller gap in the archive, not a broken session.
-  const flushTranscriptSegment = (text: string) => {
-    if (!text.trim()) return;
-    fetch("/api/transcript-segment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId: TRANSCRIPT_USER_ID, sessionId: TRANSCRIPT_SESSION_ID, text }),
-    }).catch(e => console.warn("[transcript-segment] flush failed:", e));
-  };
-
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage).
   const toAnalysisResult = (rawRes: any, rawText: string): AnalysisResult => ({
     summary: rawRes.ideasSummary || "",
@@ -298,10 +270,6 @@ export default function App() {
   useEffect(() => {
     const text = liveTranscript.trim();
     if (!text) {
-      // Recording stopped/cleared — catch up any trailing text the 15s interval hasn't flushed
-      // yet before resetting, so the last few seconds aren't lost.
-      flushTranscriptSegment(liveTranscript.slice(flushedLenRef.current));
-      flushedLenRef.current = 0;
       setLiveDraft(null);
       lastSentTextRef.current = "";
       lastPlannedLenRef.current = 0;
@@ -321,19 +289,7 @@ export default function App() {
     return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
   }, [liveTranscript, autoRun]);
 
-  // Raw-dictation archive, entirely independent of the debounced proofread/summary/plan cycle
-  // above: flushes whatever's new since the last tick as its own segment every SEGMENT_FLUSH_MS,
-  // regardless of pauses or autoRun. One interval for the app's lifetime — reads refs, not state,
-  // so it never needs to be recreated as liveTranscript changes.
-  useEffect(() => {
-    const id = setInterval(() => {
-      const text = liveTranscriptRef.current;
-      if (text.length <= flushedLenRef.current) return; // nothing new since the last flush
-      flushTranscriptSegment(text.slice(flushedLenRef.current));
-      flushedLenRef.current = text.length;
-    }, SEGMENT_FLUSH_MS);
-    return () => clearInterval(id);
-  }, []);
+
 
   // Sync selectedRunId to live-draft or fallback to archive
   useEffect(() => {
@@ -631,96 +587,116 @@ export default function App() {
           onSetAllowUncertain={setAllowUncertain}
           autoRun={autoRun}
           onAutoRunChange={setAutoRun}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          eventsCount={eventsCount}
         />
 
-        {/* Sync Mode Info Header banner */}
-        {!token && (
-          <div className="bg-amber-50 border border-amber-200/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-inner">
-            <div className="flex items-start gap-2.5">
-              <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-              <div className="space-y-0.5">
-                <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
-                <p className="text-[11px] text-stone-500 leading-normal font-sans">
-                  No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
-                </p>
+        {/* View 1: Workspace Tab */}
+        {activeTab === "workspace" && (
+          <div className="space-y-6">
+            {/* Sync Mode Info Header banner */}
+            {!token && (
+              <div className="bg-amber-50 border border-amber-200/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-inner">
+                <div className="flex items-start gap-2.5">
+                  <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
+                    <p className="text-[11px] text-stone-500 leading-normal font-sans">
+                      No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleGoogleSignIn}
+                  className="px-4.5 py-2 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-stone-100 hover:text-white rounded-lg border border-stone-950 shadow-sm flex items-center justify-center gap-1.5 transition-all self-start md:self-auto shrink-0 w-full md:w-auto"
+                >
+                  <FolderSync className="w-4 h-4" /> Sign in with Google
+                </button>
               </div>
+            )}
+
+            {/* Content layout: Top Row (Microphone) */}
+            <div className="w-full">
+              <AudioRecorder
+                key={recorderKey}
+                onAnalyze={handleAnalyzeStream}
+                isProcessing={isProcessing}
+                onShowToast={showToast}
+                onChangeTranscript={setLiveTranscript}
+                liveSummary={liveSummary}
+                proofResult={proofResult}
+                busy={busy}
+                onRunNow={() => runLive(liveTranscript.trim())}
+                onSaveToDrive={() => handleSaveToDrive(
+                  "Scribant Session",
+                  "Live Notes.md",
+                  liveSummary,
+                )}
+                savingDrive={savingDrive}
+              />
             </div>
-            <button
-              onClick={handleGoogleSignIn}
-              className="px-4.5 py-2 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-stone-100 hover:text-white rounded-lg border border-stone-950 shadow-sm flex items-center justify-center gap-1.5 transition-all self-start md:self-auto shrink-0 w-full md:w-auto"
-            >
-              <FolderSync className="w-4 h-4" /> Sign in with Google
-            </button>
+
+            {/* Results layout: rendered cleanly underneath the Microphone */}
+            <div className="pt-2">
+              <ActiveSession
+                run={displayedRun}
+                onExecuteCalendar={i => executeItem("calendar", i)}
+                onExecuteTask={i => executeItem("task", i)}
+                onExecuteSearch={i => executeItem("search", i)}
+                onUndoCalendar={i => handleUndo("calendar", i)}
+                onUndoTask={i => handleUndo("task", i)}
+                onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
+                onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
+                onSaveToDrive={() => handleSaveToDrive(
+                  "Scribant Session",
+                  "Session Summary.md",
+                  activeAnalysis?.summary || "",
+                )}
+                savingDrive={savingDrive}
+                isLiveAnalyzing={busy.plan}
+              />
+            </div>
+
+            {/* Brain Dump Archive: Memory Bank & past session records */}
+            <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
+              <SessionHistory
+                runs={runs}
+                selectedRunId={selectedRunId}
+                onSelectRun={setSelectedRunId}
+              />
+            </div>
+
+            {/* Clear All Session Data button */}
+            <div className="pt-4 flex justify-center">
+              <button
+                onClick={handleClearAll}
+                className="flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-stone-400 hover:text-red-600 bg-transparent hover:bg-red-50 border border-dashed border-stone-200 hover:border-red-300 rounded-xl transition-all cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Clear All Session Data
+              </button>
+            </div>
           </div>
         )}
 
-        {/* Content layout: Top Row (Microphone) */}
-        <div className="w-full">
-          <AudioRecorder
-            key={recorderKey}
-            onAnalyze={handleAnalyzeStream}
-            isProcessing={isProcessing}
-            onShowToast={showToast}
-            onChangeTranscript={setLiveTranscript}
-            liveSummary={liveSummary}
-            proofResult={proofResult}
-            busy={busy}
-            onRunNow={() => runLive(liveTranscript.trim())}
-            onSaveToDrive={() => handleSaveToDrive(
-              "Scribant Session",
-              "Live Notes.md",
-              liveSummary,
-            )}
-            savingDrive={savingDrive}
-          />
-        </div>
-
-        {/* Results layout: rendered cleanly underneath the Microphone */}
-        <div className="pt-2">
-          <ActiveSession
-            run={displayedRun}
-            onExecuteCalendar={i => executeItem("calendar", i)}
-            onExecuteTask={i => executeItem("task", i)}
-            onExecuteSearch={i => executeItem("search", i)}
-            onUndoCalendar={i => handleUndo("calendar", i)}
-            onUndoTask={i => handleUndo("task", i)}
-            onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
-            onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
-            onSaveToDrive={() => handleSaveToDrive(
-              "Scribant Session",
-              "Session Summary.md",
-              activeAnalysis?.summary || "",
-            )}
-            savingDrive={savingDrive}
-            isLiveAnalyzing={busy.plan}
-          />
-        </div>
-
-        {/* Brain Dump Archive: moved all the way to the bottom of the screen */}
-        <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
-          {runs.length > 0 ? (
-            <SessionHistory
-              runs={runs}
-              selectedRunId={selectedRunId}
-              onSelectRun={setSelectedRunId}
+        {/* View 2: Administration & Monitoring Tab */}
+        {activeTab === "admin" && (
+          <div id="admin-monitoring-section" className="pt-2">
+            <AdminMonitoring
+              onEventsCountChange={setEventsCount}
+              rawTranscript={liveTranscript}
+              liveSummary={liveSummary}
             />
-          ) : (
-            <div className="bg-white/40 border border-stone-200/50 rounded-2xl p-5 text-center text-xs text-stone-400 italic">
-              No past sessions yet. Record your thoughts to start building an archive.
-            </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* Clear All Session Data button */}
-        <div className="pt-4 flex justify-center">
-          <button
-            onClick={handleClearAll}
-            className="flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-stone-400 hover:text-red-600 bg-transparent hover:bg-red-50 border border-dashed border-stone-200 hover:border-red-300 rounded-xl transition-all cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            Clear All Session Data
-          </button>
-        </div>
+        {/* View 3: API Documentation Tab */}
+        {activeTab === "docs" && (
+          <div id="api-docs-section" className="pt-2">
+            <ApiDocsView />
+          </div>
+        )}
 
       </div>
 

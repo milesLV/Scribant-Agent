@@ -22,6 +22,7 @@ export interface CalendarEvent {
   error?: string;
   uncertain?: boolean;
   explicitCommand?: boolean; // speaker directly instructed this action -> eligible for auto-execute
+  speaker?: string; // speaker or participant associated with this event (in multi-speaker context)
 }
 
 export interface TaskItem {
@@ -34,6 +35,15 @@ export interface TaskItem {
   error?: string;
   uncertain?: boolean;
   explicitCommand?: boolean;
+  assignee?: string; // speaker who committed to or was assigned this task
+  requestedBy?: string; // speaker who requested or assigned this task
+}
+
+// A single speaker's spoken turn in multi-speaker dialogue
+export interface SpeakerTurn {
+  speaker: string;
+  text: string;
+  timestamp?: number;
 }
 
 // A markdown report saved to Drive (session summary / live notes) — just enough for a sandbox save
@@ -78,3 +88,156 @@ export interface StreamRun {
   status: 'processing' | 'completed' | 'failed';
   analysis?: AnalysisResult;
 }
+
+export interface AdkEventPart {
+  text?: string;
+  thought?: boolean;
+  functionCall?: { name: string; args: Record<string, any>; id?: string };
+  functionResponse?: { name: string; response: Record<string, any>; id?: string };
+  executableCode?: { code: string; language: string };
+  codeExecutionResult?: { outcome: string; output: string };
+  [key: string]: any;
+}
+
+export interface AdkEventActions {
+  stateDelta?: Record<string, any>;
+  artifactDelta?: Record<string, number>;
+  transferToAgent?: string;
+  escalate?: boolean;
+  requestedAuthConfigs?: Record<string, any>;
+  requestedToolConfirmations?: Record<string, any>;
+  skipSummarization?: boolean;
+  [key: string]: any;
+}
+
+export interface AdkEvent {
+  id: string;
+  invocationId?: string;
+  author?: string;
+  timestamp: number;
+  content?: {
+    role: string;
+    parts: AdkEventPart[];
+  };
+  actions?: AdkEventActions;
+  errorCode?: string | number;
+  errorMessage?: string;
+  groundingMetadata?: any;
+  customMetadata?: Record<string, any>;
+  branch?: string;
+  longRunningToolIds?: string[];
+  [key: string]: any;
+}
+
+export type MemoryEventType = "memory:insert" | "memory:retrieve" | "memory:sync";
+export type MemoryEventStatus = "success" | "error" | "pending";
+
+export interface RetrievedMemoryItem {
+  text: string;
+  author: string;
+  timestamp: string;
+}
+
+export interface CompactionMetrics {
+  rawTokens: number;
+  compactedTokens: number;
+  savedTokens: number;
+  ratioPercent: number;
+}
+
+export interface ArchiveTokenMetrics {
+  totalArchiveTokens: number;
+  sessionCount: number;
+  fileCount: number;
+  averageSessionTokens: number;
+}
+
+export interface MemoryEfficiencyReport {
+  archiveTokens: number;
+  injectedMemoryTokens: number;
+  simulatedLegacyTokens: number;
+  actualMemoryBankTokens: number;
+  savedTokens: number;
+  savingsPercent: number;
+  efficiencyMultiplier: string;
+}
+
+export interface TokenStatsResponse {
+  ok: boolean;
+  compaction: CompactionMetrics;
+  archive: ArchiveTokenMetrics;
+  efficiency: MemoryEfficiencyReport;
+}
+
+export interface TokenMetricRecord {
+  id: string;
+  timestamp: string;
+  timestampMs: number;
+  model: string;
+  agent: string;
+  stage: string;
+  modality: "audio" | "text" | "multimodal";
+  userId: string;
+  sessionId: string;
+  status: "success" | "error";
+  errorCode?: string;
+  promptTokens: number;
+  candidatesTokens: number;
+  thoughtsTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+  audioInputTokens: number;
+  textInputTokens: number;
+  durationMs: number;
+  costEstimateUsd: number;
+}
+
+export interface TimeSeriesPoint {
+  timestamp: number;
+  timeLabel: string;
+  promptTokens: number;
+  candidatesTokens: number;
+  thoughtsTokens: number;
+  audioTokens: number;
+  totalTokens: number;
+  requestCount: number;
+  avgDurationMs: number;
+  costUsd: number;
+}
+
+export interface AggregateDimensionStats {
+  tokens: number;
+  percent: number;
+  requests: number;
+  costUsd: number;
+}
+
+export interface TokenAggregateStats {
+  ok: boolean;
+  totalTokens: number;
+  totalPromptTokens: number;
+  totalCandidatesTokens: number;
+  totalThoughtsTokens: number;
+  totalAudioTokens: number;
+  totalCostUsd: number;
+  requestCount: number;
+  avgLatencyMs: number;
+  byAgent: Record<string, AggregateDimensionStats>;
+  byModel: Record<string, AggregateDimensionStats>;
+  byModality: Record<string, AggregateDimensionStats>;
+  byStage: Record<string, AggregateDimensionStats>;
+}
+
+export type MemoryEvent = AdkEvent;
+
+export type TimeRangePreset = "10m" | "30m" | "1h" | "4h" | "24h" | "7d" | "custom";
+
+export interface TimeRangeConfig {
+  preset: TimeRangePreset;
+  label: string;
+  durationMs: number;
+  defaultInterval: "1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
+  supportedIntervals: ("1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d")[];
+}
+
+
