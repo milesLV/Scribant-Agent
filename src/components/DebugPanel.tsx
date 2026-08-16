@@ -41,6 +41,7 @@ export type EventFilterCategory =
   | "all"
   | "memory:insert"
   | "memory:retrieve"
+  | "stt:transcribe"
   | "thought"
   | "tool_call"
   | "content"
@@ -72,6 +73,20 @@ export function classifyEvent(event: AdkEvent): {
     anyEvt.eventType ||
     event.customMetadata?.eventType ||
     anyEvt.customMetadata?.event_type;
+
+  // 0. Is it STT Transcribe?
+  if (explicitType === "stt:transcribe" || delta.eventType === "stt:transcribe" || event.author === "google_cloud_stt") {
+    const speakerCount = typeof delta.speakerCount === "number" ? delta.speakerCount : 1;
+    const wordCount = typeof delta.wordCount === "number" ? delta.wordCount : 0;
+    const textVal = event.content?.parts?.map((p) => p.text).filter(Boolean).join(" ") || delta.text || "";
+    return {
+      category: "stt:transcribe",
+      label: "stt:transcribe",
+      isMemory: false,
+      status: "success",
+      summaryText: `Cloud STT V2: ${wordCount} words, ${speakerCount} speaker(s)${textVal ? ` — "${textVal.slice(0, 70)}"` : ""}`,
+    };
+  }
 
   // 1. Is it Memory Insert?
   const isMemoryInsert =

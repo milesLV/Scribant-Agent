@@ -277,6 +277,7 @@ export default function AdminMonitoring({
   const insertCount = events.filter((e) => classifyEvent(e).category === "memory:insert").length;
   const retrieveCount = events.filter((e) => classifyEvent(e).category === "memory:retrieve").length;
   const toolCount = events.filter((e) => classifyEvent(e).category === "tool_call").length;
+  const sttCount = events.filter((e) => classifyEvent(e).category === "stt:transcribe" || e.author === "google_cloud_stt").length;
   const errorCount = events.filter((e) => classifyEvent(e).status === "error").length;
 
   const authors = Array.from(new Set(events.map((e) => e.author).filter(Boolean))) as string[];
@@ -688,6 +689,22 @@ export default function AdminMonitoring({
                     </span>
                   </button>
 
+                  <button
+                    type="button"
+                    onClick={() => setEventTypeFilter((prev) => (prev === "stt:transcribe" ? "all" : "stt:transcribe"))}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      eventTypeFilter === "stt:transcribe"
+                        ? "bg-indigo-50 text-indigo-800 shadow-2xs border border-indigo-300 font-bold"
+                        : "text-stone-600 hover:text-indigo-700"
+                    }`}
+                  >
+                    <Radio className="w-3 h-3 text-indigo-600" />
+                    <span>stt:diarization</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-800 font-bold font-mono">
+                      {sttCount}
+                    </span>
+                  </button>
+
                   {errorCount > 0 && (
                     <button
                       type="button"
@@ -829,6 +846,9 @@ export default function AdminMonitoring({
                   } else if (classified.category === "tool_call") {
                     badgeBg = "bg-purple-50 text-purple-800 border-purple-200";
                     Icon = Wrench;
+                  } else if (classified.category === "stt:transcribe" || ev.author === "google_cloud_stt") {
+                    badgeBg = "bg-indigo-50 text-indigo-800 border-indigo-200";
+                    Icon = Radio;
                   } else if (classified.status === "error") {
                     badgeBg = "bg-red-50 text-red-800 border-red-200";
                     Icon = AlertCircle;

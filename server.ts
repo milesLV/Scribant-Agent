@@ -528,12 +528,36 @@ app.post("/api/transcribe-audio", async (req, res) => {
     // Check if Cloud STT V2 diarization is requested
     if (enableDiarization) {
       try {
+        console.log(`[CloudSTT] Transcribing audio chunk (${source || "mic"}, mime: ${mimeType || "audio/webm"}) via Google Cloud STT V2 with Diarization (speakers: ${minSpeakers ?? 1}-${maxSpeakers ?? 5})...`);
         const cloudResult = await transcribeWithCloudStt(cleanAudio, {
           mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm",
           enableDiarization: true,
           minSpeakers: minSpeakers ?? 1,
           maxSpeakers: maxSpeakers ?? 5,
         });
+
+        console.log(`[CloudSTT] ✓ Diarization success: ${cloudResult.words.length} words, ${cloudResult.speakerCount} detected speaker(s), ${cloudResult.speakerTurns.length} turn(s)`);
+
+        // Emit ADK Telemetry Event
+        emitAdkEvent(
+          createEvent({
+            author: "google_cloud_stt",
+            invocationId: `stt-${Date.now()}`,
+            content: {
+              role: "model",
+              parts: [{ text: cloudResult.text }],
+            },
+            actions: createEventActions({
+              stateDelta: {
+                eventType: "stt:transcribe",
+                provider: "google_cloud_stt",
+                speakerCount: cloudResult.speakerCount,
+                wordCount: cloudResult.words.length,
+                turnCount: cloudResult.speakerTurns.length,
+              },
+            }),
+          })
+        );
 
         res.json({
           text: cloudResult.text,
@@ -549,9 +573,12 @@ app.post("/api/transcribe-audio", async (req, res) => {
     }
 
     // Default / fallback to Gemini multimodal audio transcriber
+    console.log(`[STT] Transcribing audio chunk (${source || "mic"}) via Gemini multimodal audio transcriber...`);
     const { text } = await askAgentParts(audioTranscriber, [
       { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: cleanAudio } },
     ]);
+
+    console.log(`[STT] ✓ Gemini transcription complete (${text.trim().length} chars)`);
 
     res.json({
       text: text.trim(),
