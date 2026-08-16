@@ -1,0 +1,34 @@
+sequenceDiagram
+    autonumber
+    actor Client as Client (/api/live)
+    participant Runner as ADK Runner
+    participant State as Session State (ctx.state)
+    participant Proof as proofreader (LLM)
+    participant Corr as correction_applier (Deterministic)
+    participant Parallel as ParallelAgent (Summarizer + Classifier)
+    participant Resolver as plan_resolver (Deterministic)
+
+    Client->>Runner: POST /api/live (rawText, refISO)
+    Runner->>State: Seed { rawText, refISO, liveSummary }
+
+    note over Proof, Corr: Stage 1: Proofread
+    Runner->>Proof: Run over state.rawText
+    Proof->>State: Write state.proofRaw
+    Runner->>Corr: Run token replacement algorithm
+    Corr->>State: Write state.corrected & state.proof
+    Corr-->>Client: Stream Proof Stage Event
+
+    note over Parallel: Stage 2 & 3: Parallel Drafting
+    par Live Summary
+        Runner->>Parallel: Run live_summarizer over state.corrected
+        Parallel->>State: Write state.summary
+        Parallel-->>Client: Stream Summary Stage Event
+    and Intent Classification
+        Runner->>Parallel: Run intent_classifier over state.corrected
+        Parallel->>State: Write state.planRaw
+    end
+
+    note over Resolver: Stage 3 Follow-up: Date Resolution
+    Runner->>Resolver: Run chrono-node over state.planRaw
+    Resolver->>State: Write state.plan
+    Resolver-->>Client: Stream Plan Stage Event

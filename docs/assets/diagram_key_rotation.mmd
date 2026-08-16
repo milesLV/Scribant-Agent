@@ -1,0 +1,13 @@
+flowchart TD
+    Req["askAgent / runOrchestrator Request"] --> Try["Execute with Current Key (keyCursor)"]
+    Try --> Status{"Response Status?"}
+    
+    Status -->|"200 OK"| Done["Emit Event & Return Result"]
+    
+    Status -->|"429 Quota Exceeded"| CheckKeys{"Remaining Unused Keys?"}
+    CheckKeys -->|"Yes"| Swap["keyCursor.rotate()<br/>Instant Key Swap (0s sleep)"] --> Try
+    CheckKeys -->|"No (All Keys Exhausted)"| Backoff["Exponential Backoff / Honor retryDelay"] --> Try
+    
+    Status -->|"503 Overloaded"| OverloadWait["Overload Backoff (15s, 30s...)<br/>Do NOT swap keys"] --> Try
+    
+    Status -->|"Fatal Error / Exhausted"| Err["Throw Model Error"]
