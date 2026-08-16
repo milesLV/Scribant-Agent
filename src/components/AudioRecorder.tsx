@@ -82,8 +82,8 @@ export default function AudioRecorder({
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
 
-  // Web Speech stops itself on silence; we auto-restart unless the user (or a fatal error) stopped it.
-  const manualStopRef = useRef(false);
+  // Persistent desired listening state. Web Speech stops itself on silence; we auto-restart only if shouldListenRef is true.
+  const shouldListenRef = useRef(false);
 
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
   // Where to place the cursor once the read-only view swaps for the textarea — computed from the
@@ -210,13 +210,18 @@ export default function AudioRecorder({
     rec.lang = "en-US";
 
     rec.onstart = () => {
+      if (!shouldListenRef.current) {
+        try { rec.abort(); } catch {}
+        setIsListening(false);
+        return;
+      }
       ignoreSpeechResultsRef.current = false;
       setIsListening(true);
       setRecognitionError(null);
     };
 
     rec.onresult = (event: any) => {
-      if (ignoreSpeechResultsRef.current) return;
+      if (ignoreSpeechResultsRef.current || !shouldListenRef.current) return;
 
       let finalStr = "";
       let interimStr = "";
@@ -249,19 +254,19 @@ export default function AudioRecorder({
     rec.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error);
       if (event.error === "not-allowed" || event.error === "service-not-allowed" || event.error === "audio-capture") {
-        manualStopRef.current = true; // fatal — don't auto-restart
+        shouldListenRef.current = false;
+        setIsListening(false);
         setRecognitionError("Microphone access denied. Please grant microphone permissions or type your thoughts below!");
       } else if (event.error === "no-speech") {
-        // Safe to ignore minor timeouts — onend will auto-restart.
+        // Safe to ignore minor timeouts — onend will auto-restart only if shouldListenRef is true.
       } else {
         setRecognitionError(`Speech recognition error: ${event.error}`);
       }
     };
 
     rec.onend = () => {
-      // Keep listening through silence-driven stops; only quit when manually stopped.
-      if (manualStopRef.current) {
-        manualStopRef.current = false;
+      // Auto-restart only if the user explicitly wants to keep listening
+      if (!shouldListenRef.current) {
         setIsListening(false);
         return;
       }
@@ -269,6 +274,7 @@ export default function AudioRecorder({
         rec.start();
       } catch {
         setIsListening(false);
+        shouldListenRef.current = false;
       }
     };
 
@@ -276,8 +282,8 @@ export default function AudioRecorder({
 
     return () => {
       if (recognitionRef.current) {
-        manualStopRef.current = true; // unmounting — don't let onend restart
-        recognitionRef.current.abort();
+        shouldListenRef.current = false;
+        try { recognitionRef.current.abort(); } catch {}
       }
     };
   }, []);
@@ -294,10 +300,17 @@ export default function AudioRecorder({
   };
 
   const handleToggleListening = () => {
-    if (isListening) {
-      manualStopRef.current = true;
-      recognitionRef.current?.stop();
+    if (isListening || shouldListenRef.current) {
+      shouldListenRef.current = false;
+      setIsListening(false);
+      setInterimTranscript("");
+      try {
+        recognitionRef.current?.abort();
+      } catch {
+        try { recognitionRef.current?.stop(); } catch {}
+      }
     } else {
+      shouldListenRef.current = true;
       ignoreSpeechResultsRef.current = false;
       setRecognitionError(null);
       setIsEditingTranscript(false);
@@ -308,6 +321,8 @@ export default function AudioRecorder({
       } catch (err: any) {
         console.error("Failed to start voice recognition:", err);
         setRecognitionError("Could not initialize microphone. Please reload or dump your thoughts directly in the typewriter box.");
+        shouldListenRef.current = false;
+        setIsListening(false);
       }
     }
   };
@@ -317,9 +332,11 @@ export default function AudioRecorder({
     const fullText = (transcript + " " + interimTranscript).trim();
     if (!fullText) return;
 
-    if (isListening) {
-      manualStopRef.current = true;
-      recognitionRef.current?.stop();
+    if (isListening || shouldListenRef.current) {
+      shouldListenRef.current = false;
+      setIsListening(false);
+      setInterimTranscript("");
+      try { recognitionRef.current?.abort(); } catch {}
     }
 
     setIsEditingTranscript(false);
@@ -327,6 +344,10 @@ export default function AudioRecorder({
   };
 
   const handleClear = () => {
+    shouldListenRef.current = false;
+    setIsListening(false);
+    ignoreSpeechResultsRef.current = true;
+    try { recognitionRef.current?.abort(); } catch {}
     setTranscript("");
     setInterimTranscript("");
     setIsEditingTranscript(false);
