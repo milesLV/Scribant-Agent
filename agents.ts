@@ -12,6 +12,7 @@ import { SKILLS, skillSchemaProperties } from "./skills";
 import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcriber";
 import { getMemoryService, autoMemoryIngestCallback, memoryBankBeforeModelCallback } from "./memory";
 import { emitAdkEvent } from "./adk-events";
+import { recordTokenUsage } from "./token-telemetry";
 
 export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.6-flash";
 
@@ -208,6 +209,7 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
     let out = "";
     let grounding: any;
     let errEvent: any = null;
+    const startTime = Date.now();
     for await (const ev of runner.runEphemeral({
       userId: "local",
       newMessage: { role: "user", parts },
@@ -217,6 +219,16 @@ export async function askAgentParts(make: AgentFactory, parts: any[]): Promise<{
       const t = ev.content?.parts?.map((p: any) => p.text).filter(Boolean).join("") ?? "";
       if (t) out = t;
       if (ev.groundingMetadata) grounding = ev.groundingMetadata;
+      if (ev.usageMetadata) {
+        recordTokenUsage({
+          model: MODEL,
+          agent: agent.name,
+          stage: agent.name === "audio_transcriber" ? "stt" : "standalone_analyze",
+          modality: agent.name === "audio_transcriber" ? "audio" : "text",
+          durationMs: Date.now() - startTime,
+          usage: ev.usageMetadata,
+        });
+      }
     }
     if (!errEvent) return { text: out, grounding };
 

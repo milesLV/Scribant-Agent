@@ -34,9 +34,17 @@ import {
   TranscribeAudioRequestSchema,
   ExecuteRequestSchema,
   TokenStatsQuerySchema,
+  TokenTelemetryTimeSeriesQuerySchema,
+  TokenTelemetryAggregateQuerySchema,
   EventsQuerySchema,
   EventsClearRequestSchema,
 } from "./openapi";
+import {
+  queryTokenTimeSeries,
+  queryTokenAggregate,
+  subscribeTokenStream,
+  getMemoryBufferSnapshot,
+} from "./token-telemetry";
 
 const app = express();
 // 15mb covers a base64-encoded ~8-10s audio chunk (see /api/transcribe-audio) with headroom; every
@@ -317,6 +325,78 @@ app.get("/api/tokens/stats", (req, res) => {
   } catch (error: any) {
     res.status(500).json({ error: error.message || "Failed to fetch token stats" });
   }
+});
+
+// Real-time Token Telemetry Time-Series endpoint (minute, second, or hourly buckets)
+app.get("/api/tokens/telemetry/timeseries", (req, res) => {
+  try {
+    const validation = validatePayload(TokenTelemetryTimeSeriesQuerySchema, req.query);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error });
+      return;
+    }
+    const query = validation.data;
+    const result = queryTokenTimeSeries({
+      from: query.from,
+      to: query.to,
+      interval: query.interval,
+      agent: query.agent,
+      model: query.model,
+      sessionId: query.sessionId,
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error("Token telemetry time-series query failed:", error);
+    res.status(500).json({ error: error.message || "Failed to query token time-series" });
+  }
+});
+
+// Aggregated Token Telemetry endpoint (by model, sub-agent, modality, and pipeline stage)
+app.get("/api/tokens/telemetry/aggregate", (req, res) => {
+  try {
+    const validation = validatePayload(TokenTelemetryAggregateQuerySchema, req.query);
+    if (!validation.success) {
+      res.status(400).json({ error: validation.error });
+      return;
+    }
+    const query = validation.data;
+    const result = queryTokenAggregate({
+      from: query.from,
+      to: query.to,
+      sessionId: query.sessionId,
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error("Token telemetry aggregate query failed:", error);
+    res.status(500).json({ error: error.message || "Failed to query token aggregate" });
+  }
+});
+
+// Real-Time Token Telemetry Server-Sent Events (SSE) Stream
+app.get("/api/tokens/telemetry/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  // Send initial snapshot of recent records
+  const recent = getMemoryBufferSnapshot().slice(-20);
+  for (const rec of recent) {
+    res.write(`data: ${JSON.stringify(rec)}\n\n`);
+  }
+
+  // Subscribe to live token events
+  const unsubscribe = subscribeTokenStream((rec) => {
+    try {
+      res.write(`data: ${JSON.stringify(rec)}\n\n`);
+    } catch {
+      // Ignore write errors on disconnected clients
+    }
+  });
+
+  req.on("close", () => {
+    unsubscribe();
+  });
 });
 
 // Memory Bank Archive & Efficiency summary API

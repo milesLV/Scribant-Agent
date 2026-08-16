@@ -7,7 +7,11 @@ export const ErrorResponseSchema = z.object({
   error: z.string().describe("Error message describing why the request failed."),
 });
 
-export function validatePayload<T>(schema: z.ZodSchema<T>, data: unknown): { success: true; data: T } | { success: false; error: string } {
+export type ValidationResult<T> =
+  | { success: true; data: T; error?: string }
+  | { success: false; error: string; data?: T };
+
+export function validatePayload<T>(schema: z.ZodType<T>, data: unknown): ValidationResult<T> {
   const parsed = schema.safeParse(data);
   if (parsed.success) {
     return { success: true, data: parsed.data };
@@ -126,6 +130,63 @@ export const TokenStatsResponseSchema = z.object({
   compaction: z.record(z.string(), z.unknown()).describe("Compaction ratio metrics."),
   archive: z.record(z.string(), z.unknown()).describe("Archive token metrics."),
   efficiency: z.record(z.string(), z.unknown()).describe("Memory efficiency metrics."),
+});
+
+export const TokenTelemetryTimeSeriesQuerySchema = z.object({
+  from: z.coerce.number().optional().describe("Start epoch timestamp in ms"),
+  to: z.coerce.number().optional().describe("End epoch timestamp in ms"),
+  interval: z.enum(["1s", "10s", "1m", "5m", "1h"]).optional().default("1m"),
+  agent: z.string().optional().describe("Filter by agent label"),
+  model: z.string().optional().describe("Filter by model name"),
+  sessionId: z.string().optional().describe("Filter by session ID"),
+});
+
+export const TokenTimeSeriesPointSchema = z.object({
+  timestamp: z.number().describe("Bucket start timestamp in epoch ms"),
+  timeLabel: z.string().describe("Formatted time label (HH:MM or HH:MM:SS)"),
+  promptTokens: z.number().describe("Total input prompt tokens in bucket"),
+  candidatesTokens: z.number().describe("Total output candidate tokens in bucket"),
+  thoughtsTokens: z.number().describe("Total reasoning/thinking tokens in bucket"),
+  audioTokens: z.number().describe("Total audio modality input tokens in bucket"),
+  totalTokens: z.number().describe("Sum of prompt, candidate, and thinking tokens"),
+  requestCount: z.number().describe("Number of model requests in bucket"),
+  avgDurationMs: z.number().describe("Average request latency in ms"),
+  costUsd: z.number().describe("Estimated cost in USD"),
+});
+
+export const TokenTelemetryTimeSeriesResponseSchema = z.object({
+  ok: z.literal(true),
+  interval: z.string(),
+  points: z.array(TokenTimeSeriesPointSchema),
+});
+
+export const TokenTelemetryAggregateQuerySchema = z.object({
+  from: z.coerce.number().optional().describe("Start epoch timestamp in ms"),
+  to: z.coerce.number().optional().describe("End epoch timestamp in ms"),
+  sessionId: z.string().optional().describe("Filter by session ID"),
+});
+
+export const AggregateDimensionStatsSchema = z.object({
+  tokens: z.number().describe("Total tokens consumed in dimension"),
+  percent: z.number().describe("Percentage of overall tokens"),
+  requests: z.number().describe("Request count"),
+  costUsd: z.number().describe("Cost in USD"),
+});
+
+export const TokenTelemetryAggregateResponseSchema = z.object({
+  ok: z.literal(true),
+  totalTokens: z.number().describe("Grand total tokens across all models and agents"),
+  totalPromptTokens: z.number().describe("Total prompt input tokens"),
+  totalCandidatesTokens: z.number().describe("Total candidate output tokens"),
+  totalThoughtsTokens: z.number().describe("Total thinking/reasoning tokens"),
+  totalAudioTokens: z.number().describe("Total audio modality input tokens"),
+  totalCostUsd: z.number().describe("Total estimated cost in USD"),
+  requestCount: z.number().describe("Total model invocations"),
+  avgLatencyMs: z.number().describe("Average latency across invocations"),
+  byAgent: z.record(z.string(), AggregateDimensionStatsSchema),
+  byModel: z.record(z.string(), AggregateDimensionStatsSchema),
+  byModality: z.record(z.string(), AggregateDimensionStatsSchema),
+  byStage: z.record(z.string(), AggregateDimensionStatsSchema),
 });
 
 export const EventsQuerySchema = z.object({
@@ -591,6 +652,111 @@ export function getOpenApiSpec() {
                       efficiency: { type: "object" },
                     },
                   },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/api/tokens/telemetry/timeseries": {
+        get: {
+          tags: ["ADK & Telemetry"],
+          summary: "Query Token Telemetry Time-Series",
+          description: "Returns aggregated time-series buckets (prompt, candidate, thinking, audio tokens, cost, latency) across all models and agents.",
+          parameters: [
+            { name: "from", in: "query", schema: { type: "number" }, description: "Start timestamp in ms" },
+            { name: "to", in: "query", schema: { type: "number" }, description: "End timestamp in ms" },
+            { name: "interval", in: "query", schema: { type: "string", enum: ["1s", "10s", "1m", "5m", "1h"], default: "1m" }, description: "Bucket interval" },
+            { name: "agent", in: "query", schema: { type: "string" }, description: "Filter by agent label" },
+            { name: "model", in: "query", schema: { type: "string" }, description: "Filter by model name" },
+            { name: "sessionId", in: "query", schema: { type: "string" }, description: "Filter by session ID" },
+          ],
+          responses: {
+            "200": {
+              description: "Time-series points array",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      ok: { type: "boolean", example: true },
+                      interval: { type: "string", example: "1m" },
+                      points: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          properties: {
+                            timestamp: { type: "number" },
+                            timeLabel: { type: "string" },
+                            promptTokens: { type: "number" },
+                            candidatesTokens: { type: "number" },
+                            thoughtsTokens: { type: "number" },
+                            audioTokens: { type: "number" },
+                            totalTokens: { type: "number" },
+                            requestCount: { type: "number" },
+                            avgDurationMs: { type: "number" },
+                            costUsd: { type: "number" },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/api/tokens/telemetry/aggregate": {
+        get: {
+          tags: ["ADK & Telemetry"],
+          summary: "Get Aggregated Token Telemetry Statistics",
+          description: "Returns summary token usage, total cost, and breakdowns by sub-agent, model, modality, and pipeline stage.",
+          parameters: [
+            { name: "from", in: "query", schema: { type: "number" }, description: "Start timestamp in ms" },
+            { name: "to", in: "query", schema: { type: "number" }, description: "End timestamp in ms" },
+            { name: "sessionId", in: "query", schema: { type: "string" }, description: "Filter by session ID" },
+          ],
+          responses: {
+            "200": {
+              description: "Aggregate summary and breakdowns",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      ok: { type: "boolean", example: true },
+                      totalTokens: { type: "number" },
+                      totalPromptTokens: { type: "number" },
+                      totalCandidatesTokens: { type: "number" },
+                      totalThoughtsTokens: { type: "number" },
+                      totalAudioTokens: { type: "number" },
+                      totalCostUsd: { type: "number" },
+                      requestCount: { type: "number" },
+                      avgLatencyMs: { type: "number" },
+                      byAgent: { type: "object" },
+                      byModel: { type: "object" },
+                      byModality: { type: "object" },
+                      byStage: { type: "object" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/api/tokens/telemetry/stream": {
+        get: {
+          tags: ["ADK & Telemetry"],
+          summary: "Stream Real-Time Token Telemetry (SSE)",
+          description: "Server-Sent Events stream emitting live TokenMetricRecord objects as model invocations complete.",
+          responses: {
+            "200": {
+              description: "text/event-stream real-time events",
+              content: {
+                "text/event-stream": {
+                  schema: { type: "string" },
                 },
               },
             },

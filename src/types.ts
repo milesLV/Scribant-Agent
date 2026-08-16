@@ -169,6 +169,65 @@ export interface TokenStatsResponse {
   efficiency: MemoryEfficiencyReport;
 }
 
+export interface TokenMetricRecord {
+  id: string;
+  timestamp: string;
+  timestampMs: number;
+  model: string;
+  agent: string;
+  stage: string;
+  modality: "audio" | "text" | "multimodal";
+  userId: string;
+  sessionId: string;
+  status: "success" | "error";
+  errorCode?: string;
+  promptTokens: number;
+  candidatesTokens: number;
+  thoughtsTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+  audioInputTokens: number;
+  textInputTokens: number;
+  durationMs: number;
+  costEstimateUsd: number;
+}
+
+export interface TimeSeriesPoint {
+  timestamp: number;
+  timeLabel: string;
+  promptTokens: number;
+  candidatesTokens: number;
+  thoughtsTokens: number;
+  audioTokens: number;
+  totalTokens: number;
+  requestCount: number;
+  avgDurationMs: number;
+  costUsd: number;
+}
+
+export interface AggregateDimensionStats {
+  tokens: number;
+  percent: number;
+  requests: number;
+  costUsd: number;
+}
+
+export interface TokenAggregateStats {
+  ok: boolean;
+  totalTokens: number;
+  totalPromptTokens: number;
+  totalCandidatesTokens: number;
+  totalThoughtsTokens: number;
+  totalAudioTokens: number;
+  totalCostUsd: number;
+  requestCount: number;
+  avgLatencyMs: number;
+  byAgent: Record<string, AggregateDimensionStats>;
+  byModel: Record<string, AggregateDimensionStats>;
+  byModality: Record<string, AggregateDimensionStats>;
+  byStage: Record<string, AggregateDimensionStats>;
+}
+
 export type MemoryEvent = AdkEvent;
 
 
