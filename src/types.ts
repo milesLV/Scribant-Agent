@@ -230,4 +230,14 @@ export interface TokenAggregateStats {
 
 export type MemoryEvent = AdkEvent;
 
+export type TimeRangePreset = "10m" | "30m" | "1h" | "4h" | "24h" | "7d" | "custom";
+
+export interface TimeRangeConfig {
+  preset: TimeRangePreset;
+  label: string;
+  durationMs: number;
+  defaultInterval: "1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d";
+  supportedIntervals: ("1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d")[];
+}
+
 

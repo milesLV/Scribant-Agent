@@ -135,7 +135,10 @@ export const TokenStatsResponseSchema = z.object({
 export const TokenTelemetryTimeSeriesQuerySchema = z.object({
   from: z.coerce.number().optional().describe("Start epoch timestamp in ms"),
   to: z.coerce.number().optional().describe("End epoch timestamp in ms"),
-  interval: z.enum(["1s", "10s", "1m", "5m", "1h"]).optional().default("1m"),
+  interval: z
+    .enum(["1s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "24h"])
+    .optional()
+    .default("1m"),
   agent: z.string().optional().describe("Filter by agent label"),
   model: z.string().optional().describe("Filter by model name"),
   sessionId: z.string().optional().describe("Filter by session ID"),

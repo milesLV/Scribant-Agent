@@ -108,7 +108,7 @@ export interface TokenAggregateStats {
 export interface TimeSeriesQueryOptions {
   from?: number; // Epoch ms
   to?: number; // Epoch ms
-  interval?: "1s" | "10s" | "1m" | "5m" | "1h";
+  interval?: "1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "24h" | "7d";
   agent?: string;
   model?: string;
   sessionId?: string;
@@ -345,18 +345,99 @@ export function recordTokenUsage(params: {
   return record;
 }
 
+export function readDiskRecordsInRange(
+  from: number,
+  to: number,
+  root = path.join(process.cwd(), "data", "telemetry", "tokens")
+): TokenMetricRecord[] {
+  if (!fs.existsSync(root)) return [];
+  const records: TokenMetricRecord[] = [];
+  const seenIds = new Set<string>();
+
+  // Iterate hour by hour from 'from' to 'to'
+  const ONE_HOUR = 3600000;
+  const startHour = Math.floor(from / ONE_HOUR) * ONE_HOUR;
+  const endHour = Math.floor(to / ONE_HOUR) * ONE_HOUR;
+
+  for (let t = startHour; t <= endHour; t += ONE_HOUR) {
+    const filePath = getTelemetryDiskPath(new Date(t), root);
+    if (fs.existsSync(filePath)) {
+      try {
+        const content = fs.readFileSync(filePath, "utf8");
+        const lines = content.split("\n");
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const rec = JSON.parse(line) as TokenMetricRecord;
+            if (rec.id && !seenIds.has(rec.id) && rec.timestampMs >= from && rec.timestampMs <= to) {
+              seenIds.add(rec.id);
+              records.push(rec);
+            }
+          } catch {}
+        }
+      } catch (err) {
+        console.warn("[TokenTelemetry] Failed to read disk partition:", filePath, err);
+      }
+    }
+  }
+
+  return records;
+}
+
+export function getCombinedRecords(
+  from: number,
+  to: number,
+  recordsSource: TokenMetricRecord[] = memoryBuffer,
+  rootDiskDir?: string
+): TokenMetricRecord[] {
+  const diskRecords = readDiskRecordsInRange(from, to, rootDiskDir);
+  const seenIds = new Set<string>();
+  const combined: TokenMetricRecord[] = [];
+
+  // Add disk records first
+  for (const r of diskRecords) {
+    if (r.id && !seenIds.has(r.id)) {
+      seenIds.add(r.id);
+      combined.push(r);
+    }
+  }
+
+  // Add in-memory records
+  for (const r of recordsSource) {
+    if (r.timestampMs >= from && r.timestampMs <= to && (!r.id || !seenIds.has(r.id))) {
+      if (r.id) seenIds.add(r.id);
+      combined.push(r);
+    }
+  }
+
+  return combined;
+}
+
 export function parseIntervalMs(interval: string): number {
   switch (interval) {
     case "1s":
       return 1000;
     case "10s":
       return 10000;
+    case "30s":
+      return 30000;
     case "1m":
       return 60000;
     case "5m":
       return 300000;
+    case "15m":
+      return 900000;
+    case "30m":
+      return 1800000;
     case "1h":
       return 3600000;
+    case "4h":
+      return 14400000;
+    case "1d":
+    case "24h":
+      return 86400000;
+    case "7d":
+      return 604800000;
     default:
       return 60000;
   }
@@ -364,13 +445,22 @@ export function parseIntervalMs(interval: string): number {
 
 export function formatTimeLabel(epochMs: number, interval: string): string {
   const d = new Date(epochMs);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
   const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
   const ss = String(d.getSeconds()).padStart(2, "0");
-  if (interval === "1s" || interval === "10s") {
-    return `${hh}:${mm}:${ss}`;
+
+  if (interval === "1s" || interval === "10s" || interval === "30s") {
+    return `${hh}:${min}:${ss}`;
   }
-  return `${hh}:${mm}`;
+  if (interval === "1d" || interval === "24h" || interval === "7d") {
+    return `${mm}/${dd}`;
+  }
+  if (interval === "4h" || interval === "1h" || interval === "30m") {
+    return `${mm}/${dd} ${hh}:${min}`;
+  }
+  return `${hh}:${min}`;
 }
 
 export function queryTokenTimeSeries(
@@ -383,8 +473,11 @@ export function queryTokenTimeSeries(
   const to = options.to || now;
   const from = options.from || to - 30 * intervalMs; // Default 30 intervals back
 
+  // Get combined records from disk and memory
+  const allRecords = getCombinedRecords(from, to, recordsSource);
+
   // Filter records
-  const filtered = recordsSource.filter((r) => {
+  const filtered = allRecords.filter((r) => {
     if (r.timestampMs < from || r.timestampMs > to) return false;
     if (options.agent && r.agent !== options.agent) return false;
     if (options.model && r.model !== options.model) return false;
@@ -393,16 +486,19 @@ export function queryTokenTimeSeries(
   });
 
   // Group into time buckets
-  const buckets = new Map<number, {
-    promptTokens: number;
-    candidatesTokens: number;
-    thoughtsTokens: number;
-    audioTokens: number;
-    totalTokens: number;
-    requestCount: number;
-    durationSum: number;
-    costSum: number;
-  }>();
+  const buckets = new Map<
+    number,
+    {
+      promptTokens: number;
+      candidatesTokens: number;
+      thoughtsTokens: number;
+      audioTokens: number;
+      totalTokens: number;
+      requestCount: number;
+      durationSum: number;
+      costSum: number;
+    }
+  >();
 
   // Pre-seed all bucket intervals in range so chart is continuous
   const startBucket = Math.floor(from / intervalMs) * intervalMs;
@@ -460,7 +556,9 @@ export function queryTokenAggregate(
   const to = options.to || now;
   const from = options.from || 0; // Default all history in buffer
 
-  const filtered = recordsSource.filter((r) => {
+  const allRecords = getCombinedRecords(from, to, recordsSource);
+
+  const filtered = allRecords.filter((r) => {
     if (r.timestampMs < from || r.timestampMs > to) return false;
     if (options.sessionId && r.sessionId !== options.sessionId) return false;
     return true;
@@ -479,7 +577,11 @@ export function queryTokenAggregate(
   const modalityMap = new Map<string, { tokens: number; requests: number; cost: number }>();
   const stageMap = new Map<string, { tokens: number; requests: number; cost: number }>();
 
-  const accumulate = (map: Map<string, { tokens: number; requests: number; cost: number }>, key: string, r: TokenMetricRecord) => {
+  const accumulate = (
+    map: Map<string, { tokens: number; requests: number; cost: number }>,
+    key: string,
+    r: TokenMetricRecord
+  ) => {
     const curr = map.get(key) || { tokens: 0, requests: 0, cost: 0 };
     curr.tokens += r.totalTokens;
     curr.requests += 1;
@@ -629,6 +731,10 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
     });
     unsub();
     assert(Boolean(streamReceived), "SSE subscriber should receive record");
+
+    // 6. Test Disk Range History Retrieval
+    const diskRecords = readDiskRecordsInRange(Date.now() - 3600000, Date.now() + 1000, testRoot);
+    assert(diskRecords.length === 3, "should have read 3 records from disk partition");
 
     console.log("token-telemetry self-check ✓");
   } finally {

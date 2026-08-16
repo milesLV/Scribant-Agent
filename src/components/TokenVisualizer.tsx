@@ -15,6 +15,8 @@ import {
   Mic,
   FileText,
   Activity,
+  Calendar,
+  Filter,
 } from "lucide-react";
 import {
   AdkEvent,
@@ -22,7 +24,54 @@ import {
   TokenMetricRecord,
   TimeSeriesPoint,
   TokenAggregateStats,
+  TimeRangePreset,
+  TimeRangeConfig,
 } from "../types";
+
+export const TIME_RANGE_PRESETS: Record<Exclude<TimeRangePreset, "custom">, TimeRangeConfig> = {
+  "10m": {
+    preset: "10m",
+    label: "10m",
+    durationMs: 10 * 60 * 1000,
+    defaultInterval: "10s",
+    supportedIntervals: ["1s", "10s", "30s", "1m"],
+  },
+  "30m": {
+    preset: "30m",
+    label: "30m",
+    durationMs: 30 * 60 * 1000,
+    defaultInterval: "1m",
+    supportedIntervals: ["10s", "30s", "1m", "5m"],
+  },
+  "1h": {
+    preset: "1h",
+    label: "1h",
+    durationMs: 60 * 60 * 1000,
+    defaultInterval: "1m",
+    supportedIntervals: ["1m", "5m", "15m"],
+  },
+  "4h": {
+    preset: "4h",
+    label: "4h",
+    durationMs: 4 * 60 * 60 * 1000,
+    defaultInterval: "5m",
+    supportedIntervals: ["1m", "5m", "15m", "30m", "1h"],
+  },
+  "24h": {
+    preset: "24h",
+    label: "24h",
+    durationMs: 24 * 60 * 60 * 1000,
+    defaultInterval: "30m",
+    supportedIntervals: ["5m", "15m", "30m", "1h", "4h"],
+  },
+  "7d": {
+    preset: "7d",
+    label: "7d",
+    durationMs: 7 * 24 * 60 * 60 * 1000,
+    defaultInterval: "4h",
+    supportedIntervals: ["1h", "4h", "1d"],
+  },
+};
 
 interface TokenVisualizerProps {
   events: AdkEvent[];
@@ -44,19 +93,37 @@ export default function TokenVisualizer({
   const [testResult, setTestResult] = useState<any>(null);
   const [testingQuery, setTestingQuery] = useState(false);
   const [activeTab, setActiveTab] = useState<"timeseries" | "subagents" | "compaction">("timeseries");
-  const [timeWindow, setTimeWindow] = useState<"1m" | "5m" | "10s">("1m");
+  
+  // Time-Range & Resolution States
+  const [timeRange, setTimeRange] = useState<TimeRangePreset>("30m");
+  const [interval, setInterval] = useState<string>("1m");
+  const [customFrom, setCustomFrom] = useState<string>("");
+  const [customTo, setCustomTo] = useState<string>("");
+  const [showCustomPicker, setShowCustomPicker] = useState<boolean>(false);
   const [hoveredPoint, setHoveredPoint] = useState<TimeSeriesPoint | null>(null);
 
   const sseRef = useRef<EventSource | null>(null);
 
-  // Fetch standard token & compaction stats
+  const getTimeBounds = () => {
+    const now = Date.now();
+    if (timeRange === "custom") {
+      const fromMs = customFrom ? new Date(customFrom).getTime() : now - 3600000;
+      const toMs = customTo ? new Date(customTo).getTime() : now;
+      return { from: fromMs, to: toMs };
+    }
+    const preset = TIME_RANGE_PRESETS[timeRange];
+    return { from: now - (preset?.durationMs || 1800000), to: now };
+  };
+
+  // Fetch standard token & compaction stats with time boundaries
   const fetchTokenStats = async () => {
     try {
       setLoading(true);
+      const { from, to } = getTimeBounds();
       const [statsRes, tsRes, aggRes] = await Promise.all([
         fetch(`/api/tokens/stats?text=${encodeURIComponent(rawTranscript)}&summary=${encodeURIComponent(liveSummary)}`),
-        fetch(`/api/tokens/telemetry/timeseries?interval=${timeWindow}`),
-        fetch(`/api/tokens/telemetry/aggregate`),
+        fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}`),
+        fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}`),
       ]);
 
       if (statsRes.ok) {
@@ -80,7 +147,28 @@ export default function TokenVisualizer({
 
   useEffect(() => {
     fetchTokenStats();
-  }, [rawTranscript, liveSummary, timeWindow]);
+  }, [rawTranscript, liveSummary, timeRange, interval]);
+
+  const handleSelectPreset = (p: TimeRangePreset) => {
+    setTimeRange(p);
+    if (p === "custom") {
+      setShowCustomPicker(true);
+      if (!customFrom) {
+        const dFrom = new Date(Date.now() - 3600000);
+        setCustomFrom(dFrom.toISOString().slice(0, 16));
+      }
+      if (!customTo) {
+        const dTo = new Date();
+        setCustomTo(dTo.toISOString().slice(0, 16));
+      }
+    } else {
+      setShowCustomPicker(false);
+      const cfg = TIME_RANGE_PRESETS[p];
+      if (cfg) {
+        setInterval(cfg.defaultInterval);
+      }
+    }
+  };
 
   // Connect to SSE token telemetry stream
   useEffect(() => {
@@ -95,11 +183,12 @@ export default function TokenVisualizer({
             const record = JSON.parse(ev.data) as TokenMetricRecord;
             setLiveRecords((prev) => [record, ...prev.slice(0, 49)]);
             // Refresh time-series and aggregate stats on new record
-            fetch(`/api/tokens/telemetry/timeseries?interval=${timeWindow}`)
+            const { from, to } = getTimeBounds();
+            fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}`)
               .then((r) => r.json())
               .then((d) => setTimeSeries(d.points || []))
               .catch(() => {});
-            fetch(`/api/tokens/telemetry/aggregate`)
+            fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}`)
               .then((r) => r.json())
               .then((d) => setAggregate(d))
               .catch(() => {});
@@ -121,7 +210,7 @@ export default function TokenVisualizer({
     return () => {
       es?.close();
     };
-  }, [timeWindow]);
+  }, [timeRange, interval, customFrom, customTo]);
 
   // Test interactive memory recall
   const handleTestMemoryRecall = async () => {
@@ -313,30 +402,66 @@ export default function TokenVisualizer({
         </div>
 
         {activeTab === "timeseries" && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] font-mono text-stone-500">Interval:</span>
-            {(["10s", "1m", "5m"] as const).map((win) => (
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Time Range Preset Buttons */}
+            <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+              {(["10m", "30m", "1h", "4h", "24h", "7d"] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => handleSelectPreset(p)}
+                  className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                    timeRange === p
+                      ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
+                      : "text-stone-600 hover:text-stone-900"
+                  }`}
+                >
+                  {TIME_RANGE_PRESETS[p].label}
+                </button>
+              ))}
               <button
-                key={win}
                 type="button"
-                onClick={() => setTimeWindow(win)}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer ${
-                  timeWindow === win
-                    ? "bg-stone-900 text-white font-bold"
-                    : "bg-white text-stone-600 hover:bg-stone-100 border border-stone-200"
+                onClick={() => handleSelectPreset("custom")}
+                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all flex items-center gap-1 ${
+                  timeRange === "custom"
+                    ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
+                    : "text-stone-600 hover:text-stone-900"
                 }`}
               >
-                {win}
+                <Calendar className="w-3 h-3" />
+                Custom
               </button>
-            ))}
+            </div>
+
+            {/* Interval Resolution Selector */}
+            {timeRange !== "custom" && (
+              <div className="flex items-center gap-1 bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+                <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-0.5">Bucket:</span>
+                {TIME_RANGE_PRESETS[timeRange]?.supportedIntervals.map((res) => (
+                  <button
+                    key={res}
+                    type="button"
+                    onClick={() => setInterval(res)}
+                    className={`px-1.5 py-0.5 text-[10px] font-mono rounded cursor-pointer transition-all ${
+                      interval === res
+                        ? "bg-stone-900 text-white font-bold"
+                        : "text-stone-600 hover:text-stone-900"
+                    }`}
+                  >
+                    {res}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={fetchTokenStats}
               disabled={loading}
-              className="p-1 text-stone-500 hover:text-stone-800 rounded hover:bg-stone-100 cursor-pointer ml-1"
+              className="p-1 text-stone-500 hover:text-stone-800 rounded hover:bg-stone-100 border border-stone-200 cursor-pointer ml-0.5"
               title="Refresh telemetry"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-amber-600" : ""}`} />
             </button>
           </div>
         )}
@@ -346,12 +471,67 @@ export default function TokenVisualizer({
       {activeTab === "timeseries" && (
         <div className="space-y-4">
           
+          {/* Custom Date Range Picker Ribbon */}
+          {timeRange === "custom" && (
+            <div className="bg-white border border-stone-200 rounded-xl p-3 shadow-2xs flex flex-wrap items-center justify-between gap-3 font-mono text-xs">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="font-semibold text-stone-800">Custom Time Range:</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5">
+                  <label className="text-[11px] text-stone-500">From:</label>
+                  <input
+                    type="datetime-local"
+                    value={customFrom}
+                    onChange={(e) => setCustomFrom(e.target.value)}
+                    className="px-2 py-1 bg-stone-50 border border-stone-200 rounded text-xs text-stone-800 font-mono focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <label className="text-[11px] text-stone-500">To:</label>
+                  <input
+                    type="datetime-local"
+                    value={customTo}
+                    onChange={(e) => setCustomTo(e.target.value)}
+                    className="px-2 py-1 bg-stone-50 border border-stone-200 rounded text-xs text-stone-800 font-mono focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <label className="text-[11px] text-stone-500">Interval:</label>
+                  <select
+                    value={interval}
+                    onChange={(e) => setInterval(e.target.value)}
+                    className="px-2 py-1 bg-stone-50 border border-stone-200 rounded text-xs text-stone-800 font-mono focus:outline-none focus:border-amber-500 cursor-pointer"
+                  >
+                    <option value="10s">10s</option>
+                    <option value="30s">30s</option>
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m">15m</option>
+                    <option value="30m">30m</option>
+                    <option value="1h">1h</option>
+                    <option value="4h">4h</option>
+                    <option value="1d">1d</option>
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchTokenStats}
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-sans text-xs font-semibold cursor-pointer transition-colors shadow-2xs"
+                >
+                  Apply Range
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Visual Time-Series Chart Box */}
           <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-xs space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-100 pb-2">
               <span className="text-xs font-bold font-mono text-stone-800 flex items-center gap-1.5 shrink-0">
                 <Activity className="w-4 h-4 text-amber-600" />
-                Live Token Consumption Over Time ({timeWindow} resolution)
+                Live Token Consumption Over Time ({timeRange === "custom" ? "Custom Range" : TIME_RANGE_PRESETS[timeRange].label}, {interval} buckets)
               </span>
 
               {/* Dynamic Legend / Active Hover Inspector */}
