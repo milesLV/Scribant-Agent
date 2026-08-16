@@ -58,7 +58,8 @@ variable "gcp_services" {
     "docs.googleapis.com",
     "sheets.googleapis.com",
     "drive.googleapis.com",
-    "iap.googleapis.com"
+    "iap.googleapis.com",
+    "speech.googleapis.com"
   ]
 }
 

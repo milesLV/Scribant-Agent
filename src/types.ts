@@ -240,4 +240,22 @@ export interface TimeRangeConfig {
   supportedIntervals: ("1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d")[];
 }
 
+export interface SttConfig {
+  enableDiarization: boolean;
+  minSpeakers: number;
+  maxSpeakers: number;
+  provider: "gemini" | "google_cloud_stt";
+}
+
+export interface SttStatus {
+  available: boolean;
+  authenticated: boolean;
+  projectId?: string;
+  defaultMinSpeakers: number;
+  defaultMaxSpeakers: number;
+  supportedModels: string[];
+  error?: string;
+}
+
+
 

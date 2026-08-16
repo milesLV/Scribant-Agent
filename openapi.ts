@@ -226,11 +226,37 @@ export const TranscribeAudioRequestSchema = z.object({
   audio: z.string().describe("Base64-encoded audio chunk data (e.g., 8-10s Opus)."),
   mimeType: z.string().optional().describe("Audio MIME type (default: audio/webm)."),
   source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
+  enableDiarization: z.boolean().optional().describe("Whether to use Google Cloud STT V2 speaker diarization."),
+  minSpeakers: z.number().min(1).max(8).optional().describe("Minimum expected speakers (default: 1)."),
+  maxSpeakers: z.number().min(1).max(8).optional().describe("Maximum expected speakers (default: 5)."),
 });
 
 export const TranscribeAudioResponseSchema = z.object({
-  text: z.string().describe("Verbatim transcribed text."),
+  text: z.string().describe("Verbatim or diarized transcribed text."),
   source: z.enum(["mic", "tab"]).describe("Audio capture source tag."),
+  provider: z.enum(["gemini", "google_cloud_stt"]).optional().describe("STT engine used."),
+  speakerCount: z.number().optional().describe("Number of distinct detected speakers."),
+  turns: z
+    .array(
+      z.object({
+        speaker: z.string(),
+        text: z.string(),
+        startMs: z.number().optional(),
+        endMs: z.number().optional(),
+      })
+    )
+    .optional()
+    .describe("Diarized speaker dialogue turns."),
+});
+
+export const SttStatusResponseSchema = z.object({
+  available: z.boolean().describe("Whether Google Cloud STT V2 is available."),
+  authenticated: z.boolean().describe("Whether Google Cloud ADC authentication is active."),
+  projectId: z.string().optional().describe("GCP Project ID in use."),
+  defaultMinSpeakers: z.number().describe("Default minimum speaker count (1)."),
+  defaultMaxSpeakers: z.number().describe("Default maximum speaker count (5)."),
+  supportedModels: z.array(z.string()).describe("Supported STT models."),
+  error: z.string().optional().describe("Authentication or configuration error message."),
 });
 
 export const ExecuteRequestSchema = z.object({
@@ -488,14 +514,57 @@ export function getOpenApiSpec() {
                   schema: {
                     type: "object",
                     properties: {
-                      text: { type: "string", example: "I will finish the deployment proposal by Friday." },
+                      text: { type: "string", example: "Speaker 1: Hi everyone\n\nSpeaker 2: Good morning" },
                       source: { type: "string", enum: ["mic", "tab"], example: "mic" },
+                      provider: { type: "string", enum: ["gemini", "google_cloud_stt"], example: "google_cloud_stt" },
+                      speakerCount: { type: "number", example: 2 },
+                      turns: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          properties: {
+                            speaker: { type: "string", example: "Speaker 1" },
+                            text: { type: "string", example: "Hi everyone" },
+                            startMs: { type: "number", example: 0 },
+                            endMs: { type: "number", example: 800 },
+                          },
+                        },
+                      },
                     },
                   },
                 },
               },
             },
             "400": { description: "Invalid request payload", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+            "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          },
+        },
+      },
+      "/api/stt/status": {
+        get: {
+          tags: ["Core & Pipeline"],
+          summary: "Get Google Cloud STT & Diarization Readiness",
+          description: "Returns availability, authentication status, and configuration for Google Cloud Speech-to-Text V2 speaker diarization.",
+          responses: {
+            "200": {
+              description: "STT status and capabilities",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      available: { type: "boolean", example: true },
+                      authenticated: { type: "boolean", example: true },
+                      projectId: { type: "string", example: "agentclinicep04" },
+                      defaultMinSpeakers: { type: "number", example: 1 },
+                      defaultMaxSpeakers: { type: "number", example: 5 },
+                      supportedModels: { type: "array", items: { type: "string" }, example: ["chirp_2", "latest_long", "default"] },
+                      error: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
             "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
           },
         },

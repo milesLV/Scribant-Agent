@@ -51,10 +51,30 @@ export function useTabAudioCapture({ onChunk, onError }: Options) {
     if (blob.size === 0) return;
     try {
       const base64 = await blobToBase64(blob);
+      let enableDiarization = false;
+      let minSpeakers = 1;
+      let maxSpeakers = 5;
+      try {
+        const saved = localStorage.getItem("scribant_stt_config");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          enableDiarization = Boolean(parsed.enableDiarization);
+          if (parsed.minSpeakers) minSpeakers = Number(parsed.minSpeakers);
+          if (parsed.maxSpeakers) maxSpeakers = Number(parsed.maxSpeakers);
+        }
+      } catch {}
+
       const res = await fetch("/api/transcribe-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audio: base64, mimeType: blob.type || "audio/webm", source: "tab" }),
+        body: JSON.stringify({
+          audio: base64,
+          mimeType: blob.type || "audio/webm",
+          source: "tab",
+          enableDiarization,
+          minSpeakers,
+          maxSpeakers,
+        }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();

@@ -16,8 +16,14 @@ import {
   Server,
   Copy,
   Check,
+  Users,
+  Radio,
+  Sliders,
+  CheckCircle2,
+  Sparkles,
+  AlertTriangle,
 } from "lucide-react";
-import { AdkEvent } from "../types";
+import { AdkEvent, SttConfig, SttStatus } from "../types";
 import TokenVisualizer from "./TokenVisualizer";
 import { classifyEvent, EventFilterCategory, StatusFilterType } from "./DebugPanel";
 
@@ -43,6 +49,45 @@ export default function AdminMonitoring({
   const [isLiveConnected, setIsLiveConnected] = useState(false);
   const [isTestingAction, setIsTestingAction] = useState<"insert" | "retrieve" | "tool_call" | null>(null);
   const [serverConfig, setServerConfig] = useState<any>(null);
+
+  // STT Diarization Configuration & Status State
+  const [sttConfig, setSttConfig] = useState<SttConfig>(() => {
+    try {
+      const saved = localStorage.getItem("scribant_stt_config");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          enableDiarization: Boolean(parsed.enableDiarization),
+          minSpeakers: Math.max(1, Number(parsed.minSpeakers || 1)),
+          maxSpeakers: Math.max(1, Number(parsed.maxSpeakers || 5)),
+          provider: parsed.enableDiarization ? "google_cloud_stt" : "gemini",
+        };
+      }
+    } catch {}
+    return {
+      enableDiarization: false,
+      minSpeakers: 1,
+      maxSpeakers: 5,
+      provider: "gemini",
+    };
+  });
+
+  const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
+  const [isTestingStt, setIsTestingStt] = useState(false);
+  const [sttTestResult, setSttTestResult] = useState<any>(null);
+
+  // Save STT Config to LocalStorage whenever modified
+  useEffect(() => {
+    localStorage.setItem("scribant_stt_config", JSON.stringify(sttConfig));
+  }, [sttConfig]);
+
+  // Query Cloud STT Readiness Status
+  useEffect(() => {
+    fetch("/api/stt/status")
+      .then((res) => res.json())
+      .then((data) => setSttStatus(data))
+      .catch(() => {});
+  }, []);
 
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -192,6 +237,43 @@ export default function AdminMonitoring({
   });
 
   const totalCount = events.length;
+  const handleTestStt = async () => {
+    setIsTestingStt(true);
+    setSttTestResult(null);
+    try {
+      // 44-byte standard silent WAV base64
+      const dummyWavBase64 = "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+      const res = await fetch("/api/transcribe-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audio: dummyWavBase64,
+          mimeType: "audio/wav",
+          source: "mic",
+          enableDiarization: sttConfig.enableDiarization,
+          minSpeakers: sttConfig.minSpeakers,
+          maxSpeakers: sttConfig.maxSpeakers,
+        }),
+      });
+      const data = await res.json();
+      setSttTestResult({
+        status: res.ok ? "success" : "error",
+        provider: data.provider || (sttConfig.enableDiarization ? "google_cloud_stt" : "gemini"),
+        speakerCount: data.speakerCount ?? 0,
+        text: data.text || "(Clean silent test chunk processed successfully)",
+        turns: data.turns || [],
+        error: data.error,
+      });
+    } catch (err: any) {
+      setSttTestResult({
+        status: "error",
+        error: err.message || "Failed to reach transcription endpoint.",
+      });
+    } finally {
+      setIsTestingStt(false);
+    }
+  };
+
   const insertCount = events.filter((e) => classifyEvent(e).category === "memory:insert").length;
   const retrieveCount = events.filter((e) => classifyEvent(e).category === "memory:retrieve").length;
   const toolCount = events.filter((e) => classifyEvent(e).category === "tool_call").length;
@@ -275,7 +357,7 @@ export default function AdminMonitoring({
               }`}
             >
               <Server className={`w-3.5 h-3.5 ${activeSubTab === "infra" ? "text-emerald-600" : "text-stone-400"}`} />
-              <span>GCP Status</span>
+              <span>GCP &amp; STT Config</span>
             </button>
           </div>
 
@@ -304,6 +386,191 @@ export default function AdminMonitoring({
 
         {activeSubTab === "infra" && (
           <div className="p-6 space-y-6 max-w-4xl">
+            {/* Speech-to-Text & Speaker Diarization Card */}
+            <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-5 shadow-2xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-indigo-50 border border-indigo-100 rounded-xl text-indigo-600">
+                    <Radio className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-bold text-stone-900 font-sans tracking-wide uppercase">
+                        Speech-to-Text &amp; Acoustic Speaker Diarization
+                      </h3>
+                    </div>
+                    <p className="text-xs text-stone-500 mt-0.5">
+                      Toggle between Google Cloud Speech-to-Text V2 (acoustic voice clustering) and the default Gemini pipeline.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`px-3 py-1 text-xs font-mono font-bold rounded-lg border flex items-center gap-1.5 ${
+                      sttConfig.enableDiarization
+                        ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                        : "bg-stone-100 text-stone-700 border-stone-200"
+                    }`}
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>{sttConfig.enableDiarization ? "Cloud STT V2 Diarization" : "Gemini Multimodal STT"}</span>
+                  </span>
+                </div>
+              </div>
+
+              {/* Main Toggle Switch */}
+              <div className="flex items-center justify-between p-4 bg-stone-50 border border-stone-200/80 rounded-xl">
+                <div className="space-y-1 pr-4">
+                  <span className="text-xs font-bold text-stone-900 block font-sans">
+                    Enable Google Cloud STT V2 Speaker Diarization
+                  </span>
+                  <p className="text-xs text-stone-600 leading-relaxed">
+                    Acoustically distinguishes between multiple speakers (1–5 voices) and labels individual turns (<code className="text-stone-800 font-mono font-semibold">Speaker 1:</code>, <code className="text-stone-800 font-mono font-semibold">Speaker 2:</code>). Automatically falls back to Gemini when disabled or unauthenticated.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSttConfig((prev) => ({
+                      ...prev,
+                      enableDiarization: !prev.enableDiarization,
+                      provider: !prev.enableDiarization ? "google_cloud_stt" : "gemini",
+                    }))
+                  }
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    sttConfig.enableDiarization ? "bg-indigo-600" : "bg-stone-300"
+                  }`}
+                  role="switch"
+                  aria-checked={sttConfig.enableDiarization}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                      sttConfig.enableDiarization ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Speaker Range Settings (Interactive when enabled) */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 bg-stone-50/70 border border-stone-200/80 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-stone-800 flex items-center gap-1.5 font-sans">
+                      <Users className="w-3.5 h-3.5 text-stone-500" />
+                      <span>Minimum Expected Speakers</span>
+                    </label>
+                    <span className="text-xs font-mono font-bold text-stone-900 bg-white px-2 py-0.5 rounded border border-stone-200">
+                      {sttConfig.minSpeakers}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={4}
+                    value={sttConfig.minSpeakers}
+                    disabled={!sttConfig.enableDiarization}
+                    onChange={(e) =>
+                      setSttConfig((prev) => ({
+                        ...prev,
+                        minSpeakers: Number(e.target.value),
+                        maxSpeakers: Math.max(Number(e.target.value), prev.maxSpeakers),
+                      }))
+                    }
+                    className="w-full accent-indigo-600 cursor-pointer disabled:opacity-40"
+                  />
+                  <span className="text-[10px] text-stone-500 block">
+                    Default: 1 (Allows clean single-speaker brain-dumps without artificial speaker splits).
+                  </span>
+                </div>
+
+                <div className="p-4 bg-stone-50/70 border border-stone-200/80 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-stone-800 flex items-center gap-1.5 font-sans">
+                      <Users className="w-3.5 h-3.5 text-stone-500" />
+                      <span>Maximum Expected Speakers</span>
+                    </label>
+                    <span className="text-xs font-mono font-bold text-stone-900 bg-white px-2 py-0.5 rounded border border-stone-200">
+                      {sttConfig.maxSpeakers}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={2}
+                    max={8}
+                    value={sttConfig.maxSpeakers}
+                    disabled={!sttConfig.enableDiarization}
+                    onChange={(e) =>
+                      setSttConfig((prev) => ({
+                        ...prev,
+                        maxSpeakers: Math.max(prev.minSpeakers, Number(e.target.value)),
+                      }))
+                    }
+                    className="w-full accent-indigo-600 cursor-pointer disabled:opacity-40"
+                  />
+                  <span className="text-[10px] text-stone-500 block">
+                    Default: 5 (Supports multi-person meetings, group reviews, and conversations).
+                  </span>
+                </div>
+              </div>
+
+              {/* Status & Test Playground */}
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pt-2 border-t border-stone-100">
+                <div className="flex items-center gap-2">
+                  {sttStatus?.authenticated ? (
+                    <div className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200 font-semibold font-sans">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Cloud STT Ready (ADC Authenticated • {sttStatus.projectId || serverConfig?.projectId})</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200 font-semibold font-sans">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                      <span>ADC Unconfigured (Falling back to Gemini Transcriber)</span>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleTestStt}
+                  disabled={isTestingStt}
+                  className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 text-white rounded-xl text-xs font-semibold font-sans transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {isTestingStt ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  <span>Test Diarization Pipeline</span>
+                </button>
+              </div>
+
+              {/* Test Result Display */}
+              {sttTestResult && (
+                <div
+                  className={`p-3.5 rounded-xl border text-xs space-y-1.5 ${
+                    sttTestResult.status === "success"
+                      ? "bg-emerald-50/70 border-emerald-200 text-emerald-900"
+                      : "bg-red-50/70 border-red-200 text-red-900"
+                  }`}
+                >
+                  <div className="flex items-center justify-between font-mono font-bold">
+                    <span>
+                      Provider: <code className="bg-white/80 px-1 py-0.5 rounded">{sttTestResult.provider}</code>
+                    </span>
+                    <span>
+                      Detected Speakers: {sttTestResult.speakerCount}
+                    </span>
+                  </div>
+                  <p className="font-sans text-xs">
+                    {sttTestResult.error ? `Error: ${sttTestResult.error}` : `Output: ${sttTestResult.text}`}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Connected Google Cloud Infrastructure */}
             <div className="bg-white border border-stone-200/90 rounded-2xl p-5 space-y-4 shadow-2xs">
               <div className="flex items-center gap-2.5 text-emerald-700">
                 <ShieldCheck className="w-5 h-5 text-emerald-600" />

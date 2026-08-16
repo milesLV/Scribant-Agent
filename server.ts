@@ -21,6 +21,7 @@ import {
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
+import { transcribeWithCloudStt, checkCloudSttStatus } from "./cloud-stt";
 import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
 import {
   registerOpenApiRoutes,
@@ -511,8 +512,9 @@ app.post("/api/search", async (req, res) => {
   }
 });
 
-// One chunk of captured audio (mic or shared-tab) → verbatim text, via Gemini. The client is
-// expected to POST per-chunk (~8-10s of opus, base64), never accumulate a whole session client-side.
+// One chunk of captured audio (mic or shared-tab) → verbatim/diarized text.
+// If enableDiarization is true, calls Google Cloud STT V2 with speaker diarization.
+// Automatically falls back to Gemini audioTranscriber if Cloud STT fails or is unconfigured.
 app.post("/api/transcribe-audio", async (req, res) => {
   try {
     const v = validatePayload(TranscribeAudioRequestSchema, req.body);
@@ -520,14 +522,63 @@ app.post("/api/transcribe-audio", async (req, res) => {
       res.status(400).json({ error: "audio (base64) is required and must be a string." });
       return;
     }
-    const { audio, mimeType, source } = v.data;
+    const { audio, mimeType, source, enableDiarization, minSpeakers, maxSpeakers } = v.data;
+    const cleanAudio = audio.replace(/^data:audio\/[^;]+;base64,/, "");
+
+    // Check if Cloud STT V2 diarization is requested
+    if (enableDiarization) {
+      try {
+        const cloudResult = await transcribeWithCloudStt(cleanAudio, {
+          mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm",
+          enableDiarization: true,
+          minSpeakers: minSpeakers ?? 1,
+          maxSpeakers: maxSpeakers ?? 5,
+        });
+
+        res.json({
+          text: cloudResult.text,
+          source: source === "tab" ? "tab" : "mic",
+          provider: "google_cloud_stt",
+          speakerCount: cloudResult.speakerCount,
+          turns: cloudResult.speakerTurns,
+        });
+        return;
+      } catch (sttErr: any) {
+        console.warn("[transcribe-audio] Cloud STT diarization failed, falling back to Gemini audioTranscriber:", sttErr.message);
+      }
+    }
+
+    // Default / fallback to Gemini multimodal audio transcriber
     const { text } = await askAgentParts(audioTranscriber, [
-      { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: audio } },
+      { inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: cleanAudio } },
     ]);
-    res.json({ text: text.trim(), source: source === "tab" ? "tab" : "mic" });
+
+    res.json({
+      text: text.trim(),
+      source: source === "tab" ? "tab" : "mic",
+      provider: "gemini",
+    });
   } catch (error: any) {
     console.error("Audio transcription failed:", error);
     res.status(500).json({ error: error.message || "Failed to transcribe audio." });
+  }
+});
+
+// Endpoint to check Google Cloud STT V2 readiness and credentials
+app.get("/api/stt/status", async (_req, res) => {
+  try {
+    const status = await checkCloudSttStatus();
+    res.json({
+      available: status.available,
+      authenticated: status.authenticated,
+      projectId: status.projectId,
+      defaultMinSpeakers: 1,
+      defaultMaxSpeakers: 5,
+      supportedModels: ["chirp_2", "latest_long", "default"],
+      error: status.error,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to query STT status." });
   }
 });
 
