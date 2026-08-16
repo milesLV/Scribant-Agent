@@ -50,13 +50,16 @@ export function parseOffsetMs(offset?: string | number): number | undefined {
 }
 
 // Groups word-level diarization tokens into structured dialogue turns
-export function groupWordsIntoSpeakerTurns(words: DiarizedWord[]): { text: string; turns: SpeakerTurn[] } {
+export function groupWordsIntoSpeakerTurns(
+  words: DiarizedWord[],
+  options?: { alwaysPrefixSpeaker?: boolean }
+): { text: string; turns: SpeakerTurn[] } {
   if (!words || words.length === 0) {
     return { text: "", turns: [] };
   }
 
   const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
-  const isMultiSpeaker = distinctSpeakers.size > 1;
+  const isMultiSpeaker = distinctSpeakers.size > 1 || Boolean(options?.alwaysPrefixSpeaker);
 
   const turns: SpeakerTurn[] = [];
   let currentSpeaker = words[0].speaker || "Speaker 1";
@@ -96,7 +99,7 @@ export function groupWordsIntoSpeakerTurns(words: DiarizedWord[]): { text: strin
   }
 
   // Format full transcript text:
-  // If multi-speaker, prefix turns with "Speaker N: <text>" or "Name: <text>"
+  // If multi-speaker or alwaysPrefixSpeaker, prefix turns with "Speaker N: <text>"
   // If single-speaker, return continuous flowing text
   let fullText = "";
   if (isMultiSpeaker) {
@@ -227,8 +230,9 @@ export async function transcribeWithCloudStt(
       .map((r: any) => r.alternatives?.[0]?.transcript)
       .filter(Boolean)
       .join(" ");
+    const fallbackText = options.enableDiarization && rawTranscript ? `Speaker 1: ${rawTranscript.trim()}` : rawTranscript.trim();
     return {
-      text: rawTranscript.trim(),
+      text: fallbackText,
       speakerTurns: rawTranscript ? [{ speaker: "Speaker 1", text: rawTranscript.trim(), words: [] }] : [],
       words: [],
       speakerCount: rawTranscript ? 1 : 0,
@@ -236,7 +240,7 @@ export async function transcribeWithCloudStt(
     };
   }
 
-  const { text, turns } = groupWordsIntoSpeakerTurns(words);
+  const { text, turns } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
   const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
 
   return {
@@ -334,8 +338,9 @@ async function transcribeWithCloudSttV1Fallback(
       .map((r: any) => r.alternatives?.[0]?.transcript)
       .filter(Boolean)
       .join(" ");
+    const fallbackText = options.enableDiarization && rawTranscript ? `Speaker 1: ${rawTranscript.trim()}` : rawTranscript.trim();
     return {
-      text: rawTranscript.trim(),
+      text: fallbackText,
       speakerTurns: rawTranscript ? [{ speaker: "Speaker 1", text: rawTranscript.trim(), words: [] }] : [],
       words: [],
       speakerCount: rawTranscript ? 1 : 0,
@@ -343,7 +348,7 @@ async function transcribeWithCloudSttV1Fallback(
     };
   }
 
-  const { text, turns } = groupWordsIntoSpeakerTurns(words);
+  const { text, turns } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
   const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
 
   return {

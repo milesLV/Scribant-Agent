@@ -77,6 +77,19 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+// Maps speaker label strings to distinct badge color styles
+function getSpeakerBadgeColor(label: string): string {
+  const clean = label.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (clean.includes("you")) return "bg-sky-50 text-sky-800 border-sky-200/90";
+  if (clean.includes("speaker1") || clean === "1") return "bg-indigo-50 text-indigo-800 border-indigo-200/90";
+  if (clean.includes("speaker2") || clean === "2") return "bg-emerald-50 text-emerald-800 border-emerald-200/90";
+  if (clean.includes("speaker3") || clean === "3") return "bg-amber-50 text-amber-800 border-amber-200/90";
+  if (clean.includes("speaker4") || clean === "4") return "bg-rose-50 text-rose-800 border-rose-200/90";
+  if (clean.includes("speaker5") || clean === "5") return "bg-purple-50 text-purple-800 border-purple-200/90";
+  if (clean.includes("meeting")) return "bg-stone-100 text-stone-800 border-stone-300";
+  return "bg-stone-100 text-stone-800 border-stone-200";
+}
+
 export default function AudioRecorder({
   onAnalyze,
   isProcessing,
@@ -146,7 +159,10 @@ export default function AudioRecorder({
       if (text) {
         setTranscript((prev) => {
           const cleanedPrev = prev.trim();
-          return (cleanedPrev ? cleanedPrev + " " : "") + text + " ";
+          if (!cleanedPrev) return text;
+          const isDialogue = text.includes("Speaker ") || cleanedPrev.includes("Speaker ");
+          const separator = isDialogue ? "\n\n" : " ";
+          return cleanedPrev + separator + text;
         });
         setInterimTranscript("");
       }
@@ -546,42 +562,57 @@ export default function AudioRecorder({
     return out;
   };
 
-  // Render raw or unproofed text with speaker tags highlighted as clean badges
+  // Render raw or unproofed text formatted as structured dialogue turns
   const renderSpeakerText = (text: string) => {
-    // Matches tags like "[Meeting: Alice]", "[Meeting]", "Speaker 1:", "Alice:", "You:"
-    const regex = /(\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)/g;
-    const parts = text.split(regex);
-    if (parts.length <= 1) return text;
+    if (!text || !text.trim()) return null;
 
-    return parts.map((part, idx) => {
-      if (!part) return null;
-      const isMeetingTag = part.startsWith("[Meeting");
-      const isSpeakerTag = /^(?:Speaker\s*\d+|You|[A-Z][a-z]+):$/.test(part.trim());
-      if (isMeetingTag || isSpeakerTag) {
-        const rawLabel = part.replace(/^\[|\]$/g, "").replace(/:$/, "").trim();
-        const isYou = rawLabel.toLowerCase().includes("you");
-        return (
-          <span
-            key={idx}
-            className={`inline-block text-[9px] font-bold font-mono px-1.5 py-0.5 rounded mr-1.5 align-middle select-none ${
-              isYou
-                ? "bg-blue-100 text-blue-800 border border-blue-200/70"
-                : isMeetingTag
-                ? "bg-purple-100 text-purple-800 border border-purple-200/70"
-                : "bg-amber-100 text-amber-800 border border-amber-200/70"
-            }`}
-          >
-            {rawLabel}
-          </span>
-        );
-      }
-      return <span key={idx}>{part}</span>;
-    });
+    // Check if the text contains speaker turn patterns
+    const speakerRegex = /(?:^|\n\n|\n)(?:\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)\s*/;
+    if (!speakerRegex.test(text)) {
+      return <span>{text}</span>;
+    }
+
+    // Split text into distinct turns
+    const turns = text.split(/(?=\n\n|\n)(?:(?=\[(?:Meeting(?::\s*[^\]]+)?)\])|(?=\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):))/g);
+
+    return (
+      <div className="space-y-3">
+        {turns.map((turn, tIdx) => {
+          const trimmed = turn.trim();
+          if (!trimmed) return null;
+
+          const match = trimmed.match(/^(\[(?:Meeting(?::\s*[^\]]+)?)\]|\b(?:Speaker\s*\d+|You|[A-Z][a-z]+):)\s*(.*)$/s);
+          if (match) {
+            const rawTag = match[1];
+            const speakerLabel = rawTag.replace(/^\[|\]$/g, "").replace(/:$/, "").trim();
+            const utterance = match[2];
+            const badgeColor = getSpeakerBadgeColor(speakerLabel);
+
+            return (
+              <div key={tIdx} className="flex items-start gap-2.5">
+                <span className={`inline-flex items-center gap-1 text-[10px] font-bold font-mono px-2 py-0.5 rounded-md border shrink-0 select-none shadow-2xs mt-0.5 ${badgeColor}`}>
+                  <Users className="w-2.5 h-2.5 opacity-70" />
+                  <span>{speakerLabel}</span>
+                </span>
+                <span className="text-xs text-stone-750 leading-relaxed font-sans flex-1">
+                  {utterance}
+                </span>
+              </div>
+            );
+          }
+
+          return (
+            <div key={tIdx} className="text-xs text-stone-750 leading-relaxed font-sans">
+              {trimmed}
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   return (
     <div id="audio-recorder-panel" className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm transition-all hover:shadow-md">
-      
       <div className="flex items-center justify-between mb-4 pb-3 border-b border-stone-100">
         <div className="flex items-center gap-2">
           <div className={`w-2.5 h-2.5 rounded-full ${isListening ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
