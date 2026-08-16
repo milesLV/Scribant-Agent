@@ -45,6 +45,7 @@ export default function TokenVisualizer({
   const [testingQuery, setTestingQuery] = useState(false);
   const [activeTab, setActiveTab] = useState<"timeseries" | "subagents" | "compaction">("timeseries");
   const [timeWindow, setTimeWindow] = useState<"1m" | "5m" | "10s">("1m");
+  const [hoveredPoint, setHoveredPoint] = useState<TimeSeriesPoint | null>(null);
 
   const sseRef = useRef<EventSource | null>(null);
 
@@ -347,58 +348,93 @@ export default function TokenVisualizer({
           
           {/* Visual Time-Series Chart Box */}
           <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-xs space-y-3">
-            <div className="flex items-center justify-between border-b border-stone-100 pb-2">
-              <span className="text-xs font-bold font-mono text-stone-800 flex items-center gap-1.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-100 pb-2">
+              <span className="text-xs font-bold font-mono text-stone-800 flex items-center gap-1.5 shrink-0">
                 <Activity className="w-4 h-4 text-amber-600" />
                 Live Token Consumption Over Time ({timeWindow} resolution)
               </span>
-              <div className="flex items-center gap-3 text-[11px] font-mono text-stone-500">
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" />
-                  Prompt (Input)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
-                  Candidates (Output)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-blue-500 inline-block" />
-                  Audio (STT)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-purple-500 inline-block" />
-                  Thoughts (Reasoning)
-                </span>
-              </div>
+
+              {/* Dynamic Legend / Active Hover Inspector */}
+              {hoveredPoint ? (
+                <div className="flex items-center gap-2 text-[10px] font-mono bg-stone-900 text-white px-2.5 py-1 rounded-md shadow-xs animate-in fade-in duration-100 overflow-x-auto">
+                  <span className="font-bold text-amber-400 shrink-0">{hoveredPoint.timeLabel}</span>
+                  <span className="text-stone-300 shrink-0">Total: <strong className="text-white">{hoveredPoint.totalTokens.toLocaleString()}</strong></span>
+                  <span className="text-amber-300 shrink-0">In: {hoveredPoint.promptTokens.toLocaleString()}</span>
+                  <span className="text-emerald-300 shrink-0">Out: {hoveredPoint.candidatesTokens.toLocaleString()}</span>
+                  {hoveredPoint.audioTokens > 0 && <span className="text-blue-300 shrink-0">Audio: {hoveredPoint.audioTokens.toLocaleString()}</span>}
+                  {hoveredPoint.thoughtsTokens > 0 && <span className="text-purple-300 shrink-0">Thoughts: {hoveredPoint.thoughtsTokens.toLocaleString()}</span>}
+                  <span className="text-stone-400 border-l border-stone-700 pl-1.5 shrink-0">
+                    {hoveredPoint.requestCount} req • {hoveredPoint.avgDurationMs}ms • ${hoveredPoint.costUsd}
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 text-[11px] font-mono text-stone-500 overflow-x-auto">
+                  <span className="flex items-center gap-1 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" />
+                    Prompt (Input)
+                  </span>
+                  <span className="flex items-center gap-1 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
+                    Candidates (Output)
+                  </span>
+                  <span className="flex items-center gap-1 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-blue-500 inline-block" />
+                    Audio (STT)
+                  </span>
+                  <span className="flex items-center gap-1 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-sm bg-purple-500 inline-block" />
+                    Thoughts (Reasoning)
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Bar Chart Canvas */}
-            <div className="h-48 flex items-end gap-1.5 pt-4 pb-2 border-b border-stone-100 overflow-x-auto">
+            <div className="relative min-h-[200px] flex items-end gap-2 pt-8 pb-2 border-b border-stone-100 overflow-visible">
               {timeSeries.length > 0 ? (
                 timeSeries.map((pt, idx) => {
                   const total = pt.totalTokens;
-                  const heightPercent = total > 0 ? Math.max(10, Math.round((total / maxBucketTokens) * 100)) : 4;
+                  const heightPercent = total > 0 ? Math.max(12, Math.round((total / maxBucketTokens) * 100)) : 4;
+                  const isHovered = hoveredPoint === pt;
+                  // Clamp tooltip alignment so edge bars don't clip off left or right
+                  const alignClass =
+                    idx === 0
+                      ? "left-0"
+                      : idx >= timeSeries.length - 2
+                      ? "right-0"
+                      : "left-1/2 -translate-x-1/2";
+
                   return (
                     <div
                       key={idx}
-                      className="flex-1 min-w-[28px] max-w-[48px] flex flex-col items-center gap-1 group relative h-full justify-end"
+                      onMouseEnter={() => setHoveredPoint(pt)}
+                      onMouseLeave={() => setHoveredPoint(null)}
+                      className="flex-1 min-w-[28px] max-w-[48px] flex flex-col items-center gap-1 group relative h-full justify-end cursor-pointer"
                     >
-                      {/* Tooltip on Hover */}
-                      <div className="absolute bottom-full mb-1 hidden group-hover:flex flex-col bg-stone-900 text-white text-[10px] font-mono p-2 rounded-lg shadow-lg z-20 whitespace-nowrap pointer-events-none">
-                        <div className="font-bold text-amber-400">{pt.timeLabel}</div>
-                        <div>Total: {pt.totalTokens} tok</div>
-                        <div>Prompt: {pt.promptTokens} tok</div>
-                        <div>Output: {pt.candidatesTokens} tok</div>
-                        {pt.audioTokens > 0 && <div className="text-blue-300">Audio: {pt.audioTokens} tok</div>}
-                        {pt.thoughtsTokens > 0 && <div className="text-purple-300">Thoughts: {pt.thoughtsTokens} tok</div>}
-                        <div className="text-stone-400 border-t border-stone-700 pt-0.5 mt-0.5">
-                          {pt.requestCount} req • {pt.avgDurationMs}ms • ${pt.costUsd}
+                      {/* Floating Tooltip positioned cleanly above stacked bar with high z-index and border */}
+                      <div
+                        className={`absolute bottom-[calc(100%+6px)] ${alignClass} hidden group-hover:flex flex-col bg-stone-900/95 text-white text-[10px] font-mono p-2 rounded-lg shadow-xl border border-stone-700 z-30 whitespace-nowrap pointer-events-none`}
+                      >
+                        <div className="font-bold text-amber-400 flex items-center justify-between gap-2">
+                          <span>{pt.timeLabel}</span>
+                          <span className="text-stone-400 text-[9px] font-normal">{pt.requestCount} req</span>
+                        </div>
+                        <div className="text-white font-semibold mt-0.5">Total: {pt.totalTokens.toLocaleString()} tok</div>
+                        <div className="text-amber-300">Prompt: {pt.promptTokens.toLocaleString()} tok</div>
+                        <div className="text-emerald-300">Output: {pt.candidatesTokens.toLocaleString()} tok</div>
+                        {pt.audioTokens > 0 && <div className="text-blue-300">Audio: {pt.audioTokens.toLocaleString()} tok</div>}
+                        {pt.thoughtsTokens > 0 && <div className="text-purple-300">Thoughts: {pt.thoughtsTokens.toLocaleString()} tok</div>}
+                        <div className="text-stone-400 border-t border-stone-700 pt-0.5 mt-0.5 flex items-center justify-between gap-2">
+                          <span>{pt.avgDurationMs}ms</span>
+                          <span className="text-emerald-400 font-semibold">${pt.costUsd}</span>
                         </div>
                       </div>
 
                       {/* Stacked Bar */}
                       <div
-                        className="w-full rounded-t-sm flex flex-col justify-end overflow-hidden transition-all duration-300 bg-stone-100 group-hover:opacity-90"
+                        className={`w-full rounded-t-sm flex flex-col justify-end overflow-hidden transition-all duration-200 bg-stone-100 ${
+                          isHovered ? "ring-2 ring-amber-500/80 shadow-sm opacity-100" : "group-hover:opacity-90"
+                        }`}
                         style={{ height: `${heightPercent}%` }}
                       >
                         {pt.thoughtsTokens > 0 && (
@@ -428,7 +464,7 @@ export default function TokenVisualizer({
                       </div>
 
                       {/* X-axis Label */}
-                      <span className="text-[9px] font-mono text-stone-500 truncate w-full text-center">
+                      <span className={`text-[9px] font-mono truncate w-full text-center ${isHovered ? "text-amber-700 font-bold" : "text-stone-500"}`}>
                         {pt.timeLabel}
                       </span>
                     </div>
