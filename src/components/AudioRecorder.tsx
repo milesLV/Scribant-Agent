@@ -252,6 +252,10 @@ export default function AudioRecorder({
     };
 
     rec.onerror = (event: any) => {
+      // If the user intentionally stopped/aborted speech recognition, suppress the expected error
+      if (!shouldListenRef.current || event.error === "aborted") {
+        return;
+      }
       console.error("Speech recognition error:", event.error);
       if (event.error === "not-allowed" || event.error === "service-not-allowed" || event.error === "audio-capture") {
         shouldListenRef.current = false;
