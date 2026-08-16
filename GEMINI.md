@@ -23,10 +23,10 @@ Welcome to Scribant! Scribant is an intelligent thought-partner agent that liste
 - **Frontend**: React 19 + Vite + Tailwind CSS v4.
 - **Port**: `3000` (Express serves API routes and integrates Vite middleware in development; serves built assets in production).
 - **Core AI Framework**: Google ADK TypeScript (`@google/adk`).
-- **Models**:
-  - Primary: Gemini 2.5 Flash (`gemini-2.5-flash`), Gemini 2.5 Pro (`gemini-2.5-pro`).
-  - Key Rotation: Built-in multi-key balancer in [`agents.ts`](file:///Users/luissala/development/agent-clinic-103/Scribant-Agent/agents.ts) rotating across `GEMINI_API_KEY`, `GEMINI_API_KEY1`, `GEMINI_API_KEY2`, `GEMINI_API_KEY3` upon rate limits.
-  - Local Fallback: Ollama support (e.g., `gemma3`) via `OLLAMA_MODEL`.
+- **Models & Execution**:
+  - Model: Defaults to `gemini-3.6-flash` (configurable via `GEMINI_MODEL` or `MODEL`).
+  - Key Rotation: Built-in multi-key load balancer in [`agents.ts`](file:///Users/luissala/development/agent-clinic-103/Scribant-Agent/agents.ts) rotating across `GEMINI_API_KEY`, `GEMINI_API_KEY1`, `GEMINI_API_KEY2`, `GEMINI_API_KEY3`, `GOOGLE_API_KEY` on rate limits (429s).
+  - Vertex AI Mode: Enabled via `GOOGLE_GENAI_USE_VERTEXAI=true` or `GOOGLE_GENAI_USE_ENTERPRISE=true`, using Google Cloud ADC / IAM instead of API keys.
 
 ---
 
@@ -97,8 +97,8 @@ GOOGLE_CLOUD_PROJECT=your-gcp-project-id
 GOOGLE_CLOUD_LOCATION=us-central1
 VERTEX_MEMORY_BANK_ID=your-memory-bank-id
 
-# Local Model Fallback (Optional)
-OLLAMA_MODEL=gemma3
+# Vertex AI Enterprise Mode (Optional - uses ADC instead of API keys)
+# GOOGLE_GENAI_USE_VERTEXAI=true
 
 # Application Identification
 APP_NAME=scribant
