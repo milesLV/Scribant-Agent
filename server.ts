@@ -254,13 +254,23 @@ const handleMemoryRetrieve = async (req: express.Request, res: express.Response)
         const ans = await askAgent(memoryAnswerer, prompt);
         answer = ans.text.trim() || null;
         if (answer) {
-          memoryEvents.updateLatest(
-            e => e.author === "memory" && e.actions?.stateDelta?.query === query && !e.actions?.stateDelta?.answer,
-            (e) => {
-              if (e.actions?.stateDelta) {
-                e.actions.stateDelta.answer = answer;
-              }
-            }
+          emitAdkEvent(
+            createEvent({
+              author: "memory",
+              invocationId: `answer-${Date.now()}`,
+              content: {
+                role: "model",
+                parts: [{ text: `[Memory Answer]: ${answer}` }],
+              },
+              actions: createEventActions({
+                stateDelta: {
+                  eventType: "memory:retrieve",
+                  query,
+                  answer,
+                  status: "success",
+                },
+              }),
+            })
           );
         }
       } catch (e: any) {
@@ -389,32 +399,6 @@ app.get("/api/adk/events/stream", handleEventStream);
 
 // Grounded search: agent answer + the sources it grounded on, split into the two UI tiers.
 async function groundedSearch(query: string) {
-  emitAdkEvent(
-    createEvent({
-      author: "grounded_searcher",
-      invocationId: `search-${Date.now()}`,
-      content: {
-        role: "model",
-        parts: [
-          {
-            functionCall: {
-              name: "google_search",
-              args: { query },
-              id: `call-${Date.now()}`,
-            },
-          },
-        ],
-      },
-      actions: createEventActions({
-        stateDelta: {
-          eventType: "tool_call",
-          toolName: "google_search",
-          args: { query },
-        },
-      }),
-    })
-  );
-
   const response = await askAgent(groundedSearcher, `Search the web and answer this research query: "${query}".
 Respond in EXACTLY this format, nothing else:
 CONDENSED: <a direct 1-2 sentence answer>
@@ -428,34 +412,6 @@ DETAILED: <a thorough 4-7 sentence explanation with the key facts and context>`)
     : [];
 
   const { condensed, inDepth } = splitTiers(response.text || "");
-
-  emitAdkEvent(
-    createEvent({
-      author: "grounded_searcher",
-      invocationId: `search-${Date.now()}`,
-      content: {
-        role: "model",
-        parts: [
-          {
-            functionResponse: {
-              name: "google_search",
-              response: { query, sourcesCount: sources.length, sources, condensed },
-              id: `call-${Date.now()}`,
-            },
-          },
-        ],
-      },
-      actions: createEventActions({
-        stateDelta: {
-          eventType: "tool_result",
-          toolName: "google_search",
-          status: "success",
-          result: { query, sourcesCount: sources.length, sources, condensed },
-        },
-      }),
-    })
-  );
-
   return { query, condensed, inDepth, sources };
 }
 
