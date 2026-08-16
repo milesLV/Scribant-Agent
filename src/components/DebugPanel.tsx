@@ -27,11 +27,14 @@ import {
   FileCode,
 } from "lucide-react";
 import { AdkEvent } from "../types";
+import TokenVisualizer from "./TokenVisualizer";
 
 interface DebugPanelProps {
   isOpen: boolean;
   onClose: () => void;
   onEventsCountChange?: (count: number) => void;
+  rawTranscript?: string;
+  liveSummary?: string;
 }
 
 export type EventFilterCategory =
@@ -210,8 +213,11 @@ export default function DebugPanel({
   isOpen,
   onClose,
   onEventsCountChange,
+  rawTranscript = "",
+  liveSummary = "",
 }: DebugPanelProps) {
   const [events, setEvents] = useState<AdkEvent[]>([]);
+  const [activeViewMode, setActiveViewMode] = useState<"tokens" | "events">("tokens");
   const [eventTypeFilter, setEventTypeFilter] = useState<EventFilterCategory>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilterType>("all");
@@ -439,21 +445,46 @@ export default function DebugPanel({
     >
       {/* Panel Header */}
       <div className="bg-stone-950 px-4 py-3 border-b border-stone-800 flex items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
           <div className="p-1.5 bg-amber-500/20 text-amber-400 rounded-lg border border-amber-500/30 shrink-0">
-            <Terminal className="w-4 h-4" />
+            <Zap className="w-4 h-4" />
           </div>
           <div className="flex items-center gap-2 truncate">
             <span className="font-bold text-xs text-stone-100 tracking-wide font-mono uppercase">
-              ADK Event Stream Debugger
-            </span>
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-stone-800 text-stone-300 border border-stone-700">
-              {totalCount} events
+              ADK Telemetry &amp; Token Engine
             </span>
           </div>
 
+          {/* View Switcher: Token & Memory Hub vs Raw Event Stream */}
+          <div className="flex items-center bg-stone-900 p-0.5 rounded-lg border border-stone-800 ml-1">
+            <button
+              type="button"
+              onClick={() => setActiveViewMode("tokens")}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeViewMode === "tokens"
+                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-xs"
+                  : "text-stone-400 hover:text-stone-200"
+              }`}
+            >
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span>Token &amp; Memory Hub</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveViewMode("events")}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeViewMode === "events"
+                  ? "bg-stone-800 text-stone-100 border border-stone-700 shadow-xs"
+                  : "text-stone-400 hover:text-stone-200"
+              }`}
+            >
+              <Terminal className="w-3 h-3 text-stone-400" />
+              <span>Event Stream ({totalCount})</span>
+            </button>
+          </div>
+
           {/* SSE Live Status Indicator */}
-          <div className="flex items-center gap-1.5 ml-2">
+          <div className="hidden lg:flex items-center gap-1.5 ml-1">
             <span
               className={`w-2 h-2 rounded-full ${
                 isLiveConnected
@@ -461,8 +492,8 @@ export default function DebugPanel({
                   : "bg-amber-400"
               }`}
             />
-            <span className="text-[10px] font-mono text-stone-400 hidden sm:inline">
-              {isLiveConnected ? "ADK STREAM LIVE" : "CONNECTING..."}
+            <span className="text-[10px] font-mono text-stone-400">
+              {isLiveConnected ? "LIVE" : "CONNECTING..."}
             </span>
           </div>
         </div>
@@ -505,6 +536,13 @@ export default function DebugPanel({
 
       {/* Main Panel Content (Hidden if Minimized) */}
       {!isMinimized && (
+        activeViewMode === "tokens" ? (
+          <TokenVisualizer
+            events={events}
+            rawTranscript={rawTranscript}
+            liveSummary={liveSummary}
+          />
+        ) : (
         <div className="flex-1 flex flex-col min-h-0 bg-stone-900/95">
           {/* Controls Bar: Filters & Quick Test Buttons */}
           <div className="p-3 bg-stone-950/60 border-b border-stone-800/80 space-y-2.5 shrink-0">
@@ -1002,6 +1040,7 @@ export default function DebugPanel({
             )}
           </div>
         </div>
+        )
       )}
     </div>
   );

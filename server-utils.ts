@@ -131,7 +131,45 @@ export function resolvePlanDates(plan: any, refISO: string): any {
   return plan;
 }
 
+// Token estimation: ~3.8 chars/token for English conversational text and JSON
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  const words = trimmed.split(/\s+/).filter(Boolean).length;
+  const byChars = Math.ceil(trimmed.length / 3.8);
+  const byWords = Math.ceil(words * 1.3);
+  return Math.max(1, Math.round((byChars + byWords) / 2));
+}
+
+export interface CompactionMetrics {
+  rawTokens: number;
+  compactedTokens: number;
+  savedTokens: number;
+  ratioPercent: number;
+}
+
+// Computes the compression ratio of rolling live notes vs raw speech
+export function computeCompaction(rawText: string, summaryText: string): CompactionMetrics {
+  const rawTokens = estimateTokens(rawText);
+  const compactedTokens = estimateTokens(summaryText);
+  const savedTokens = Math.max(0, rawTokens - compactedTokens);
+  const ratioPercent = rawTokens > 0
+    ? Math.max(0, Math.min(99.9, Number(((savedTokens / rawTokens) * 100).toFixed(1))))
+    : 0;
+  return { rawTokens, compactedTokens, savedTokens, ratioPercent };
+}
+
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
+  // Token estimation & Compaction self-check
+  assert.equal(estimateTokens(""), 0);
+  assert.ok(estimateTokens("Hello world, this is a test prompt for token estimation.") >= 8);
+  const comp = computeCompaction(
+    "We spent the last twenty minutes talking about the upcoming product roadmap and discussing whether we should build a new dashboard. Alice said she would make mockups, and Bob said he would review the backend APIs.",
+    "* Alice to make dashboard mockups\n* Bob to review backend APIs"
+  );
+  assert.ok(comp.rawTokens > comp.compactedTokens);
+  assert.ok(comp.ratioPercent > 50);
   // cleanJsonString — happy / sad / edge
   assert.equal(cleanJsonString('```json\n{"a":1}\n```'), '{"a":1}');           // fenced
   assert.equal(cleanJsonString(""), "{}");                                      // empty -> {}

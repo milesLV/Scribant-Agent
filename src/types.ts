@@ -138,6 +138,37 @@ export interface RetrievedMemoryItem {
   timestamp: string;
 }
 
+export interface CompactionMetrics {
+  rawTokens: number;
+  compactedTokens: number;
+  savedTokens: number;
+  ratioPercent: number;
+}
+
+export interface ArchiveTokenMetrics {
+  totalArchiveTokens: number;
+  sessionCount: number;
+  fileCount: number;
+  averageSessionTokens: number;
+}
+
+export interface MemoryEfficiencyReport {
+  archiveTokens: number;
+  injectedMemoryTokens: number;
+  simulatedLegacyTokens: number;
+  actualMemoryBankTokens: number;
+  savedTokens: number;
+  savingsPercent: number;
+  efficiencyMultiplier: string;
+}
+
+export interface TokenStatsResponse {
+  ok: boolean;
+  compaction: CompactionMetrics;
+  archive: ArchiveTokenMetrics;
+  efficiency: MemoryEfficiencyReport;
+}
+
 export type MemoryEvent = AdkEvent;
 
 

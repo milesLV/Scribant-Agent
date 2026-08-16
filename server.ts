@@ -3,7 +3,7 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import { splitTiers, logUserTranscript, safeSeg } from "./server-utils";
+import { splitTiers, logUserTranscript, safeSeg, estimateTokens, computeCompaction } from "./server-utils";
 import {
   captureMemoryEvent,
   getMemoryService,
@@ -15,6 +15,8 @@ import {
   clearMemoryEvents,
   subscribeToMemoryEvents,
   memoryEvents,
+  getArchiveTokenMetrics,
+  computeMemoryEfficiency,
 } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
@@ -276,6 +278,36 @@ app.post("/api/memory/sync", async (_req, res) => {
   } catch (error: any) {
     console.error("Memory bank sync failed:", error);
     res.status(500).json({ error: error.message || "Failed to sync local memory to memory bank." });
+  }
+});
+
+// Token Telemetry & Context Compaction metrics API
+app.get("/api/tokens/stats", (req, res) => {
+  try {
+    const rawText = String(req.query.text || "").trim();
+    const summaryText = String(req.query.summary || "").trim();
+    const compaction = computeCompaction(rawText, summaryText);
+    const archive = getArchiveTokenMetrics();
+    const efficiency = computeMemoryEfficiency([], rawText);
+    res.json({
+      ok: true,
+      compaction,
+      archive,
+      efficiency,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to fetch token stats" });
+  }
+});
+
+// Memory Bank Archive & Efficiency summary API
+app.get("/api/memory/stats", (_req, res) => {
+  try {
+    const archive = getArchiveTokenMetrics();
+    const efficiency = computeMemoryEfficiency([], "");
+    res.json({ ok: true, archive, efficiency });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Failed to fetch memory stats" });
   }
 });
 

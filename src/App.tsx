@@ -714,6 +714,8 @@ export default function App() {
               isOpen={showDebugPanel}
               onClose={() => setShowDebugPanel(false)}
               onEventsCountChange={setEventsCount}
+              rawTranscript={liveTranscript}
+              liveSummary={liveSummary}
             />
           </div>
         )}
