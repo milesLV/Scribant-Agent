@@ -680,24 +680,6 @@ export default function App() {
           </div>
         )}
 
-        {/* View 2: Administration & Monitoring Tab */}
-        {activeTab === "admin" && (
-          <div id="admin-monitoring-section" className="pt-2">
-            <AdminMonitoring
-              onEventsCountChange={setEventsCount}
-              rawTranscript={liveTranscript}
-              liveSummary={liveSummary}
-            />
-          </div>
-        )}
-
-        {/* View 3: API Documentation Tab */}
-        {activeTab === "docs" && (
-          <div id="api-docs-section" className="pt-2">
-            <ApiDocsView />
-          </div>
-        )}
-
       </div>
 
       {/* Humble aesthetic footer */}
