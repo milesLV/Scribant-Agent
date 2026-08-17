@@ -4,12 +4,35 @@ Executors for Google Calendar, Tasks, Drive, and Docs API operations,
 with support for authenticated OAuth execution and local sandbox simulation.
 """
 from __future__ import annotations
+import asyncio
 import datetime
 import json
+import os
+import shutil
 import time
 from typing import Any, Dict, Optional
 import httpx
 from backend.events import emit_adk_event, create_event, create_event_actions
+
+
+async def gws_cli_execute(cmd_args: list[str]) -> Optional[str]:
+    """Execute a Google Workspace CLI command if a gws/gcloud binary is available."""
+    cli_bin = os.environ.get("GWS_CLI_PATH") or shutil.which("gws")
+    if not cli_bin:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cli_bin,
+            *cmd_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return stdout.decode("utf-8").strip()
+    except Exception as e:
+        print(f"[gws_cli_execute] CLI execution failed: {e}")
+    return None
 
 
 def to_gcal_dates(event: Dict[str, Any]) -> Dict[str, Any]:

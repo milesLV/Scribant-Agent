@@ -148,11 +148,24 @@ async def test_queue_and_actions():
         access_token="sandbox",
     )
     assert "mock-create_calendar_event" in res["id"]
-    print("✓ test_queue_and_actions passed")
+from backend.skills import calendar_skill, task_skill, search_skill, doc_skill, build_skills_criteria_text
+
+
+def test_skills():
+    """Verify Skill registry and criteria generation."""
+    assert calendar_skill.name == "calendarEvents"
+    assert task_skill.name == "tasks"
+    assert search_skill.name == "searchQueries"
+    assert doc_skill.name == "ideasSummary"
+    criteria = build_skills_criteria_text()
+    assert "calendarEvents" in criteria
+    assert "tasks" in criteria
+    print("✓ test_skills passed")
 
 
 if __name__ == "__main__":
     test_agent_declarations()
+    test_skills()
     test_events()
     test_utils()
     test_workspace()
