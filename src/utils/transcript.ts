@@ -58,6 +58,25 @@ export function applyCorrections(
   return { text, words: flags };
 }
 
+/**
+ * Every transcript producer (mic speech, tab audio, and the extra Cloud-STT paths on the
+ * diarization branches) appends with `prev.trim()`. The trailing half is harmless — a space is
+ * re-added immediately — but the LEADING half silently deletes whitespace the producer doesn't
+ * own: put a blank line at the top of your notes and the next recognized phrase eats it,
+ * shifting every offset in the document out from under an active cursor.
+ *
+ * Rather than patch each producer (they live in the most-rewritten block of AudioRecorder, and
+ * there are three of them on some branches), restore the head after the fact. The rule is
+ * append-only: a producer derives new text from old, so whatever the old text STARTED with is
+ * not its to remove.
+ */
+export function preserveHead(prev: string, next: string): string {
+  const lead = prev.slice(0, prev.length - prev.trimStart().length);
+  return lead && !next.startsWith(lead) ? lead + next : next;
+}
+
+// ponytail: self-check pins the correction-splicing offsets and the append-only head rule.
+// Run: tsx src/utils/transcript.ts
 if (typeof process !== "undefined" && process.argv[1]?.endsWith("transcript.ts")) {
   const eq = (a: unknown, b: unknown, m: string) => {
     if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
@@ -118,6 +137,23 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("transcript.ts")
   eq(r6.text, "the store pier", "deletion mid-string");
   eq(r6.words, [{ text: "pier", start: 10, end: 14, confidence: 0.4 }], "flag offset shifted -6");
   eq(r6.text.slice(10, 14), "pier", "shifted flag span still lands on the word");
+
+  // --- preserveHead: producers may extend the tail, never eat the head -------------------
+  // The real shape: a producer runs prev.trim() then appends. Only the leading loss is undone.
+  const produce = (prev: string, phrase: string) => {
+    const cleaned = prev.trim();
+    return cleaned ? cleaned + " " + phrase + " " : phrase + " ";
+  };
+  eq(preserveHead("\n\nmy notes ", produce("\n\nmy notes ", "and more")),
+    "\n\nmy notes and more ", "leading blank line survives a speech append");
+  eq(preserveHead("  indented ", produce("  indented ", "text")),
+    "  indented text ", "leading spaces survive");
+  eq(preserveHead("plain ", produce("plain ", "more")), "plain more ", "no leading space: untouched");
+  eq(preserveHead("", produce("", "first words")), "first words ", "empty transcript: untouched");
+  // Trailing whitespace is still the producer's to normalize — only the head is protected.
+  eq(preserveHead("tail   ", "tail more "), "tail more ", "trailing trim is left alone");
+  // Idempotent: re-running on already-correct output must not double the head.
+  eq(preserveHead("\n\nx ", "\n\nx y "), "\n\nx y ", "already preserved: no double prefix");
 
   console.log("transcript self-check ✓");
 }

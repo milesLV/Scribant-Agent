@@ -2,8 +2,11 @@ import React, { useState, useEffect, useRef } from "react";
 import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus, ScreenShare, ScreenShareOff, Radio, Users } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
-import { applyCorrections, CONFIDENCE_THRESHOLD } from "../utils/transcript";
+import { applyCorrections, preserveHead, CONFIDENCE_THRESHOLD } from "../utils/transcript";
 import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
+import { useStickToBottom } from "../hooks/useStickToBottom";
+import { useClickToEditCaret } from "../hooks/useClickToEditCaret";
+import { usePreservedSelection } from "../hooks/usePreservedSelection";
 
 // The capture cycle lives in App (one debounce timer → /api/live). This component owns the
 // transcript and the correction-splicing that keeps highlight offsets valid; it receives finished
@@ -28,6 +31,13 @@ declare global {
   }
 }
 
+// Marks a subtree as NOT part of the transcript string. caretOffsetFromPoint sums text nodes to
+// derive a string index, so non-transcript text rendered BEFORE the end — a correction-chip
+// popover, a speaker badge — must carry `data-transcript-text="false"`, or every click after it
+// lands too far right by that text's length. Interim speech needs no marker: it renders last, so
+// an offset inside it already exceeds transcript.length and gets clamped by the caller.
+const NON_TRANSCRIPT_ATTR = "data-transcript-text";
+
 // Maps a click point to a character offset in `container`'s rendered text, so switching from the
 // read-only view to a textarea can land the cursor where the user actually clicked instead of at 0 —
 // caretRangeFromPoint/caretPositionFromPoint give a DOM position, not a string index, so this walks
@@ -50,12 +60,18 @@ function caretOffsetFromPoint(x: number, y: number, container: Node): number | n
     return null; // unsupported browser — caller leaves the default cursor position alone
   }
   if (!container.contains(node)) return null;
+  const excluded = (n: Node): boolean => {
+    for (let el = n.parentElement; el && el !== container; el = el.parentElement) {
+      if (el.getAttribute(NON_TRANSCRIPT_ATTR) === "false") return true;
+    }
+    return false;
+  };
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   let total = 0;
   let n: Node | null;
   while ((n = walker.nextNode())) {
-    if (n === node) return total + localOffset;
-    total += (n.textContent || "").length;
+    if (n === node) return excluded(n) ? total : total + localOffset;
+    if (!excluded(n)) total += (n.textContent || "").length;
   }
   return total;
 }
@@ -103,7 +119,15 @@ export default function AudioRecorder({
   savingDrive
 }: AudioRecorderProps) {
   const [isListening, setIsListening] = useState(false);
-  const [transcript, setTranscript] = useState("");
+  const [transcript, setTranscriptState] = useState("");
+  // See preserveHead: producers append via the updater form and all start with `prev.trim()`,
+  // which eats leading whitespace the user typed. Guard it here instead of in each producer —
+  // they sit in the block other branches rewrite, and there are several of them. A direct-value
+  // call (user edit, clear, proofread splice) replaces the string wholesale and is left alone.
+  const setTranscript = React.useCallback((action: React.SetStateAction<string>) => {
+    if (typeof action !== "function") return setTranscriptState(action);
+    setTranscriptState(prev => preserveHead(prev, action(prev)));
+  }, []);
   const [interimTranscript, setInterimTranscript] = useState("");
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [useKeyboard, setUseKeyboard] = useState(false);
@@ -198,10 +222,6 @@ export default function AudioRecorder({
   const shouldListenRef = useRef(false);
 
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
-  // Where to place the cursor once the read-only view swaps for the textarea — computed from the
-  // click point BEFORE the swap, since the textarea is a fresh element with no memory of where in
-  // the div the user clicked. null means "couldn't compute it" (unsupported browser); leave it alone.
-  const pendingCaretRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Misheard-word proofread state. `words` are scored against the exact text in proofedTextRef
@@ -258,17 +278,23 @@ export default function AudioRecorder({
     setActiveChip(null);
   }, [proofResult]);
 
-  // The textarea just replaced the read-only view (click-to-edit) — land the cursor where the click
-  // actually landed instead of wherever the browser's own autoFocus default puts it.
-  useEffect(() => {
-    if (!isEditingTranscript || pendingCaretRef.current === null) return;
-    const el = textareaRef.current;
-    if (!el) return;
-    const pos = Math.min(pendingCaretRef.current, el.value.length);
-    el.focus();
-    el.setSelectionRange(pos, pos);
-    pendingCaretRef.current = null;
-  }, [isEditingTranscript]);
+  // The textarea replaces the read-only view (click-to-edit) — land the cursor AND the scroll
+  // position where the click actually landed, instead of wherever a fresh element defaults to.
+  const { captureClick, isPending } = useClickToEditCaret(
+    textareaRef,
+    isEditingTranscript && !useKeyboard,
+    caretOffsetFromPoint
+  );
+
+  // Editing is allowed while the mic is live, so speech can append to `transcript` mid-edit.
+  // Keep the user's cursor pinned to the character it was on when that happens.
+  const markLocalEdit = usePreservedSelection(textareaRef, transcript, { skip: isPending });
+
+  // Keep the transcript and live-summary panels pinned to their latest content as it streams in,
+  // pausing while the user scrolls up to read and resuming 5s after they stop interacting.
+  // Keyed on length, not content: only growth matters, and a number compares in O(1).
+  const transcriptScrollRef = useStickToBottom<HTMLDivElement>(transcript.length + interimTranscript.length);
+  const summaryScrollRef = useStickToBottom<HTMLDivElement>(liveSummary.length);
 
   // Swap a misheard word for one of its suggestions. Splice into the proofed text and shift every
   // later word's offsets by the length delta, so the OTHER highlights survive the edit intact.
@@ -549,6 +575,7 @@ export default function AudioRecorder({
           {activeChip === i && (
             <span
               onClick={(e) => e.stopPropagation()}
+              data-transcript-text="false"
               className="absolute z-20 left-0 top-full mt-1 min-w-[120px] bg-white border border-stone-200 rounded-lg shadow-lg p-1 flex flex-col text-left"
             >
               {alts.length > 0 ? alts.map((alt, k) => (
@@ -781,28 +808,39 @@ export default function AudioRecorder({
           
           <div className="flex-1 flex flex-col min-h-0">
             {useKeyboard || isEditingTranscript ? (
-              <textarea
-                id="type-thoughts-textarea"
-                ref={textareaRef}
-                value={transcript}
-                onChange={(e) => setTranscript(e.target.value)}
-                onBlur={() => setIsEditingTranscript(false)}
-                autoFocus={isEditingTranscript && !useKeyboard}
-                disabled={isProcessing}
-                placeholder="Write down whatever is on your mind. For example:&#10;'Today was busy, but good. I got a lot done on the product roadmap and Alice and I will meet tomorrow at 2 to discuss it. I need to make a mockup before it. Also, remember to grab more coffee beans on the way home.'"
-                className="w-full flex-1 bg-transparent border-0 p-0 text-xs text-stone-700 leading-normal focus:ring-0 outline-none resize-none font-sans"
-              />
+              <>
+                {/* No autoFocus — useClickToEditCaret owns focus (see that hook for why).
+                    Type scale, line height and right padding must stay identical to the
+                    read-only div below, or the text visibly reflows the instant you click in. */}
+                <textarea
+                  id="type-thoughts-textarea"
+                  ref={textareaRef}
+                  value={transcript}
+                  onChange={(e) => { markLocalEdit(); setTranscript(e.target.value); }}
+                  onBlur={() => setIsEditingTranscript(false)}
+                  disabled={isProcessing}
+                  placeholder="Write down whatever is on your mind. For example:&#10;'Today was busy, but good. I got a lot done on the product roadmap and Alice and I will meet tomorrow at 2 to discuss it. I need to make a mockup before it. Also, remember to grab more coffee beans on the way home.'"
+                  className="w-full flex-1 bg-transparent border-0 py-0 pl-0 pr-1 text-xs text-stone-700 leading-relaxed focus:ring-0 outline-none resize-none font-sans"
+                />
+                {/* Read-only, not inside the textarea: in there interim words would be editable
+                    and would get committed as real text before the recognizer finalized them. */}
+                {isListening && interimTranscript && (
+                  <div className="shrink-0 pt-1 text-[11px] text-amber-500 italic animate-pulse truncate">
+                    {interimTranscript}
+                  </div>
+                )}
+              </>
             ) : (
               <div
+                ref={transcriptScrollRef}
                 onClick={(e) => {
-                  if (isListening) return;
-                  pendingCaretRef.current = (transcript || interimTranscript)
-                    ? caretOffsetFromPoint(e.clientX, e.clientY, e.currentTarget)
-                    : 0;
+                  // Editing while the mic is live is supported — don't reintroduce an
+                  // isListening guard here.
+                  captureClick(e, !!(transcript || interimTranscript));
                   setIsEditingTranscript(true);
                 }}
                 className="w-full flex-1 overflow-y-auto text-xs text-stone-700 leading-relaxed font-sans cursor-text whitespace-pre-wrap pr-1"
-                title={isListening ? "Listening..." : "Click anywhere to edit transcript text"}
+                title="Click anywhere to edit transcript text"
               >
                 {(transcript || interimTranscript) ? (
                   <div className="leading-relaxed font-sans text-stone-750">
@@ -851,7 +889,7 @@ export default function AudioRecorder({
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto pr-1">
+          <div ref={summaryScrollRef} className="flex-1 overflow-y-auto pr-1">
             {liveSummary ? (
               <MarkdownBullets text={liveSummary} />
             ) : (
