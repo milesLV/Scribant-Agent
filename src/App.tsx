@@ -1,10 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import Header, { AppTab } from "./components/Header";
+import Header from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
-import AdminMonitoring from "./components/AdminMonitoring";
-import ApiDocsView from "./components/ApiDocsView";
 import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
@@ -74,8 +72,6 @@ export default function App() {
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
-  const [activeTab, setActiveTab] = useLocalStorage<AppTab>("active_app_tab", "workspace");
-  const [eventsCount, setEventsCount] = useState(0);
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -587,98 +583,92 @@ export default function App() {
           onSetAllowUncertain={setAllowUncertain}
           autoRun={autoRun}
           onAutoRunChange={setAutoRun}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          eventsCount={eventsCount}
         />
 
-        {/* View 1: Workspace Tab */}
-        {activeTab === "workspace" && (
-          <div className="space-y-6">
-            {/* Sync Mode Info Header banner */}
-            {!token && (
-              <div className="bg-amber-50 border border-amber-200/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-inner">
-                <div className="flex items-start gap-2.5">
-                  <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <div className="space-y-0.5">
-                    <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
-                    <p className="text-[11px] text-stone-500 leading-normal font-sans">
-                      No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
-                    </p>
-                  </div>
+        <div className="space-y-6">
+          {/* Sync Mode Info Header banner */}
+          {!token && (
+            <div className="bg-amber-50 border border-amber-200/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-inner">
+              <div className="flex items-start gap-2.5">
+                <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
+                  <p className="text-[11px] text-stone-500 leading-normal font-sans">
+                    No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
+                  </p>
                 </div>
-                <button
-                  onClick={handleGoogleSignIn}
-                  className="px-4.5 py-2 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-stone-100 hover:text-white rounded-lg border border-stone-950 shadow-sm flex items-center justify-center gap-1.5 transition-all self-start md:self-auto shrink-0 w-full md:w-auto"
-                >
-                  <FolderSync className="w-4 h-4" /> Sign in with Google
-                </button>
               </div>
-            )}
-
-            {/* Content layout: Top Row (Microphone) */}
-            <div className="w-full">
-              <AudioRecorder
-                key={recorderKey}
-                onAnalyze={handleAnalyzeStream}
-                isProcessing={isProcessing}
-                onShowToast={showToast}
-                onChangeTranscript={setLiveTranscript}
-                liveSummary={liveSummary}
-                proofResult={proofResult}
-                busy={busy}
-                onRunNow={() => runLive(liveTranscript.trim())}
-                onSaveToDrive={() => handleSaveToDrive(
-                  "Scribant Session",
-                  "Live Notes.md",
-                  liveSummary,
-                )}
-                savingDrive={savingDrive}
-              />
-            </div>
-
-            {/* Results layout: rendered cleanly underneath the Microphone */}
-            <div className="pt-2">
-              <ActiveSession
-                run={displayedRun}
-                onExecuteCalendar={i => executeItem("calendar", i)}
-                onExecuteTask={i => executeItem("task", i)}
-                onExecuteSearch={i => executeItem("search", i)}
-                onUndoCalendar={i => handleUndo("calendar", i)}
-                onUndoTask={i => handleUndo("task", i)}
-                onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
-                onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
-                onSaveToDrive={() => handleSaveToDrive(
-                  "Scribant Session",
-                  "Session Summary.md",
-                  activeAnalysis?.summary || "",
-                )}
-                savingDrive={savingDrive}
-                isLiveAnalyzing={busy.plan}
-              />
-            </div>
-
-            {/* Brain Dump Archive: Memory Bank & past session records */}
-            <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
-              <SessionHistory
-                runs={runs}
-                selectedRunId={selectedRunId}
-                onSelectRun={setSelectedRunId}
-              />
-            </div>
-
-            {/* Clear All Session Data button */}
-            <div className="pt-4 flex justify-center">
               <button
-                onClick={handleClearAll}
-                className="flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-stone-400 hover:text-red-600 bg-transparent hover:bg-red-50 border border-dashed border-stone-200 hover:border-red-300 rounded-xl transition-all cursor-pointer"
+                onClick={handleGoogleSignIn}
+                className="px-4.5 py-2 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-stone-100 hover:text-white rounded-lg border border-stone-950 shadow-sm flex items-center justify-center gap-1.5 transition-all self-start md:self-auto shrink-0 w-full md:w-auto"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                Clear All Session Data
+                <FolderSync className="w-4 h-4" /> Sign in with Google
               </button>
             </div>
+          )}
+
+          {/* Content layout: Top Row (Microphone) */}
+          <div className="w-full">
+            <AudioRecorder
+              key={recorderKey}
+              onAnalyze={handleAnalyzeStream}
+              isProcessing={isProcessing}
+              onShowToast={showToast}
+              onChangeTranscript={setLiveTranscript}
+              liveSummary={liveSummary}
+              proofResult={proofResult}
+              busy={busy}
+              onRunNow={() => runLive(liveTranscript.trim())}
+              onSaveToDrive={() => handleSaveToDrive(
+                "Scribant Session",
+                "Live Notes.md",
+                liveSummary,
+              )}
+              savingDrive={savingDrive}
+            />
           </div>
-        )}
+
+          {/* Results layout: rendered cleanly underneath the Microphone */}
+          <div className="pt-2">
+            <ActiveSession
+              run={displayedRun}
+              onExecuteCalendar={i => executeItem("calendar", i)}
+              onExecuteTask={i => executeItem("task", i)}
+              onExecuteSearch={i => executeItem("search", i)}
+              onUndoCalendar={i => handleUndo("calendar", i)}
+              onUndoTask={i => handleUndo("task", i)}
+              onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
+              onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
+              onSaveToDrive={() => handleSaveToDrive(
+                "Scribant Session",
+                "Session Summary.md",
+                activeAnalysis?.summary || "",
+              )}
+              savingDrive={savingDrive}
+              isLiveAnalyzing={busy.plan}
+            />
+          </div>
+
+          {/* Brain Dump Archive: Memory Bank & past session records */}
+          <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
+            <SessionHistory
+              runs={runs}
+              selectedRunId={selectedRunId}
+              onSelectRun={setSelectedRunId}
+            />
+          </div>
+
+          {/* Clear All Session Data button */}
+          <div className="pt-4 flex justify-center">
+            <button
+              onClick={handleClearAll}
+              className="flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-stone-400 hover:text-red-600 bg-transparent hover:bg-red-50 border border-dashed border-stone-200 hover:border-red-300 rounded-xl transition-all cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Clear All Session Data
+            </button>
+          </div>
+        </div>
 
       </div>
 

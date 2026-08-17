@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap, Activity, BookOpen } from "lucide-react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap } from "lucide-react";
 import { AutonomyMode } from "../types";
-
-export type AppTab = "workspace" | "admin" | "docs";
 
 interface HeaderProps {
   token: string | null;
@@ -18,9 +16,6 @@ interface HeaderProps {
   onSetAllowUncertain: (allow: boolean) => void;
   autoRun: boolean;
   onAutoRunChange: (on: boolean) => void;
-  activeTab?: AppTab;
-  onTabChange?: (tab: AppTab) => void;
-  eventsCount?: number;
 }
 
 const AUTONOMY_OPTIONS: { mode: AutonomyMode; label: string; description: string }[] = [
@@ -43,9 +38,6 @@ export default function Header({
   onSetAllowUncertain,
   autoRun,
   onAutoRunChange,
-  activeTab = "workspace",
-  onTabChange,
-  eventsCount = 0,
 }: HeaderProps) {
   const [inputClientId, setInputClientId] = useState(clientId || "");
   const dialogRef = useRef<HTMLDialogElement>(null);
