@@ -154,7 +154,7 @@ export async function transcribeWithCloudStt(
   options: CloudSttOptions = {}
 ): Promise<CloudSttResult> {
   const { token, projectId } = await getGoogleAuthClient();
-  const location = options.location || process.env.GOOGLE_CLOUD_LOCATION || "global";
+  const location = options.location || process.env.VERTEX_AI_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
   const languageCode = options.languageCode || "en-US";
   const minSpeakers = Math.max(1, options.minSpeakers ?? 1);
   const maxSpeakers = Math.max(minSpeakers, options.maxSpeakers ?? 5);

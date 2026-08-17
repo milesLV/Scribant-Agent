@@ -66,16 +66,46 @@ function filterValidCalendarEvents(events: any): any[] {
 // arithmetic (named weekdays especially: "by Friday" -> today, "this coming Friday" -> a Saturday).
 // forwardDate:true pushes bare weekdays into the future. hour/minute are null unless the phrase
 // stated a time, so callers keep the model's time-of-day otherwise. Returns null when no date found.
-interface ResolvedDate { date: string; hour: number | null; minute: number | null; }
+interface ResolvedDate {
+  date: string;
+  hour: number | null;
+  minute: number | null;
+  endDate?: string | null;
+  endHour?: number | null;
+  endMinute?: number | null;
+}
 function resolveDate(phrase: string, referenceISO: string): ResolvedDate | null {
   if (!phrase) return null;
   const ref = new Date(referenceISO);
-  const c = chrono.parse(phrase, isNaN(ref.getTime()) ? new Date() : ref, { forwardDate: true })[0]?.start;
+  const parsed = chrono.parse(phrase, isNaN(ref.getTime()) ? new Date() : ref, { forwardDate: true })[0];
+  const c = parsed?.start;
   if (!c) return null;
   const y = c.get("year"), mo = c.get("month"), d = c.get("day");
   if (y == null || mo == null || d == null) return null;
   const timed = c.isCertain("hour");
-  return { date: `${y}-${pad(mo)}-${pad(d)}`, hour: timed ? c.get("hour") : null, minute: timed ? (c.get("minute") ?? 0) : null };
+
+  let endDate: string | null = null;
+  let endHour: number | null = null;
+  let endMinute: number | null = null;
+  if (parsed.end) {
+    const ey = parsed.end.get("year") ?? y;
+    const emo = parsed.end.get("month") ?? mo;
+    const ed = parsed.end.get("day") ?? d;
+    endDate = `${ey}-${pad(emo)}-${pad(ed)}`;
+    if (parsed.end.isCertain("hour")) {
+      endHour = parsed.end.get("hour");
+      endMinute = parsed.end.get("minute") ?? 0;
+    }
+  }
+
+  return {
+    date: `${y}-${pad(mo)}-${pad(d)}`,
+    hour: timed ? c.get("hour") : null,
+    minute: timed ? (c.get("minute") ?? 0) : null,
+    endDate,
+    endHour,
+    endMinute,
+  };
 }
 
 // import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
@@ -92,9 +122,23 @@ export function resolvePlanDates(plan: any, refISO: string): any {
       : (String(evt.start || "").match(/T(\d{2}:\d{2}:\d{2})/)?.[1] ?? "09:00:00");
     evt.start = `${r.date}T${timeOfDay}`;
     if (evt.allDay) {
-      evt.end = `${r.date}T00:00:00`;
+      evt.end = `${r.endDate || r.date}T00:00:00`;
+    } else if (r.endHour != null) {
+      // Explicit end time resolved from sourceText via chrono (e.g. "from 8am to 5pm", "8:00 AM - 5:00 PM")
+      const endDate = r.endDate || r.date;
+      evt.end = `${endDate}T${pad(r.endHour)}:${pad(r.endMinute ?? 0)}:00`;
+    } else if (evt.end && String(evt.end).match(/T(\d{2}:\d{2}:\d{2})/)) {
+      // If the model supplied a distinct end time, respect it relative to the resolved date
+      const modelEndTime = String(evt.end).match(/T(\d{2}:\d{2}:\d{2})/)?.[1];
+      const modelStartTime = String(evt.start || "").match(/T(\d{2}:\d{2}:\d{2})/)?.[1];
+      if (modelEndTime && modelStartTime && modelEndTime !== modelStartTime) {
+        evt.end = `${r.date}T${modelEndTime}`;
+      } else {
+        const e = new Date(evt.start); e.setMinutes(e.getMinutes() + 30);
+        evt.end = `${e.getFullYear()}-${pad(e.getMonth() + 1)}-${pad(e.getDate())}T${pad(e.getHours())}:${pad(e.getMinutes())}:00`;
+      }
     } else {
-      const e = new Date(evt.start); e.setMinutes(e.getMinutes() + 30); // ponytail: +30min default; end duration isn't tracked
+      const e = new Date(evt.start); e.setMinutes(e.getMinutes() + 30); // fallback: +30min default when no end time is specified
       evt.end = `${e.getFullYear()}-${pad(e.getMonth() + 1)}-${pad(e.getDate())}T${pad(e.getHours())}:${pad(e.getMinutes())}:00`;
     }
   }
@@ -186,6 +230,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
       { title: "Yosemite", sourceText: "driving to Yosemite tomorrow", start: "2026-01-01T00:00:00", allDay: true },
       { title: "Vague", sourceText: "someday we should meet", start: "2026-06-29T11:00:00", allDay: false },
       { title: "Placeholder", sourceText: "no date here", start: "" },
+      { title: "Recording", sourceText: "Official recording session from 8:00 AM to 5:00 PM on Friday", start: "2026-01-01T08:00:00", allDay: false },
     ],
     tasks: [
       { title: "Passport", sourceText: "renew my passport by Friday", dueDate: "2026-01-01" },
@@ -197,7 +242,9 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(plan.calendarEvents[1].start, "2026-06-28T00:00:00");   // all-day pinned to midnight
   assert.equal(plan.calendarEvents[1].end, "2026-06-28T00:00:00");
   assert.equal(plan.calendarEvents[2].start, "2026-06-29T11:00:00");   // no date in phrase -> model's value kept
-  assert.equal(plan.calendarEvents.length, 3);                          // blank start dropped
+  assert.equal(plan.calendarEvents[3].start, "2026-07-03T08:00:00");   // Friday 8am to 5pm start
+  assert.equal(plan.calendarEvents[3].end, "2026-07-03T17:00:00");     // Friday 8am to 5pm end
+  assert.equal(plan.calendarEvents.length, 4);                          // blank start dropped
   assert.equal(plan.tasks[0].dueDate, "2026-07-03");                    // "by Friday" re-resolved
   assert.equal(plan.tasks[1].dueDate, "");                              // no deadline -> not invented
   assert.deepEqual(resolvePlanDates({}, R), {});                        // empty plan is a no-op
