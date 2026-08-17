@@ -74,7 +74,7 @@ export default function App() {
   });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
-  const [activeTab, setActiveTab] = useLocalStorage<AppTab>("active_app_tab", "workspace");
+  const [activeTab, setActiveTab] = useState<AppTab>("workspace");
   const [eventsCount, setEventsCount] = useState(0);
   const [savingDrive, setSavingDrive] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);

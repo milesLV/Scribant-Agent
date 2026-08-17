@@ -382,6 +382,7 @@ export default function AdminMonitoring({
             events={events}
             rawTranscript={rawTranscript}
             liveSummary={liveSummary}
+            serverConfig={serverConfig}
           />
         )}
 
@@ -586,7 +587,7 @@ export default function AdminMonitoring({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
                 <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
                   <span className="text-[10px] text-stone-500 uppercase tracking-wider block">GCP Project</span>
-                  <span className="text-stone-900 font-bold">{serverConfig?.projectId || "scribant-dev-sincere-labrador"}</span>
+                  <span className="text-stone-900 font-bold">{serverConfig?.projectId || "Not configured"}</span>
                 </div>
 
                 <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
@@ -596,12 +597,12 @@ export default function AdminMonitoring({
 
                 <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
                   <span className="text-[10px] text-stone-500 uppercase tracking-wider block">Reasoning Engine ID</span>
-                  <span className="text-emerald-700 font-bold">{serverConfig?.agentEngineId || "1566436282941308928"}</span>
+                  <span className="text-emerald-700 font-bold">{serverConfig?.agentEngineId || "Not configured"}</span>
                 </div>
 
                 <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
                   <span className="text-[10px] text-stone-500 uppercase tracking-wider block">Gemini Model</span>
-                  <span className="text-amber-700 font-bold">gemini-3.7-flash</span>
+                  <span className="text-amber-700 font-bold">{serverConfig?.model || "gemini-3.7-flash"}</span>
                 </div>
               </div>
             </div>

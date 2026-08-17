@@ -77,12 +77,14 @@ interface TokenVisualizerProps {
   events: AdkEvent[];
   rawTranscript?: string;
   liveSummary?: string;
+  serverConfig?: any;
 }
 
 export default function TokenVisualizer({
   events,
   rawTranscript = "",
   liveSummary = "",
+  serverConfig,
 }: TokenVisualizerProps) {
   const [stats, setStats] = useState<TokenStatsResponse | null>(null);
   const [timeSeries, setTimeSeries] = useState<TimeSeriesPoint[]>([]);
@@ -1063,7 +1065,7 @@ export default function TokenVisualizer({
                 Live Vertex AI Memory Bank Tester
               </span>
               <span className="text-[10px] font-mono text-stone-500">
-                Reasoning Engine ID: 1566436282941308928
+                Reasoning Engine ID: {serverConfig?.agentEngineId || "Not configured"}
               </span>
             </div>
 

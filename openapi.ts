@@ -23,6 +23,10 @@ export function validatePayload<T>(schema: z.ZodType<T>, data: unknown): Validat
 
 export const ConfigResponseSchema = z.object({
   googleClientId: z.string().nullable().describe("Public Google OAuth Client ID if credentials.json exists, otherwise null."),
+  projectId: z.string().nullable().optional().describe("Configured Google Cloud Project ID."),
+  location: z.string().nullable().optional().describe("Configured Vertex AI / GCP region."),
+  agentEngineId: z.string().nullable().optional().describe("Configured Vertex AI Agent Engine Reasoning Engine ID for Memory Bank."),
+  model: z.string().nullable().optional().describe("Configured Gemini model name."),
 });
 
 export const AnalyzeRequestSchema = z.object({
@@ -317,8 +321,8 @@ export function getOpenApiSpec() {
       "/api/config": {
         get: {
           tags: ["Integrations & Tools"],
-          summary: "Get OAuth Client Configuration",
-          description: "Serves the public Google OAuth Client ID if credentials.json exists locally.",
+          summary: "Get Client & Environment Configuration",
+          description: "Serves the public Google OAuth Client ID and active GCP/Vertex AI environment parameters.",
           responses: {
             "200": {
               description: "Configuration object",
@@ -328,6 +332,10 @@ export function getOpenApiSpec() {
                     type: "object",
                     properties: {
                       googleClientId: { type: "string", nullable: true, example: "123456789-abc.apps.googleusercontent.com" },
+                      projectId: { type: "string", nullable: true, example: "agentclinicep04" },
+                      location: { type: "string", nullable: true, example: "us-central1" },
+                      agentEngineId: { type: "string", nullable: true, example: "1778474901334654976" },
+                      model: { type: "string", nullable: true, example: "gemini-3.7-flash" },
                     },
                   },
                 },

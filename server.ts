@@ -26,6 +26,7 @@ import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
 import {
   registerOpenApiRoutes,
   validatePayload,
+  ConfigResponseSchema,
   AnalyzeRequestSchema,
   TranscribeCorrectRequestSchema,
   LivePipelineRequestSchema,
@@ -87,15 +88,35 @@ const safeRetrieve = (tag: string, query: string, options?: { userId?: string; s
 // Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
 // so no two of them can drift apart the way four hand-wired agent calls did.
 
-// Saves the user pasting their own client ID: serve the one already in credentials.json. client_id
-// only — it is public by design in the implicit flow, and the secret never leaves the server.
+// Saves the user pasting their own client ID: serve the one already in credentials.json.
+// Also serves active GCP/Vertex AI environment configuration read from .env.
 app.get("/api/config", async (_req, res) => {
+  let googleClientId: string | null = null;
   try {
     const creds = JSON.parse(await fs.readFile(path.join(process.cwd(), "credentials.json"), "utf-8"));
-    res.json({ googleClientId: (creds.installed ?? creds.web)?.client_id ?? null });
+    googleClientId = (creds.installed ?? creds.web)?.client_id ?? null;
   } catch {
-    res.json({ googleClientId: null });
+    googleClientId = null;
   }
+
+  const projectId = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.PROJECT_ID ?? null;
+  const location = process.env.VERTEX_AI_LOCATION ?? process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+  const agentEngineId =
+    process.env.VERTEX_AI_AGENT_ENGINE_ID ??
+    process.env.AGENT_ENGINE_ID ??
+    process.env.MEMORY_BANK_AGENT_ENGINE_ID ??
+    process.env.REASONING_ENGINE_ID ??
+    process.env.VERTEX_MEMORY_BANK_ID ??
+    null;
+  const model = process.env.GEMINI_MODEL ?? process.env.MODEL ?? MODEL ?? "gemini-3.7-flash";
+
+  res.json({
+    googleClientId,
+    projectId,
+    location,
+    agentEngineId,
+    model,
+  });
 });
 
 app.post("/api/analyze", async (req, res) => {
