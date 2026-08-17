@@ -8,20 +8,20 @@ help: ## Show available commands with structured, LLM-friendly guidance
 	@echo "=================================================================================="
 	@echo ""
 	@echo "Application Development:"
-	@echo "  make dev          Start local dev server with hot reload (Express + Vite) on port 3000."
+	@echo "  make dev          Start TypeScript development server (Express + Vite) on port 3000."
+	@echo "  make dev-py       Start Python ADK backend server (FastAPI + Uvicorn) on port 3000."
+	@echo "  make check-py     Run Python backend test suite."
 	@echo "  make check        MANDATORY VALIDATION GATE. Runs typechecker (tsc --noEmit) and all"
 	@echo "                    12 submodule self-test suites. Run this before committing any changes."
 	@echo "  make build        Build production client bundle (dist/) and bundle server.ts via esbuild."
+	@echo "  make start-py     Run Python production server on port 3000."
 	@echo "  make start        Run compiled production server from dist/server.cjs."
 	@echo "  make lint         Run fast TypeScript typecheck without emitting files."
 	@echo "  make eval         Run LLM-as-a-judge evaluation benchmark suite against evals/data/."
 	@echo "  make clean        Delete dist/ build directory and compiled artifacts."
 	@echo ""
-	@echo "Environment & Vertex AI Memory Bank:"
+	@echo "Environment & Configuration:"
 	@echo "  make setup        One-shot end-to-end setup (tf-apply -> setup:env -> check)."
-	@echo "  make memory-bank  Manage Vertex AI Memory Bank in GCP. Options:"
-	@echo "                      make memory-bank CMD=list"
-	@echo "                      make memory-bank CMD=create NAME=<custom-name>"
 	@echo "  make env          Regenerate/update .env file from live GCP/Terraform outputs."
 	@echo ""
 	@echo "Terraform GCP Infrastructure:"
@@ -43,11 +43,17 @@ setup: ## Full automated local setup
 env: ## Regenerate .env from live state
 	@npm run setup:env
 
-memory-bank: ## Manage Memory Banks (e.g. make memory-bank CMD=list)
-	@npm run create:memory-bank $(CMD)
-
 dev:
 	npm run dev
+
+dev-py:
+	PYTHONPATH=. .venv/bin/uvicorn backend.server:app --host 127.0.0.1 --port 3000 --reload
+
+check-py:
+	PYTHONPATH=. .venv/bin/python3 -m backend.test_backend
+
+start-py:
+	PYTHONPATH=. .venv/bin/uvicorn backend.server:app --host 127.0.0.1 --port 3000
 
 build:
 	npm run build

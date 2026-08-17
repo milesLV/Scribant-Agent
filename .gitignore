@@ -17,6 +17,14 @@ credentials.json
 crash.log
 *.tfvars
 !.tfvars.example
-.terraform.lock.hcl
-
 .playwright-cli/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Docs
+docs/
