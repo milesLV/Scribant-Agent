@@ -658,7 +658,7 @@ export default function App() {
               />
             </div>
 
-            {/* Brain Dump Archive: Memory Bank & past session records */}
+            {/* Brain Dump Archive: Memory Bank & past session records (Commented out per user request)
             <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
               <SessionHistory
                 runs={runs}
@@ -666,6 +666,7 @@ export default function App() {
                 onSelectRun={setSelectedRunId}
               />
             </div>
+            */}
 
             {/* Clear All Session Data button */}
             <div className="pt-4 flex justify-center">

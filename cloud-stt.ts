@@ -164,8 +164,8 @@ export async function transcribeWithCloudStt(
   const cleanAudio = audioBase64.replace(/^data:audio\/[^;]+;base64,/, "");
 
   // Cloud STT V2 REST recognize endpoint
-  // Using the default recognizer `_` in specified location
-  const url = `https://speech.googleapis.com/v2/projects/${projectId}/locations/${location}/recognizers/_:recognize`;
+  // Using the default recognizer `_` in us-central1 regional endpoint for chirp_2
+  const url = `https://us-central1-speech.googleapis.com/v2/projects/${projectId}/locations/us-central1/recognizers/_:recognize`;
 
   const requestBody: Record<string, any> = {
     config: {
