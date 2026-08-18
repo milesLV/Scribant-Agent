@@ -55,7 +55,7 @@ export interface DriveDocItem {
   folderId?: string;
 }
 
-interface SearchQueryItem {
+export interface SearchQueryItem {
   sourceText?: string;
   query: string;
   condensed?: string; // 1-2 sentence direct answer (shown collapsed)

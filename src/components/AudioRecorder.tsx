@@ -941,6 +941,7 @@ export default function AudioRecorder({
             Clear Text
           </button>
         )}
+        {/* "Analyze Thoughts" button commented out — thoughts are analyzed live in real time
         <button
           onClick={handleFormSubmit}
           disabled={isProcessing || !(transcript || interimTranscript).trim()}
@@ -956,6 +957,7 @@ export default function AudioRecorder({
             </>
           )}
         </button>
+        */}
       </div>
     </div>
   );

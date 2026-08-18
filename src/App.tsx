@@ -5,7 +5,7 @@ import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
 import AdminMonitoring from "./components/AdminMonitoring";
 import ApiDocsView from "./components/ApiDocsView";
-import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
+import { StreamRun, AnalysisResult, ProofResult, AutonomyMode, CalendarEvent, TaskItem, SearchQueryItem } from "./types";
 import {
   createCalendarEvent,
   createGoogleTask,
@@ -108,20 +108,99 @@ export default function App() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
   };
-  // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage).
-  const toAnalysisResult = (rawRes: any, rawText: string): AnalysisResult => ({
-    summary: rawRes.ideasSummary || "",
-    rawText,
-    calendarEvents: (rawRes.calendarEvents || [])
-      .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
-      .map((evt: any) => ({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay })),
-    tasks: (rawRes.tasks || [])
-      .filter((t: any) => t && t.title && t.title.trim() !== "")
-      .map((t: any) => ({ ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined })),
-    searchQueries: (rawRes.searchQueries || [])
-      .filter((q: any) => q && q.query && q.query.trim() !== "")
-      .map((q: any) => ({ ...q, status: "pending" as const })),
-  });
+  // Normalize string for fuzzy comparison (strip punctuation, extra spaces, casing)
+  const normalizeText = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9\s]/gi, "").replace(/\s+/g, " ").trim();
+  const isQueryMatch = (q1: string, q2: string): boolean => {
+    const n1 = normalizeText(q1);
+    const n2 = normalizeText(q2);
+    if (!n1 || !n2) return false;
+    if (n1 === n2) return true;
+    if (n1.length > 15 && (n1.includes(n2) || n2.includes(n1))) return true;
+    const words1 = new Set(n1.split(" "));
+    const words2 = new Set(n2.split(" "));
+    const intersection = [...words1].filter(w => words2.has(w)).length;
+    const union = new Set([...words1, ...words2]).size;
+    return union > 0 && (intersection / union) >= 0.75;
+  };
+
+  // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage),
+  // merging with previous live draft state to preserve completed research, scheduled events, and tasks.
+  const toAnalysisResult = (rawRes: any, rawText: string, prev?: AnalysisResult | null): AnalysisResult => {
+    const prevSearches = prev?.searchQueries || [];
+    const incomingSearches = (rawRes.searchQueries || []).filter((q: any) => q && q.query && q.query.trim() !== "");
+
+    const searchQueries: SearchQueryItem[] = [];
+    for (const q of incomingSearches) {
+      const match = prevSearches.find(ps =>
+        isQueryMatch(ps.query, q.query) ||
+        (q.sourceText && ps.sourceText && ps.sourceText === q.sourceText)
+      );
+      const merged: SearchQueryItem = match && (match.status === "completed" || match.status === "failed")
+        ? { ...q, ...match }
+        : { ...q, status: "pending" as const };
+
+      if (!searchQueries.some(sq => isQueryMatch(sq.query, merged.query))) {
+        searchQueries.push(merged);
+      }
+    }
+
+    // Keep previously completed searches even if not explicitly present in the latest incoming plan
+    for (const ps of prevSearches) {
+      if (ps.status === "completed" && !searchQueries.some(sq => isQueryMatch(sq.query, ps.query))) {
+        searchQueries.push(ps);
+      }
+    }
+
+    const prevEvents = prev?.calendarEvents || [];
+    const calendarEvents: CalendarEvent[] = [];
+    for (const evt of (rawRes.calendarEvents || []).filter((e: any) => e && e.title && e.title.trim() !== "")) {
+      const match = prevEvents.find(pe =>
+        (normalizeText(pe.title) === normalizeText(evt.title) && pe.start === evt.start) ||
+        (evt.sourceText && pe.sourceText && pe.sourceText === evt.sourceText)
+      );
+      const merged: CalendarEvent = match && (match.status === "scheduled" || match.status === "failed")
+        ? { ...evt, ...match }
+        : { ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay };
+
+      if (!calendarEvents.some(ce => normalizeText(ce.title) === normalizeText(merged.title) && ce.start === merged.start)) {
+        calendarEvents.push(merged);
+      }
+    }
+    for (const pe of prevEvents) {
+      if (pe.status === "scheduled" && !calendarEvents.some(ce => normalizeText(ce.title) === normalizeText(pe.title) && ce.start === pe.start)) {
+        calendarEvents.push(pe);
+      }
+    }
+
+    const prevTasks = prev?.tasks || [];
+    const tasks: TaskItem[] = [];
+    for (const t of (rawRes.tasks || []).filter((item: any) => item && item.title && item.title.trim() !== "")) {
+      const match = prevTasks.find(pt =>
+        normalizeText(pt.title) === normalizeText(t.title) ||
+        (t.sourceText && pt.sourceText && pt.sourceText === t.sourceText)
+      );
+      const merged: TaskItem = match && (match.status === "created" || match.status === "failed")
+        ? { ...t, ...match }
+        : { ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined };
+
+      if (!tasks.some(tk => normalizeText(tk.title) === normalizeText(merged.title))) {
+        tasks.push(merged);
+      }
+    }
+    for (const pt of prevTasks) {
+      if (pt.status === "created" && !tasks.some(tk => normalizeText(tk.title) === normalizeText(pt.title))) {
+        tasks.push(pt);
+      }
+    }
+
+    return {
+      summary: rawRes.ideasSummary || prev?.summary || "",
+      rawText,
+      calendarEvents,
+      tasks,
+      searchQueries,
+    };
+  };
 
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
   const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) => {
@@ -256,7 +335,7 @@ export default function App() {
     }
     else if (msg.stage === "summary") setLiveSummary(msg.summary);
     else if (msg.stage === "plan") {
-      setLiveDraft(toAnalysisResult(msg.plan, msg.text));
+      setLiveDraft(prev => toAnalysisResult(msg.plan, msg.text, prev));
       lastPlannedLenRef.current = (msg.text || "").length;
     }
     // "fatal" carries no stage of its own — guard so it can't invent a busy key.
@@ -357,7 +436,7 @@ export default function App() {
 
       const rawRes = await res.json();
 
-      const analysis = toAnalysisResult(rawRes, text);
+      const analysis = toAnalysisResult(rawRes, text, liveDraft);
 
       // Consent-gated autonomy. Finalize only — the live draft re-plans continuously, so running
       // this there would re-fire the same writes every cycle. Mutates the local object before it

@@ -148,23 +148,25 @@ async function getGoogleAuthClient(): Promise<{ token: string; projectId: string
   return { token, projectId };
 }
 
-// Transcribe audio using Google Cloud Speech-to-Text V2 API with speaker diarization
+// Transcribe audio using Google Cloud Speech-to-Text API with speaker diarization
 export async function transcribeWithCloudStt(
   audioBase64: string,
   options: CloudSttOptions = {}
 ): Promise<CloudSttResult> {
   const { token, projectId } = await getGoogleAuthClient();
-  const location = options.location || process.env.VERTEX_AI_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || "us-central1";
-  const languageCode = options.languageCode || "en-US";
-  const minSpeakers = Math.max(1, options.minSpeakers ?? 1);
-  const maxSpeakers = Math.max(minSpeakers, options.maxSpeakers ?? 5);
   const enableDiarization = options.enableDiarization !== false;
 
   // Clean base64 payload if it includes data URL prefix
   const cleanAudio = audioBase64.replace(/^data:audio\/[^;]+;base64,/, "");
 
-  // Cloud STT V2 REST recognize endpoint
-  // Using the default recognizer `_` in us-central1 regional endpoint for chirp_2
+  // When speaker diarization is requested, use Google Cloud STT V1 which natively
+  // supports real-time synchronous speaker diarization with speakerTag tracking.
+  if (enableDiarization) {
+    return transcribeWithCloudSttV1(cleanAudio, token, projectId, options);
+  }
+
+  // When diarization is not requested, use Google Cloud STT V2 Chirp 2 in us-central1
+  const languageCode = options.languageCode || "en-US";
   const url = `https://us-central1-speech.googleapis.com/v2/projects/${projectId}/locations/us-central1/recognizers/_:recognize`;
 
   const requestBody: Record<string, any> = {
@@ -172,14 +174,6 @@ export async function transcribeWithCloudStt(
       autoDecodingConfig: {},
       languageCodes: [languageCode],
       model: options.model || "chirp_2",
-      features: enableDiarization
-        ? {
-            diarizationConfig: {
-              minSpeakerCount: minSpeakers,
-              maxSpeakerCount: maxSpeakers,
-            },
-          }
-        : {},
     },
     content: cleanAudio,
   };
@@ -196,10 +190,10 @@ export async function transcribeWithCloudStt(
 
   if (!response.ok) {
     const errorText = await response.text();
-    // If V2 default recognizer returns 404/400 (e.g. location/model unsupported), attempt V1 fallback
+    // If V2 default recognizer returns 404/400, attempt V1 fallback
     if (response.status === 404 || response.status === 400) {
       console.warn(`[CloudSTT] V2 request failed (${response.status}), attempting V1 fallback:`, errorText);
-      return transcribeWithCloudSttV1Fallback(cleanAudio, token, projectId, options);
+      return transcribeWithCloudSttV1(cleanAudio, token, projectId, options);
     }
     throw new Error(`Google Cloud STT V2 API error (${response.status}): ${errorText}`);
   }
@@ -252,8 +246,8 @@ export async function transcribeWithCloudStt(
   };
 }
 
-// Fallback to Cloud STT V1 API for environments or regions where V2 is not initialized
-async function transcribeWithCloudSttV1Fallback(
+// Transcribe using Google Cloud STT V1 API (native support for synchronous speaker diarization)
+async function transcribeWithCloudSttV1(
   cleanAudio: string,
   token: string,
   projectId: string,
