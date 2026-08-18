@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 // Lean shapes — just what the APIs need (client types carry UI status fields we don't want here).
-interface EventInput { title: string; description?: string; start: string; end?: string; allDay?: boolean; }
+interface EventInput { title: string; description?: string; start: string; end?: string; allDay?: boolean; timeZone?: string; }
 interface TaskInput { title: string; notes?: string; dueDate?: string; }
 
 async function googleFetch(method: "GET" | "POST", url: string, token: string, body?: unknown): Promise<any> {
@@ -37,7 +37,7 @@ export function toGcalDates(event: EventInput): { start: any; end: any } {
     }
     return { start: { date: sd }, end: { date: ed } };
   }
-  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const timeZone = event.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   return { start: { dateTime: event.start, timeZone }, end: { dateTime: event.end, timeZone } };
 }
 
@@ -147,6 +147,7 @@ export const WORKSPACE_ACTIONS: Record<string, WorkspaceAction> = {
       start: z.string().min(1).describe("Start as ISO-8601 local datetime, e.g. 2026-07-10T15:00:00"),
       end: z.string().optional().describe("End as ISO-8601 local datetime; 30 minutes after start if no duration implied"),
       allDay: z.boolean().optional().describe("True if it spans whole day(s) with no specific clock time"),
+      timeZone: z.string().optional().describe("IANA time zone identifier, e.g. America/Los_Angeles"),
     }),
     run: async (token, event) => ({ eventId: await gcalCreateEvent(token, event) }),
   },
@@ -207,6 +208,9 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   const timed = toGcalDates({ title: "t", start: "2026-07-10T15:00:00", end: "2026-07-10T15:30:00" });
   assert.equal(timed.start.dateTime, "2026-07-10T15:00:00");
   assert.ok(timed.start.timeZone);
+  const timedTz = toGcalDates({ title: "t", start: "2026-07-10T15:00:00", end: "2026-07-10T15:30:00", timeZone: "America/Los_Angeles" });
+  assert.equal(timedTz.start.timeZone, "America/Los_Angeles");
+  assert.equal(timedTz.end.timeZone, "America/Los_Angeles");
 
   // real mode posts the right shape (fetch stubbed)
   const realFetch = globalThis.fetch;

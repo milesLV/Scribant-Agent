@@ -213,8 +213,12 @@ export default function ActiveSession({
     runOnRow("search", idx, () => onExecuteSearch(idx));
 
   const toDatetimeLocalString = (isoString: string): string => {
+    if (!isoString) return "";
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(isoString) && !isoString.endsWith("Z") && !/[+-]\d{2}:\d{2}$/.test(isoString)) {
+      return isoString.slice(0, 16);
+    }
     const d = new Date(isoString);
-    if (!isoString || isNaN(d.getTime())) return "";
+    if (isNaN(d.getTime())) return "";
     return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   };
 
@@ -365,7 +369,12 @@ export default function ActiveSession({
               {analysis.calendarEvents.map((item, idx) => {
                 const setDate = (field: "start" | "end") => (e: React.ChangeEvent<HTMLInputElement>) => {
                   try {
-                    onUpdateCalendar(idx, { ...item, [field]: e.target.value ? new Date(e.target.value).toISOString() : "" });
+                    const val = e.target.value;
+                    onUpdateCalendar(idx, {
+                      ...item,
+                      [field]: val ? (val.length === 16 ? `${val}:00` : val) : "",
+                      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+                    });
                   } catch {}
                 };
                 return (

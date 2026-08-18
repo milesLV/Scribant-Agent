@@ -17,6 +17,7 @@ export interface CalendarEvent {
   start: string; // ISO string
   end: string; // ISO string
   allDay?: boolean; // spans whole day(s) with no clock time (trip, birthday, OOO)
+  timeZone?: string; // IANA time zone identifier (e.g. America/Los_Angeles)
   status: 'pending' | 'scheduled' | 'failed';
   eventId?: string;
   error?: string;

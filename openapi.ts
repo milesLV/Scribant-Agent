@@ -41,6 +41,7 @@ export const CalendarEventSchema = z.object({
   start: z.string().describe("ISO start timestamp or date string."),
   end: z.string().optional().describe("ISO end timestamp or date string."),
   allDay: z.boolean().optional().describe("True if event is an all-day event."),
+  timeZone: z.string().optional().describe("IANA time zone identifier (e.g. 'America/Los_Angeles')."),
   description: z.string().optional().describe("Optional description or notes for the event."),
   confidence: z.number().optional().describe("Model confidence score (0 to 1)."),
   rationale: z.string().optional().describe("Model rationale for extracting this event."),

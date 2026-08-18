@@ -63,13 +63,15 @@ async function executeOnServer(kind: ExecKind, item: object, token: string): Pro
 }
 
 export async function createCalendarEvent(token: string | null, event: Omit<CalendarEvent, "status">): Promise<string> {
+  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const timeZone = event.timeZone || browserTimeZone;
   if (!token) {
-    const id = sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, status: "scheduled", eventId: id }));
-    executeOnServer("create_calendar_event", { title: event.title, description: event.description, start: event.start, end: event.end, allDay: event.allDay }, "sandbox").catch(() => {});
+    const id = sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, timeZone, status: "scheduled", eventId: id }));
+    executeOnServer("create_calendar_event", { title: event.title, description: event.description, start: event.start, end: event.end, allDay: event.allDay, timeZone }, "sandbox").catch(() => {});
     return id;
   }
   const { title, description, start, end, allDay } = event;
-  return executeOnServer("create_calendar_event", { title, description, start, end, allDay }, token);
+  return executeOnServer("create_calendar_event", { title, description, start, end, allDay, timeZone }, token);
 }
 
 // ==========================================
