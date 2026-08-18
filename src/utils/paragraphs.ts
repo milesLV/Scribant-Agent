@@ -287,22 +287,50 @@ export function absorb(
 }
 
 /**
- * Render a whole utterance list to the flat string the editor and the agents consume. Defined in
- * terms of `absorb` rather than repeating the rules, so batch rendering and live appending can
- * never drift apart.
+ * Fold a batch of utterances into the open paragraph, returning the text to APPEND and the state to
+ * carry forward. Split from the string splice below so a caller can advance its paragraph state
+ * OUTSIDE a React state updater — updaters may run more than once, and an updater that advanced the
+ * state itself would apply every break twice.
+ *
+ * `addition` always leads with a separator (or is empty). Nothing here reads the existing
+ * transcript, which is what makes appending strictly additive.
  */
-export function joinUtterances(utterances: Utterance[], opts: ParagraphOptions = {}): string {
-  let open = EMPTY_PARAGRAPH;
-  let out = "";
+export function foldUtterances(
+  open: OpenParagraph,
+  utterances: Utterance[],
+  opts: ParagraphOptions = {},
+): { addition: string; open: OpenParagraph } {
+  let addition = "";
+  let current = open;
 
   for (const u of utterances) {
-    if (!u.text.trim()) continue;
-    const { kind, open: nextOpen } = absorb(open, u, opts);
-    out += (out ? SEPARATORS[kind] : "") + u.text.trim();
-    open = nextOpen;
+    const text = u.text.trim();
+    if (!text) continue;
+    const { kind, open: next } = absorb(current, u, opts);
+    addition += SEPARATORS[kind] + text;
+    current = next;
   }
 
-  return out;
+  return { addition, open: current };
+}
+
+/**
+ * Attach a fold's `addition` to the transcript. trimEnd rather than trim: the leading whitespace is
+ * the user's (see preserveHead in ./transcript), and only an empty transcript drops the separator
+ * the addition leads with.
+ */
+export function spliceAddition(prev: string, addition: string): string {
+  if (!addition) return prev;
+  return prev.trim() ? prev.trimEnd() + addition : addition.trimStart();
+}
+
+/**
+ * Render a whole utterance list to the flat string the editor and the agents consume. One
+ * implementation shared with the live path — batch rendering and incremental appending cannot drift
+ * apart because there is nothing to drift from.
+ */
+export function joinUtterances(utterances: Utterance[], opts: ParagraphOptions = {}): string {
+  return spliceAddition("", foldUtterances(EMPTY_PARAGRAPH, utterances, opts).addition);
 }
 
 /* --- producer adapters ------------------------------------------------------------------ */
@@ -550,6 +578,141 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
     "narration -> intent -> question reads as three paragraphs, on cue words alone");
   eq(dump.split("\n\n")[1].startsWith("I need to write up"), true,
     "the break lands where the mode actually turns");
+
+  /* --- properties over randomized sequences ---------------------------------------------------
+   * The assertions above pin what the rules SAY. These pin what no rule may ever break, whatever
+   * combination of speakers, cues, lengths and punctuation turns up — including combinations
+   * nobody thought to write a case for. Seeded, so a counterexample is permanent and reproducible
+   * rather than a failure that shows up once in CI and never again.
+   */
+
+  // mulberry32.
+  const rng = (seed: number) => () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
+  const wordsOf = (t: string) => t.trim().split(/\s+/).filter(Boolean);
+  // Weighted toward no opener: most real speech carries no cue, and a generator that cued every
+  // utterance would exercise the mode rule far harder than reality does.
+  const OPENERS = ["", "", "", "I need to ", "what if ", "actually ", "so ", "we should ", "anyway "];
+
+  const genSequence = (r: () => number): Utterance[] =>
+    Array.from({ length: 1 + Math.floor(r() * 20) }, (_, i) => {
+      const speakerRoll = r();
+      return {
+        text: OPENERS[Math.floor(r() * OPENERS.length)]
+          + Array.from({ length: 1 + Math.floor(r() * 24) }, (_, j) => `w${i}x${j}`).join(" ")
+          + (r() < 0.5 ? "." : ""),
+        speaker: speakerRoll < 0.4 ? undefined : `Speaker ${1 + Math.floor(speakerRoll * 3)}`,
+        source: "stt" as const,
+        startsScene: r() < 0.05 || undefined,
+      };
+    });
+
+  // Only speaker and scene survive with modes off and the caps out of reach — and neither of those
+  // rules reads the text at all.
+  const STRUCTURAL: ParagraphOptions = { detectMode: false, softCapWords: 1e9, hardCapWords: 1e9 };
+  const kindsOf = (us: Utterance[], opts: ParagraphOptions) => {
+    let o = EMPTY_PARAGRAPH;
+    return us.map(u => { const r = absorb(o, u, opts); o = r.open; return r.kind; });
+  };
+
+  for (let seed = 1; seed <= 300; seed++) {
+    const seq = genSequence(rng(seed));
+    const at = (m: string) => `${m} [seed ${seed}]`;
+    const batch = joinUtterances(seq);
+
+    // Append-only, and incremental == batch. Fed one utterance at a time, exactly as the live app
+    // feeds it: the transcript only ever GROWS at the tail. The proofreader splices corrections by
+    // character offset behind a `startsWith` prefix guard, so an append that rewrote committed text
+    // would silently invalidate every flag it is holding.
+    let open = EMPTY_PARAGRAPH;
+    let live = "";
+    for (const u of seq) {
+      const before = live;
+      const fold = foldUtterances(open, [u]);
+      open = fold.open;
+      live = spliceAddition(live, fold.addition);
+      eq(live.startsWith(before), true, at("an append rewrote text that was already committed"));
+    }
+    eq(live, batch, at("appending one at a time disagrees with rendering the batch"));
+
+    // A break may only ever insert whitespace — never drop, duplicate or reorder speech.
+    eq(wordsOf(batch), seq.flatMap(u => wordsOf(u.text)), at("text was lost or reordered"));
+
+    // The ceiling holds for every paragraph, not on average. No walls of text, ever.
+    eq(batch.split(/\n{2,}/).every(p => wordsOf(p).length <= HARD_CAP_WORDS), true,
+      at("a paragraph exceeded the hard cap"));
+
+    // Only the three declared separators reach the renderer.
+    eq(/(?<!\n)\n(?!\n)/.test(batch), false, at("a lone newline appeared"));
+    eq(/\n{4,}/.test(batch), false, at("a gap wider than a scene break appeared"));
+
+    // Pure: no hidden state accumulates between runs.
+    eq(joinUtterances(seq), batch, at("a second run of the same input differed"));
+
+    // THE regression property. Chrome's auto-punctuation is inconsistent, so identical speech
+    // arrives punctuated on one run and bare on the next; structural breaks must not notice.
+    eq(kindsOf(seq.map(u => ({ ...u, text: u.text.replace(/[.!?]/g, "") })), STRUCTURAL),
+      kindsOf(seq, STRUCTURAL),
+      at("stripping punctuation moved a structural break"));
+  }
+
+  eq(EMPTY_PARAGRAPH, { words: 0, endsSentence: false, mode: "narration", sentences: 0 },
+    "EMPTY_PARAGRAPH was mutated by a run");
+
+  /* --- a realistic dictation, chunked the way real recognizers chunk -------------------------- */
+
+  // Lowercase and completely unpunctuated on purpose: the worst case for the rules this replaced,
+  // which hung paragraph breaks off a trailing full stop that Chrome supplies only sometimes.
+  // `|` marks where a recognizer would have ended one final result and started the next.
+  const DUMP = [
+    "okay so the kitchen thing um where do i start",
+    "contractor dave said he can swing by thursday at two to walk through the space before he quotes anything",
+    "i need to be home for that",
+    "and i should clear the whole afternoon so i am not rushing him out the door",
+    "what if we did the backsplash ourselves instead of paying him for it",
+    "actually the tile is the expensive part not the labour",
+    "anyway i need to buy grout and two more boxes of tile because i measured wrong the first time",
+  ].join(" | ");
+
+  const flat = DUMP.replace(/ \| /g, " ");
+  eq(/[.!?]/.test(flat), false, "the fixture is meant to be free of punctuation");
+
+  const spoken = (text: string): Utterance => ({ text, source: "speech" });
+  const grid = (text: string, n: number) => {
+    const w = wordsOf(text);
+    return Array.from({ length: Math.ceil(w.length / n) }, (_, i) => spoken(w.slice(i * n, i * n + n).join(" ")));
+  };
+
+  const aligned = joinUtterances(DUMP.split(" | ").map(spoken)).split(/\n{2,}/);
+  const oneBlob = joinUtterances([spoken(flat)]).split(/\n{2,}/);
+  const eightWord = joinUtterances(grid(flat, 8)).split(/\n{2,}/);
+
+  for (const [name, paras] of [["aligned", aligned], ["blob", oneBlob], ["grid", eightWord]] as const) {
+    eq(wordsOf(paras.join(" ")), wordsOf(flat), `${name}: chunking changed the words themselves`);
+    eq(paras.every(p => wordsOf(p).length <= HARD_CAP_WORDS), true, `${name}: produced a wall of text`);
+  }
+
+  // Utterance-aligned is the case the cue rules are built for: the turns land at chunk starts.
+  // narration -> intent ("i need to be home") -> question ("what if we did"). The aside and the
+  // final intent do NOT break: the gate wants MODE_MIN_SENTENCES of the outgoing run first, and
+  // each had only just started. That is the conservative half of the trade-off, on purpose.
+  eq(aligned.length, 3, "utterance-aligned dictation reads as three paragraphs");
+  eq(aligned[1].startsWith("i need to be home"), true, "the break lands where the thought turns");
+  eq(aligned[2].startsWith("what if we did"), true, "and again at the question");
+
+  // A single long recognizer result is atomic. Nothing can break inside it, because breaks are
+  // only ever decided BETWEEN utterances — the append-only rule the proofreader offsets depend on.
+  eq(oneBlob.length, 1, "one 90-word result stays one paragraph — a documented limit, not a bug");
+
+  // Cue detection reads the OPENING of an utterance, so a chunk boundary that falls mid-thought
+  // hides the cue behind it. A fixed word grid can therefore only ever find FEWER turns than
+  // recognizer-aligned chunking — the length caps are what stop it degrading past a wall.
+  eq(eightWord.length <= aligned.length, true, "a word grid found more turns than aligned chunking");
 
   console.log("paragraphs self-check ✓");
 }

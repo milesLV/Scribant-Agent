@@ -4,7 +4,7 @@ import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
 import { applyCorrections, preserveHead, CONFIDENCE_THRESHOLD } from "../utils/transcript";
 import {
-  absorb, toUtterances, EMPTY_PARAGRAPH, SEPARATORS,
+  foldUtterances, spliceAddition, toUtterances, EMPTY_PARAGRAPH,
   type Utterance, type OpenParagraph,
 } from "../utils/paragraphs";
 import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
@@ -142,17 +142,10 @@ export default function AudioRecorder({
   // Separators are resolved BEFORE the state updater runs: React may invoke an updater more than
   // once, and advancing openParagraphRef inside one would apply each break twice.
   const appendUtterances = React.useCallback((utterances: Utterance[]) => {
-    let addition = "";
-    for (const u of utterances) {
-      const text = u.text.trim();
-      if (!text) continue;
-      const { kind, open } = absorb(openParagraphRef.current, u);
-      addition += SEPARATORS[kind] + text;
-      openParagraphRef.current = open;
-    }
+    const { addition, open } = foldUtterances(openParagraphRef.current, utterances);
     if (!addition) return;
-    // trimEnd, not trim: preserveHead would put a trimmed head back, but not touching it is simpler.
-    setTranscript(prev => (prev.trim() ? prev.trimEnd() + addition : addition.trimStart()));
+    openParagraphRef.current = open;
+    setTranscript(prev => spliceAddition(prev, addition));
   }, [setTranscript]);
 
   const [interimTranscript, setInterimTranscript] = useState("");
