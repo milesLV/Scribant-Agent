@@ -193,7 +193,7 @@ app.post("/api/live", async (req, res) => {
     res.status(400).json({ error: "Text is required and must be a string." });
     return;
   }
-  const { text, currentLocalTime, liveSummary, withPlan, sessionId } = v.data;
+  const { text, currentLocalTime, liveSummary, withPlan, withProof, sessionId } = v.data;
 
   res.setHeader("Content-Type", "application/x-ndjson");
   res.setHeader("Cache-Control", "no-cache");
@@ -201,8 +201,11 @@ app.post("/api/live", async (req, res) => {
   const send = (obj: unknown) => { if (!res.writableEnded) res.write(JSON.stringify(obj) + "\n"); };
 
   try {
-    // Skip the expensive classifier when the client says this tick added too little to re-plan.
-    const stages = new Set<Stage>(withPlan === false ? ["proof", "summary"] : ["proof", "summary", "plan"]);
+    // For low-latency streaming, summary + plan run in parallel; proofreading runs only if requested.
+    const stages = new Set<Stage>();
+    if (withProof) stages.add("proof");
+    stages.add("summary");
+    if (withPlan !== false) stages.add("plan");
     let latestPlan: unknown;
     await runOrchestrator({
       stages,

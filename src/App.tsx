@@ -17,17 +17,14 @@ import {
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { isAutoExecutable } from "./utils/autonomy";
 
-// New characters of speech required before the expensive classifier stage re-runs. Below this, the
-// cycle still proofreads and re-summarizes; the previous plan stays on screen. Tune if drafts feel
-// stale (lower) or the free-tier quota bites (higher).
-const PLAN_MIN_GROWTH = 80;
+// New characters of speech required before the expensive classifier stage re-runs.
+// Set to 25 so short single-sentence requests trigger extraction immediately.
+const PLAN_MIN_GROWTH = 25;
 
-// The debounce below waits for a quiet gap before running the live pipeline, which means someone
-// talking continuously without a 2s pause never gets proofread — the errors just sit there mid-tirade.
-// This caps how long a run can be postponed: once new speech has been pending this long, run on the
-// NEXT transcript change regardless of whether it was quiet.
-const LIVE_QUIET_MS = 2000;
-const LIVE_MAX_WAIT_MS = 6000;
+// The debounce below waits for a quiet gap before running the live pipeline.
+// Lowered to 1000ms for fast responsive updates without excessive calls.
+const LIVE_QUIET_MS = 1000;
+const LIVE_MAX_WAIT_MS = 4000;
 
 
 
@@ -124,72 +121,68 @@ export default function App() {
   };
 
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage),
-  // merging with previous live draft state to preserve completed research, scheduled events, and tasks.
+  // merging with previous live draft state to retain all discovered tasks, calendar events, and search queries.
   const toAnalysisResult = (rawRes: any, rawText: string, prev?: AnalysisResult | null): AnalysisResult => {
+    // ---- Retain & Merge Search Queries ----
     const prevSearches = prev?.searchQueries || [];
     const incomingSearches = (rawRes.searchQueries || []).filter((q: any) => q && q.query && q.query.trim() !== "");
+    const searchQueries: SearchQueryItem[] = prevSearches.map(ps => ({ ...ps }));
 
-    const searchQueries: SearchQueryItem[] = [];
     for (const q of incomingSearches) {
-      const match = prevSearches.find(ps =>
-        isQueryMatch(ps.query, q.query) ||
-        (q.sourceText && ps.sourceText && ps.sourceText === q.sourceText)
+      const matchIndex = searchQueries.findIndex(existing =>
+        isQueryMatch(existing.query, q.query) ||
+        (q.sourceText && existing.sourceText && existing.sourceText === q.sourceText)
       );
-      const merged: SearchQueryItem = match && (match.status === "completed" || match.status === "failed")
-        ? { ...q, ...match }
-        : { ...q, status: "pending" as const };
 
-      if (!searchQueries.some(sq => isQueryMatch(sq.query, merged.query))) {
-        searchQueries.push(merged);
+      if (matchIndex >= 0) {
+        const existing = searchQueries[matchIndex];
+        searchQueries[matchIndex] = existing.status === "completed" || existing.status === "failed"
+          ? { ...q, ...existing }
+          : { ...existing, ...q, status: "pending" };
+      } else {
+        searchQueries.push({ ...q, status: "pending" as const });
       }
     }
 
-    // Keep previously completed searches even if not explicitly present in the latest incoming plan
-    for (const ps of prevSearches) {
-      if (ps.status === "completed" && !searchQueries.some(sq => isQueryMatch(sq.query, ps.query))) {
-        searchQueries.push(ps);
-      }
-    }
-
+    // ---- Retain & Merge Calendar Events ----
     const prevEvents = prev?.calendarEvents || [];
-    const calendarEvents: CalendarEvent[] = [];
-    for (const evt of (rawRes.calendarEvents || []).filter((e: any) => e && e.title && e.title.trim() !== "")) {
-      const match = prevEvents.find(pe =>
-        (normalizeText(pe.title) === normalizeText(evt.title) && pe.start === evt.start) ||
-        (evt.sourceText && pe.sourceText && pe.sourceText === evt.sourceText)
+    const incomingEvents = (rawRes.calendarEvents || []).filter((e: any) => e && e.title && e.title.trim() !== "");
+    const calendarEvents: CalendarEvent[] = prevEvents.map(pe => ({ ...pe }));
+
+    for (const evt of incomingEvents) {
+      const matchIndex = calendarEvents.findIndex(existing =>
+        (normalizeText(existing.title) === normalizeText(evt.title) && existing.start === evt.start) ||
+        (evt.sourceText && existing.sourceText && existing.sourceText === evt.sourceText)
       );
-      const merged: CalendarEvent = match && (match.status === "scheduled" || match.status === "failed")
-        ? { ...evt, ...match }
-        : { ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay };
 
-      if (!calendarEvents.some(ce => normalizeText(ce.title) === normalizeText(merged.title) && ce.start === merged.start)) {
-        calendarEvents.push(merged);
-      }
-    }
-    for (const pe of prevEvents) {
-      if (pe.status === "scheduled" && !calendarEvents.some(ce => normalizeText(ce.title) === normalizeText(pe.title) && ce.start === pe.start)) {
-        calendarEvents.push(pe);
+      if (matchIndex >= 0) {
+        const existing = calendarEvents[matchIndex];
+        calendarEvents[matchIndex] = existing.status === "scheduled" || existing.status === "failed"
+          ? { ...evt, ...existing }
+          : { ...existing, ...evt, status: "pending", uncertain: !!evt.uncertain, allDay: !!evt.allDay };
+      } else {
+        calendarEvents.push({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay });
       }
     }
 
+    // ---- Retain & Merge Tasks ----
     const prevTasks = prev?.tasks || [];
-    const tasks: TaskItem[] = [];
-    for (const t of (rawRes.tasks || []).filter((item: any) => item && item.title && item.title.trim() !== "")) {
-      const match = prevTasks.find(pt =>
-        normalizeText(pt.title) === normalizeText(t.title) ||
-        (t.sourceText && pt.sourceText && pt.sourceText === t.sourceText)
-      );
-      const merged: TaskItem = match && (match.status === "created" || match.status === "failed")
-        ? { ...t, ...match }
-        : { ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined };
+    const incomingTasks = (rawRes.tasks || []).filter((item: any) => item && item.title && item.title.trim() !== "");
+    const tasks: TaskItem[] = prevTasks.map(pt => ({ ...pt }));
 
-      if (!tasks.some(tk => normalizeText(tk.title) === normalizeText(merged.title))) {
-        tasks.push(merged);
-      }
-    }
-    for (const pt of prevTasks) {
-      if (pt.status === "created" && !tasks.some(tk => normalizeText(tk.title) === normalizeText(pt.title))) {
-        tasks.push(pt);
+    for (const t of incomingTasks) {
+      const matchIndex = tasks.findIndex(existing =>
+        normalizeText(existing.title) === normalizeText(t.title) ||
+        (t.sourceText && existing.sourceText && existing.sourceText === t.sourceText)
+      );
+
+      if (matchIndex >= 0) {
+        const existing = tasks[matchIndex];
+        tasks[matchIndex] = existing.status === "created" || existing.status === "failed"
+          ? { ...t, ...existing }
+          : { ...existing, ...t, status: "pending", uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || existing.dueDate };
+      } else {
+        tasks.push({ ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined });
       }
     }
 
@@ -292,7 +285,7 @@ export default function App() {
     // The classifier is the expensive stage; only re-plan once enough new speech has landed.
     const withPlan = !liveDraft || text.length - lastPlannedLenRef.current >= PLAN_MIN_GROWTH;
     lastSentTextRef.current = text;
-    setBusy({ proof: true, summary: true, plan: withPlan });
+    setBusy({ proof: false, summary: true, plan: withPlan });
 
     try {
       const res = await fetch("/api/live", {

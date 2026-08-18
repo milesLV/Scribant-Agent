@@ -93,6 +93,7 @@ export const LivePipelineRequestSchema = z.object({
   currentLocalTime: z.string().optional().describe("ISO local time string."),
   liveSummary: z.string().optional().describe("Current live summary string."),
   withPlan: z.boolean().optional().describe("Set false to skip expensive planning stage on fast ticks."),
+  withProof: z.boolean().optional().describe("Set true to include proofreading stage (defaults to false for low latency)."),
   sessionId: z.string().optional().describe("Session identifier for Memory Bank auto-save."),
 });
 
