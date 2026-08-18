@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { toUtterances, type Utterance } from "../utils/paragraphs";
 
 // How long each recorded chunk is before it's uploaded for transcription. Web Speech API (used for
 // the mic — see AudioRecorder.tsx) can't take an arbitrary MediaStream, so shared-tab audio needs
@@ -6,7 +7,10 @@ import { useCallback, useRef, useState } from "react";
 const CHUNK_MS = 9000;
 
 export interface TabAudioChunk {
-  text: string;
+  // Diarized turns when Cloud STT produced them, otherwise a single undivided utterance. Handed up
+  // as structure rather than a joined string so the caller decides paragraph breaks with the real
+  // speaker labels instead of sniffing "Speaker " out of the text.
+  utterances: Utterance[];
   startedAt: number; // client Date.now() when this chunk started recording
 }
 
@@ -78,8 +82,8 @@ export function useTabAudioCapture({ onChunk, onError }: Options) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const text = String(data.text || "").trim();
-      if (text) onChunk({ text, startedAt });
+      const utterances = toUtterances(data, "tab");
+      if (utterances.length) onChunk({ utterances, startedAt });
     } catch (err: any) {
       // One lost chunk (network blip, transient 429) shouldn't end the capture — just skip it and
       // keep recording; the next chunk tries again on its own.

@@ -618,7 +618,11 @@ app.post("/api/transcribe-audio", async (req, res) => {
           source: source === "tab" ? "tab" : "mic",
           provider: "google_cloud_stt",
           speakerCount: cloudResult.speakerCount,
-          turns: cloudResult.speakerTurns,
+          // Projected onto the declared response shape: SpeakerTurn also carries every word-level
+          // diarization token, which is a large payload the client has no use for.
+          turns: cloudResult.speakerTurns.map(({ speaker, text, startMs, endMs }) => ({
+            speaker, text, startMs, endMs,
+          })),
         });
         return;
       } catch (sttErr: any) {

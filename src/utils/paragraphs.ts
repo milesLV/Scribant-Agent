@@ -179,6 +179,62 @@ export function joinUtterances(utterances: Utterance[], opts: ParagraphOptions =
   return out;
 }
 
+/* --- producer adapters ------------------------------------------------------------------ */
+
+// The parts of a /api/transcribe-audio response this file needs. Structural rather than imported
+// from openapi.ts so the browser bundle stays free of server code; the fields mirror
+// TranscribeAudioResponseSchema and are checked against it by the caller's types.
+export interface TranscribeTurn {
+  speaker: string;
+  text: string;
+}
+export interface TranscribeResponse {
+  text: string;
+  speakerCount?: number;
+  turns?: TranscribeTurn[];
+}
+
+/**
+ * Lift a transcription response into utterances — the ONE place a wire response becomes something
+ * `absorb` can reason about.
+ *
+ * Cloud STT already computes diarized turns and the server already returns them; the client used to
+ * read only the flattened `text` and then recover speakers by testing whether the string contained
+ * `"Speaker "` anywhere. That sniff is what made breaks sticky: once any chunk mentioned a speaker,
+ * every later chunk matched too, so every append broke forever after.
+ *
+ * A speaker label is attached ONLY when the chunk actually holds more than one — a solo recording
+ * returns `undefined`, which reads as narration and lets consecutive chunks flow together. Labelling
+ * a lone speaker would break the transcript between every chunk.
+ */
+export function toUtterances(res: TranscribeResponse, source: UtteranceSource): Utterance[] {
+  const scene = (text: string) => (text.trimStart().startsWith("[Meeting") ? true : undefined);
+
+  const turns = res.turns ?? [];
+  if (turns.length) {
+    const distinct = new Set(turns.map(t => (t.speaker ?? "").trim()).filter(Boolean));
+    const multi = distinct.size > 1 || (res.speakerCount ?? 0) > 1;
+
+    return turns
+      .filter(t => t.text?.trim())
+      .map(t => ({
+        // The "Speaker N: " prefix stays inside the text: it is what the transcript renderer and
+        // the downstream agents read. `speaker` carries the same fact in a form break rules can
+        // use without parsing it back out again.
+        text: multi ? `${t.speaker}: ${t.text.trim()}` : t.text.trim(),
+        speaker: multi ? t.speaker : undefined,
+        source,
+        startsScene: scene(t.text),
+      }));
+  }
+
+  // No diarization (or the Gemini fallback, which returns none): one undivided utterance. No
+  // synthetic turn is invented here — asserting a speaker nobody detected would make solo speech
+  // break between every chunk.
+  const text = res.text?.trim();
+  return text ? [{ text, source, startsScene: scene(text) }] : [];
+}
+
 // ponytail: self-check pins the rule PRIORITY and the two properties the old inline rules broke —
 // a speaker change breaks without punctuation, and an unpunctuated run still breaks eventually.
 // Run: tsx src/utils/paragraphs.ts
@@ -275,6 +331,35 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
   eq(wall.includes("\n\n\n"), false, "...and only at the paragraph tier, never as a scene break");
   eq(paras.every(p => countWords(p) <= HARD_CAP_WORDS), true,
     "no paragraph ever exceeds the hard cap");
+
+  // --- toUtterances: structure survives the wire instead of being re-sniffed from the string ---
+  const twoSpeakers = {
+    text: "Speaker 1: morning\n\nSpeaker 2: hey",
+    speakerCount: 2,
+    turns: [{ speaker: "Speaker 1", text: "morning" }, { speaker: "Speaker 2", text: "hey" }],
+  };
+  eq(toUtterances(twoSpeakers, "stt"), [
+    { text: "Speaker 1: morning", speaker: "Speaker 1", source: "stt", startsScene: undefined },
+    { text: "Speaker 2: hey", speaker: "Speaker 2", source: "stt", startsScene: undefined },
+  ], "multi-speaker chunk becomes one utterance per turn, label kept in the text AND in the field");
+  eq(joinUtterances(toUtterances(twoSpeakers, "stt")), "Speaker 1: morning\n\nSpeaker 2: hey",
+    "...and rendering them reproduces the server's own turn formatting");
+
+  const solo = { text: "just me talking", speakerCount: 1, turns: [{ speaker: "Speaker 1", text: "just me talking" }] };
+  eq(toUtterances(solo, "stt"), [{ text: "just me talking", speaker: undefined, source: "stt", startsScene: undefined }],
+    "a lone speaker is left unlabelled — labelling it would break between every chunk");
+  eq(joinUtterances([...toUtterances(solo, "stt"), ...toUtterances(solo, "stt")]),
+    "just me talking just me talking",
+    "consecutive solo chunks flow together instead of breaking");
+
+  eq(toUtterances({ text: "no turns here" }, "tab"),
+    [{ text: "no turns here", source: "tab", startsScene: undefined }],
+    "Gemini fallback (no turns) yields one undivided utterance, no invented speaker");
+  eq(toUtterances({ text: "" }, "tab"), [], "an empty response yields nothing to append");
+  eq(toUtterances({ text: "[Meeting] agenda review", speakerCount: 1 }, "tab")[0].startsScene, true,
+    "a meeting header opens a scene");
+  eq(toUtterances({ text: "x", speakerCount: 2, turns: [{ speaker: "Speaker 1", text: "  " }] }, "stt"),
+    [], "blank turns are dropped rather than emitted as empty paragraphs");
 
   console.log("paragraphs self-check ✓");
 }

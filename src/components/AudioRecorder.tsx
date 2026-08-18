@@ -3,6 +3,10 @@ import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText,
 import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
 import { applyCorrections, preserveHead, CONFIDENCE_THRESHOLD } from "../utils/transcript";
+import {
+  absorb, toUtterances, EMPTY_PARAGRAPH, SEPARATORS,
+  type Utterance, type OpenParagraph,
+} from "../utils/paragraphs";
 import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useClickToEditCaret } from "../hooks/useClickToEditCaret";
@@ -128,6 +132,29 @@ export default function AudioRecorder({
     if (typeof action !== "function") return setTranscriptState(action);
     setTranscriptState(prev => preserveHead(prev, action(prev)));
   }, []);
+  // The paragraph the next utterance will either join or break away from. A ref rather than state:
+  // it is advanced from inside async chunk handlers and the speech callback, and nothing rendered
+  // reads it. Cleared alongside the transcript in handleClear.
+  const openParagraphRef = useRef<OpenParagraph>(EMPTY_PARAGRAPH);
+
+  // EVERY producer — Web Speech, the mic's Cloud STT chunks, and shared-tab audio — appends through
+  // here and nowhere else, so exactly one rule set decides where a line ends (see utils/paragraphs).
+  // Separators are resolved BEFORE the state updater runs: React may invoke an updater more than
+  // once, and advancing openParagraphRef inside one would apply each break twice.
+  const appendUtterances = React.useCallback((utterances: Utterance[]) => {
+    let addition = "";
+    for (const u of utterances) {
+      const text = u.text.trim();
+      if (!text) continue;
+      const { kind, open } = absorb(openParagraphRef.current, u);
+      addition += SEPARATORS[kind] + text;
+      openParagraphRef.current = open;
+    }
+    if (!addition) return;
+    // trimEnd, not trim: preserveHead would put a trimmed head back, but not touching it is simpler.
+    setTranscript(prev => (prev.trim() ? prev.trimEnd() + addition : addition.trimStart()));
+  }, [setTranscript]);
+
   const [interimTranscript, setInterimTranscript] = useState("");
   const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [useKeyboard, setUseKeyboard] = useState(false);
@@ -179,15 +206,9 @@ export default function AudioRecorder({
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const text = String(data.text || "").trim();
-      if (text) {
-        setTranscript((prev) => {
-          const cleanedPrev = prev.trim();
-          if (!cleanedPrev) return text;
-          const isDialogue = text.includes("Speaker ") || cleanedPrev.includes("Speaker ");
-          const separator = isDialogue ? "\n\n" : " ";
-          return cleanedPrev + separator + text;
-        });
+      const utterances = toUtterances(data, "stt");
+      if (utterances.length) {
+        appendUtterances(utterances);
         setInterimTranscript("");
       }
     } catch (err) {
@@ -237,17 +258,11 @@ export default function AudioRecorder({
   // same transcript the mic is building, tagged so they read as a distinct source. Chunks land
   // roughly in completion order (~9s apart), not precisely interleaved by timestamp against
   // concurrent mic speech — good enough for an MVP; true chronological interleaving would need the
-  // transcript to be a list of tagged segments instead of one flat string.
+  // transcript to be a list of tagged segments instead of one flat string. Chunks now arrive AS
+  // tagged segments (see toUtterances), but they are still flattened on append, so ordering is
+  // unchanged — the segments exist to decide paragraph breaks, not yet to reorder anything.
   const { isSharing: isSharingTab, start: startTabAudio, stop: stopTabAudio } = useTabAudioCapture({
-    onChunk: ({ text }) => {
-      setTranscript((prev) => {
-        const cleanedPrev = prev.trim();
-        if (!cleanedPrev) return text;
-        const isDialogue = text.includes("Speaker ") || cleanedPrev.includes("Speaker ") || text.startsWith("[Meeting");
-        const separator = isDialogue ? "\n\n" : " ";
-        return cleanedPrev + separator + text;
-      });
-    },
+    onChunk: ({ utterances }) => appendUtterances(utterances),
     onError: (msg) => setTabAudioError(msg),
   });
 
@@ -387,22 +402,9 @@ export default function AudioRecorder({
       }
 
       if (finalStr) {
-        setTranscript((prev: string) => {
-          const cleanedPrev = prev.trim();
-          const cleanedFinal = finalStr.replace(/\s+/g, " ").trim();
-          if (!cleanedPrev) return cleanedFinal;
-
-          // Insert linebreaks regularly for legibility:
-          // 1. If previous text ended with sentence punctuation (.!?)
-          // 2. Or if the current paragraph exceeds ~16 words
-          const lastParagraph = cleanedPrev.split(/\n+/).pop() || "";
-          const lastWordCount = lastParagraph.trim().split(/\s+/).length;
-          const endsWithSentence = /[.!?]$/.test(cleanedPrev);
-          const needsBreak = endsWithSentence || lastWordCount >= 16;
-
-          const separator = needsBreak ? "\n\n" : " ";
-          return cleanedPrev + separator + cleanedFinal;
-        });
+        // No speaker label: the mic is one person, so consecutive finals read as continuous
+        // narration and flow together until a structural rule or the length cap breaks them.
+        appendUtterances([{ text: finalStr.replace(/\s+/g, " ").trim(), source: "speech" }]);
       }
 
       setInterimTranscript(interimStr.replace(/\s+/g, " ").trim());
@@ -540,6 +542,7 @@ export default function AudioRecorder({
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     micStreamRef.current = null;
     setTranscript("");
+    openParagraphRef.current = EMPTY_PARAGRAPH;
     setInterimTranscript("");
     setIsEditingTranscript(false);
     setWords(null);
