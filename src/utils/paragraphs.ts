@@ -1,0 +1,280 @@
+// The single place a paragraph break is decided. Pure + browser-safe (no node imports).
+//
+// Live speech has no paragraphs — we invent them, and the model we invent them under is FICTION's,
+// not the essay's. Fiction breaks on discrete events (a new speaker, a new actor, a shift in scene)
+// and lets length fall out as a consequence; the essay breaks on "one idea per paragraph" and the
+// web breaks on visual pacing. Only the fiction model has triggers a machine can actually observe
+// in a dictated stream, which is why it's the one encoded here.
+//
+// What this file deliberately does NOT do:
+//   - It does not read punctuation as a primary signal. Chrome's Web Speech auto-punctuation is
+//     inconsistent (it punctuates confident, well-formed phrases and skips short or uncertain ones),
+//     so a rule keyed on a trailing period fires erratically on identical speech. Punctuation only
+//     ever REFINES a break that another rule already earned.
+//   - It does not consider pause duration. Prosody is the strongest cue in the segmentation
+//     literature, but it is out of scope by request; the shape below leaves room for it without
+//     assuming it.
+
+export type BreakKind = "none" | "paragraph" | "scene";
+
+export type UtteranceSource = "speech" | "stt" | "tab" | "typed";
+
+/** One contiguous run of text from a single producer, with whatever structure that producer knows. */
+export interface Utterance {
+  text: string;
+  /** Diarized speaker label. `undefined` means solo narration — NOT "unknown speaker". */
+  speaker?: string;
+  source: UtteranceSource;
+  /**
+   * Producer-asserted hard boundary: a new recording session, a `[Meeting]` chunk header, a
+   * resumed capture. Fiction's scene break rather than its paragraph break — the tier above.
+   */
+  startsScene?: boolean;
+}
+
+/**
+ * The paragraph currently being written into. Carried explicitly rather than re-derived from the
+ * rendered string: recovering speaker identity by regex-matching "Speaker 1:" back out of the text
+ * is how the current code loses track of it, and a paragraph's word count can't be recovered from
+ * the tail at all once a producer has trimmed it.
+ */
+export interface OpenParagraph {
+  speaker?: string;
+  /** Words accumulated in THIS paragraph, across every utterance folded into it so far. */
+  words: number;
+  endsSentence: boolean;
+}
+
+export const EMPTY_PARAGRAPH: OpenParagraph = Object.freeze({ words: 0, endsSentence: false });
+
+/**
+ * Length caps, in words. These are the LAST rule consulted, not the first — a safety net for the
+ * case where no structural trigger has fired in a long time (solo dictation, one speaker, no scene
+ * markers), so the reader never faces an unbroken wall.
+ *
+ * The band comes from machine-paragraphing practice for transcripts, which breaks on length
+ * thresholds around 50-100 words. The soft cap waits for a sentence to end so the break lands on a
+ * real boundary; the hard cap gives up waiting, because if punctuation never arrives (see above) a
+ * sentence-gated cap would never fire at all.
+ *
+ * They are measured differently on purpose. The soft cap reads the words ALREADY in the paragraph,
+ * so a paragraph is never cut short of it. The hard cap reads what the paragraph WOULD hold once
+ * this utterance joins, so it is a true ceiling — measuring it the other way lets a paragraph
+ * overshoot by a whole utterance (three 50-word chunks reach 150 under a 110 cap before the fourth
+ * finally trips it).
+ */
+export const SOFT_CAP_WORDS = 60;
+export const HARD_CAP_WORDS = 110;
+
+export interface ParagraphOptions {
+  softCapWords?: number;
+  hardCapWords?: number;
+}
+
+/**
+ * Whitespace only, deliberately. The joined transcript is fed verbatim to the proofreader and
+ * summarizer agents, so a visible scene marker ("* * *") would become tokens they have to explain
+ * away. Two tiers stay distinguishable to a renderer that splits on `\n{3,}` before `\n{2}`.
+ */
+export const SEPARATORS: Record<BreakKind, string> = {
+  none: " ",
+  paragraph: "\n\n",
+  scene: "\n\n\n",
+};
+
+// Solo narration (`undefined`) and a blank label are the same speaker, not two different ones —
+// otherwise a producer that omits the field on some chunks breaks on every single utterance.
+const speakerKey = (s?: string) => (s ?? "").trim().toLowerCase();
+
+const countWords = (text: string) => {
+  const t = text.trim();
+  return t ? t.split(/\s+/).length : 0;
+};
+
+// Trailing quotes and brackets are allowed to sit after the terminator: `he left."` still ends a
+// sentence. Used only to decide WHERE a length-driven break lands, never whether one happens.
+const endsSentence = (text: string) => /[.!?]["'”’)\]]*\s*$/.test(text.trim());
+
+/**
+ * The whole rule set, in priority order — first match wins. Every producer's break decision routes
+ * through this function and no other, so the rules can only ever disagree in one place.
+ */
+export function breakBefore(
+  open: OpenParagraph,
+  next: Utterance,
+  opts: ParagraphOptions = {},
+): BreakKind {
+  // Nothing to break away from. Also covers a `startsScene` first utterance: a scene break before
+  // the opening line would render as leading blank space.
+  if (open.words === 0) return "none";
+  if (!next.text.trim()) return "none";
+
+  // 1. Producer-asserted scene boundary. Outranks everything below it.
+  if (next.startsScene) return "scene";
+
+  // 2. New speaker = new paragraph. Fiction's hardest rule and the only one with near-universal
+  //    agreement across every style tradition; readers decode speaker alternation from the break
+  //    alone, so a missed one is far more costly than a spurious one.
+  if (speakerKey(open.speaker) !== speakerKey(next.speaker)) return "paragraph";
+
+  // 3. RESERVED — new narrative type = new paragraph. Fiction breaks when the mode changes
+  //    (action -> reaction -> dialogue -> interiority) after ~2 sentences of the previous one; the
+  //    dictated-thought analogue is recall -> intent -> question -> aside. Not implemented: it is
+  //    the highest-false-positive rule in the set and earns its own phase.
+
+  const soft = opts.softCapWords ?? SOFT_CAP_WORDS;
+  const hard = opts.hardCapWords ?? HARD_CAP_WORDS;
+
+  // 4. Length safety net. Sentence-gated first so the break lands cleanly, then forced.
+  if (open.words >= soft && open.endsSentence) return "paragraph";
+  if (open.words + countWords(next.text) > hard) return "paragraph";
+
+  return "none";
+}
+
+/**
+ * Fold one utterance into the open paragraph: the break decision plus the resulting state, so a
+ * caller never has to reset `words`/`speaker` by hand and get it subtly wrong.
+ *
+ * Append-only by construction — it reads the OPEN paragraph and nothing behind it. Text already
+ * committed upstream is never revisited, which is what keeps the proofreader's character offsets
+ * valid across a live append (they are guarded by a `startsWith` prefix check on the transcript).
+ */
+export function absorb(
+  open: OpenParagraph,
+  next: Utterance,
+  opts: ParagraphOptions = {},
+): { kind: BreakKind; open: OpenParagraph } {
+  if (!next.text.trim()) return { kind: "none", open };
+
+  const kind = breakBefore(open, next, opts);
+  const carried = kind === "none" ? open.words : 0;
+
+  return {
+    kind,
+    open: {
+      speaker: next.speaker,
+      words: carried + countWords(next.text),
+      endsSentence: endsSentence(next.text),
+    },
+  };
+}
+
+/**
+ * Render a whole utterance list to the flat string the editor and the agents consume. Defined in
+ * terms of `absorb` rather than repeating the rules, so batch rendering and live appending can
+ * never drift apart.
+ */
+export function joinUtterances(utterances: Utterance[], opts: ParagraphOptions = {}): string {
+  let open = EMPTY_PARAGRAPH;
+  let out = "";
+
+  for (const u of utterances) {
+    if (!u.text.trim()) continue;
+    const { kind, open: nextOpen } = absorb(open, u, opts);
+    out += (out ? SEPARATORS[kind] : "") + u.text.trim();
+    open = nextOpen;
+  }
+
+  return out;
+}
+
+// ponytail: self-check pins the rule PRIORITY and the two properties the old inline rules broke —
+// a speaker change breaks without punctuation, and an unpunctuated run still breaks eventually.
+// Run: tsx src/utils/paragraphs.ts
+if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")) {
+  const eq = (a: unknown, b: unknown, m: string) => {
+    if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
+  };
+  const say = (text: string, extra: Partial<Utterance> = {}): Utterance =>
+    ({ text, source: "stt", ...extra });
+  // n words of filler, unpunctuated unless asked — the caps are the only rule that reads length.
+  const filler = (n: number, end = "") =>
+    Array.from({ length: n }, (_, i) => `w${i + 1}`).join(" ") + end;
+  // `speaker` first so the literal's key ORDER matches what absorb() returns — eq() compares
+  // JSON, which is order-sensitive.
+  const open = (o: Partial<OpenParagraph>): OpenParagraph =>
+    ({ speaker: undefined, words: 0, endsSentence: false, ...o });
+
+  // --- first utterance: nothing to break away from ---
+  eq(breakBefore(EMPTY_PARAGRAPH, say("hello")), "none", "first utterance never breaks");
+  eq(breakBefore(EMPTY_PARAGRAPH, say("hello", { startsScene: true })), "none",
+    "scene flag on the FIRST utterance does not emit a leading break");
+
+  // --- speaker change: the hardest rule, and it must not need punctuation ---
+  eq(breakBefore(open({ speaker: "Speaker 1", words: 3 }), say("hi", { speaker: "Speaker 2" })),
+    "paragraph", "new speaker breaks");
+  eq(breakBefore(open({ speaker: "Speaker 1", words: 3 }), say("hi", { speaker: "Speaker 1" })),
+    "none", "same speaker does not break");
+  eq(breakBefore(open({ speaker: "speaker 1 ", words: 3 }), say("hi", { speaker: "Speaker 1" })),
+    "none", "speaker match ignores case and surrounding space");
+  eq(breakBefore(open({ words: 3 }), say("hi")), "none",
+    "solo narration: undefined speaker is not a change");
+  eq(breakBefore(open({ words: 3 }), say("hi", { speaker: "" })), "none",
+    "blank label reads as solo, not as a second speaker");
+  eq(breakBefore(open({ words: 3 }), say("hi", { speaker: "Speaker 2" })), "paragraph",
+    "solo -> labelled speaker breaks");
+
+  // --- scene tier outranks the speaker rule ---
+  eq(breakBefore(open({ speaker: "Speaker 1", words: 3 }), say("x", { speaker: "Speaker 1", startsScene: true })),
+    "scene", "scene flag outranks an unchanged speaker");
+  eq(breakBefore(open({ speaker: "Speaker 1", words: 3 }), say("x", { speaker: "Speaker 2", startsScene: true })),
+    "scene", "scene flag outranks a speaker change too");
+
+  // --- length safety net ---
+  eq(breakBefore(open({ words: 59, endsSentence: true }), say("x")), "none",
+    "under the soft cap: a finished sentence is not on its own a reason to break");
+  eq(breakBefore(open({ words: 60, endsSentence: true }), say("x")), "paragraph",
+    "at the soft cap, a finished sentence lands the break");
+  eq(breakBefore(open({ words: 60, endsSentence: false }), say("x")), "none",
+    "at the soft cap, an unfinished sentence waits");
+  eq(breakBefore(open({ words: 110, endsSentence: false }), say("x")), "paragraph",
+    "hard cap fires with no punctuation at all — the old rule could stall here forever");
+  eq(breakBefore(open({ words: 100, endsSentence: false }), say(filler(9))), "none",
+    "hard cap counts the incoming words: 109 still fits");
+  eq(breakBefore(open({ words: 100, endsSentence: false }), say(filler(11))), "paragraph",
+    "...and trips one word over, so the cap is a real ceiling rather than a floor");
+  eq(breakBefore(open({ words: 200, endsSentence: false }), say("x"), { softCapWords: 5, hardCapWords: 10 }),
+    "paragraph", "caps are overridable");
+
+  // --- blank input is inert ---
+  eq(breakBefore(open({ words: 3 }), say("   ", { speaker: "Speaker 9" })), "none",
+    "blank text never breaks, even on a speaker change");
+  eq(absorb(open({ speaker: "Speaker 1", words: 3 }), say("  ")),
+    { kind: "none", open: { speaker: "Speaker 1", words: 3, endsSentence: false } },
+    "blank text leaves the open paragraph untouched");
+
+  // --- absorb: word accumulation and reset ---
+  eq(absorb(open({ speaker: "Speaker 1", words: 4 }), say("two more words here", { speaker: "Speaker 1" })),
+    { kind: "none", open: { speaker: "Speaker 1", words: 8, endsSentence: false } },
+    "no break: words accumulate across the paragraph");
+  eq(absorb(open({ speaker: "Speaker 1", words: 40 }), say("done.", { speaker: "Speaker 2" })),
+    { kind: "paragraph", open: { speaker: "Speaker 2", words: 1, endsSentence: true } },
+    "break: word count resets to the new paragraph's first utterance");
+  eq(absorb(EMPTY_PARAGRAPH, say('he left."')).open.endsSentence, true,
+    "a terminator behind a closing quote still ends the sentence");
+
+  // --- joinUtterances: one rule set, no leading separator, both tiers rendered ---
+  eq(joinUtterances([
+    say("Morning all", { speaker: "Speaker 1" }),
+    say("Hey", { speaker: "Speaker 2" }),
+    say("ready when you are", { speaker: "Speaker 2" }),
+  ]), "Morning all\n\nHey ready when you are",
+    "speakers break; a speaker's own continuation does not");
+  eq(joinUtterances([say("one"), say("  "), say("two")]), "one two",
+    "blank utterances vanish without leaving a separator behind");
+  eq(joinUtterances([say("before"), say("after", { startsScene: true })]), "before\n\n\nafter",
+    "scene break renders as the wider gap");
+  eq(joinUtterances([]), "", "empty list renders empty");
+
+  // The regression this whole file exists for: a long unpunctuated solo run used to come out as one
+  // wall of text, because the only rules were "previous text ended in .!?" and a 16-word count.
+  const wall = joinUtterances(Array.from({ length: 8 }, () => say(filler(50))));
+  const paras = wall.split("\n\n");
+  eq(paras.length, 4, "unpunctuated solo speech still gets broken up by the hard cap");
+  eq(wall.includes("\n\n\n"), false, "...and only at the paragraph tier, never as a scene break");
+  eq(paras.every(p => countWords(p) <= HARD_CAP_WORDS), true,
+    "no paragraph ever exceeds the hard cap");
+
+  console.log("paragraphs self-check ✓");
+}
