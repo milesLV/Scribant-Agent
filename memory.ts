@@ -903,24 +903,24 @@ export const memoryBankBeforeModelCallback: SingleBeforeModelCallback = async ({
       (request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ")) || "";
 
     if (text.trim()) {
-      // 1. Auto-ingest current transcript
-      await ingestTranscriptToMemoryBank({
-        text: text.trim(),
-        sessionId,
-        userId,
-        appName,
-        memoryService,
-      });
+      // Run auto-ingest and memory retrieval concurrently in parallel to preserve full long-term memory at lowest latency
+      const [, searchRes] = await Promise.all([
+        ingestTranscriptToMemoryBank({
+          text: text.trim(),
+          sessionId,
+          userId,
+          appName,
+          memoryService,
+        }),
+        retrieveFromMemoryBank(text.trim(), {
+          userId,
+          appName,
+          memoryService,
+        }),
+      ]);
 
-      // 2. Retrieve past relevant memories
-      const searchRes = await retrieveFromMemoryBank(text.trim(), {
-        userId,
-        appName,
-        memoryService,
-      });
-
-      // 3. Preload past context into the user message
-      if (searchRes.memories.length > 0) {
+      // Preload past context into the user message
+      if (searchRes && searchRes.memories && searchRes.memories.length > 0) {
         injectMemoryIntoUserMessage(
           request,
           searchRes.memories.map(m => m.text)

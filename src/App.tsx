@@ -18,13 +18,13 @@ import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { isAutoExecutable } from "./utils/autonomy";
 
 // New characters of speech required before the expensive classifier stage re-runs.
-// Set to 25 so short single-sentence requests trigger extraction immediately.
-const PLAN_MIN_GROWTH = 25;
+// Set to 15 so short single-sentence requests trigger extraction immediately.
+const PLAN_MIN_GROWTH = 15;
 
 // The debounce below waits for a quiet gap before running the live pipeline.
-// Lowered to 1000ms for fast responsive updates without excessive calls.
-const LIVE_QUIET_MS = 1000;
-const LIVE_MAX_WAIT_MS = 4000;
+// Set to 500ms for near-instant triggering, with a 2500ms max cap during non-stop speech.
+const LIVE_QUIET_MS = 500;
+const LIVE_MAX_WAIT_MS = 2500;
 
 
 

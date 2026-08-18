@@ -125,8 +125,9 @@ export const intentClassifier: AgentFactory = (apiKey) => new LlmAgent({
   name: "intent_classifier",
   model: new Gemini({ model: MODEL, apiKey }),
   instruction: (ctx) => `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
-The user is speaking or writing their thoughts in an unfiltered "brain dump" format or recording a meeting with multiple speakers.
+The user is speaking or writing their thoughts in an unfiltered "brain dump" format or recording a meeting/conversation with multiple speakers.
 Analyze the provided stream of thoughts/dialogue and categorize segments into different structured action buckets.
+Be proactive and vigilant in identifying all actionable tasks, to-dos, follow-ups, and commitments mentioned in casual conversation or stream-of-consciousness dialogue (e.g. "I'll do X", "I need to Y", "We should follow up with Z", "Make sure to W", "Don't forget to...").
 If speaker labels are present in the transcript (e.g., 'You:', 'Alice:', 'Speaker 1:'), attribute extracted tasks with the responsible speaker in 'assignee' (the person who volunteered or was assigned) and 'requestedBy' (the person who requested it). Attribute calendar events with 'speaker'.
 
 AI Live Notes Summary: "${ctx.state.get<string>("liveSummary") ?? ""}"
