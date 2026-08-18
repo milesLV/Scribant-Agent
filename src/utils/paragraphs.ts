@@ -43,9 +43,14 @@ export interface OpenParagraph {
   /** Words accumulated in THIS paragraph, across every utterance folded into it so far. */
   words: number;
   endsSentence: boolean;
+  /** The narrative mode this paragraph is currently running in. */
+  mode: NarrativeMode;
+  /** How long that run is, in sentence-ish units — see `sentenceUnits`. */
+  sentences: number;
 }
 
-export const EMPTY_PARAGRAPH: OpenParagraph = Object.freeze({ words: 0, endsSentence: false });
+export const EMPTY_PARAGRAPH: OpenParagraph =
+  Object.freeze({ words: 0, endsSentence: false, mode: "narration" as NarrativeMode, sentences: 0 });
 
 /**
  * Length caps, in words. These are the LAST rule consulted, not the first — a safety net for the
@@ -69,6 +74,8 @@ export const HARD_CAP_WORDS = 110;
 export interface ParagraphOptions {
   softCapWords?: number;
   hardCapWords?: number;
+  /** Set false to disable rule 3 (narrative-mode breaks). Modes are still tracked either way. */
+  detectMode?: boolean;
 }
 
 /**
@@ -81,6 +88,110 @@ export const SEPARATORS: Record<BreakKind, string> = {
   paragraph: "\n\n",
   scene: "\n\n\n",
 };
+
+/* --- narrative mode -------------------------------------------------------------------------- */
+
+/**
+ * The kinds of thing a person does while thinking out loud. Fiction's five narrative types (action,
+ * reaction, dialogue, interiority, observation) don't transfer — a brain dump has no cast — but the
+ * underlying move does: a paragraph holds one KIND of material, and changing kind starts a new one.
+ */
+export type NarrativeMode = "narration" | "intent" | "question" | "aside";
+
+/** Sentence-ish units a mode must run for before a change is allowed to break the paragraph. */
+export const MODE_MIN_SENTENCES = 2;
+
+// Openers that mark a deliberate turn away from what was being said. Stripped before classifying,
+// and on their own they mean "aside" — the spoken equivalent of a parenthetical.
+const SHIFT_MARKERS = [
+  "actually", "wait", "hang on", "hold on", "anyway", "anyways", "by the way", "side note",
+  "scratch that", "never mind", "nevermind", "on second thought", "i mean", "oh wait",
+];
+
+// Openers with no rhetorical weight at all. Also stripped, but they signal nothing — treating
+// "so" or "and" as a mode shift would break a paragraph every other utterance, which is exactly
+// the over-breaking the length caps already guard against.
+const FILLERS = ["um", "uh", "erm", "er", "okay", "ok", "so", "and", "but", "like", "well", "yeah", "right", "now"];
+
+// Committing to a future action: the single most useful thing to isolate in a thought stream,
+// because it is what the planner stage downstream is looking for.
+const INTENT_CUES = [
+  "i need to", "i have to", "i've got to", "i gotta", "i should", "i must", "i want to", "i'll",
+  "i am going to", "i'm going to", "we need to", "we have to", "we should", "we'll", "we're going to",
+  "let's", "lets", "remind me", "remember to", "make sure", "don't forget", "note to self",
+  "todo", "to do", "next step", "action item", "follow up", "follow-up",
+];
+
+// Deliberately narrower than "starts with a wh-word": "what I really meant was..." is narration,
+// not a question, so bare wh-openers are not enough on their own.
+const QUESTION_CUES = [
+  "what if", "what about", "why is", "why are", "why do", "why did", "how do", "how does",
+  "how can", "how should", "how would", "should we", "should i", "can we", "can i", "could we",
+  "do we", "does that", "is that", "is it", "are we", "any idea", "anyone know",
+];
+
+// The "Speaker 1: " that toUtterances keeps inside the text for the renderer would otherwise sit in
+// front of every cue and defeat all of them.
+const stripSpeakerPrefix = (text: string) =>
+  text.replace(/^\s*(?:\[Meeting[^\]]*\]|Speaker\s*\d+|You)\s*:?\s*/i, "");
+
+const startsWithCue = (text: string, cues: string[]) =>
+  cues.some(c => text === c || text.startsWith(c + " ") || text.startsWith(c + ","));
+
+/**
+ * Which mode an utterance MARKS, from its opening words alone — or null when it marks nothing.
+ *
+ * Null means "continues whatever is running", not "narration". Cue matching can only ever detect a
+ * marked transition; the absence of a cue is silence on the question, and reading it as a positive
+ * vote for narration makes a continued run flip modes halfway through. "I need to write the
+ * rollback plan" / "and book time with the platform team" is one intent run — the second utterance
+ * carries no cue, and treating that as a return to narration both loses the run and swallows the
+ * next real transition.
+ *
+ * Leading markers are peeled off FIRST and the remainder is what gets classified, so "actually I
+ * need to call him" reads as intent (its real content) rather than as an aside that happens to
+ * start with a marker. A marker in front of otherwise unmarked text is what actually makes an aside.
+ */
+export function classifyMode(text: string): NarrativeMode | null {
+  let rest = stripSpeakerPrefix(text).trim().toLowerCase().replace(/^[^a-z0-9'"]+/, "");
+  const endsQuestion = /\?["'”’)\]]*$/.test(rest);
+
+  let shifted = false;
+  // Peel repeatedly: "okay so actually..." is one opener, not three utterances.
+  for (let peeled = true; peeled;) {
+    peeled = false;
+    for (const m of SHIFT_MARKERS) {
+      if (startsWithCue(rest, m ? [m] : [])) {
+        rest = rest.slice(m.length).replace(/^[^a-z0-9'"]+/, "");
+        shifted = peeled = true;
+        break;
+      }
+    }
+    if (peeled) continue;
+    for (const f of FILLERS) {
+      if (startsWithCue(rest, [f])) {
+        rest = rest.slice(f.length).replace(/^[^a-z0-9'"]+/, "");
+        peeled = true;
+        break;
+      }
+    }
+  }
+
+  if (startsWithCue(rest, INTENT_CUES)) return "intent";
+  if (endsQuestion || startsWithCue(rest, QUESTION_CUES)) return "question";
+  if (shifted) return "aside";
+  return null;
+}
+
+/**
+ * How many sentences an utterance is worth. Terminators when the recognizer supplied them, and at
+ * least one regardless — a mode gate that counted only real punctuation would never open on the
+ * Web Speech path, which is the whole reason punctuation is not trusted anywhere else here either.
+ */
+export const sentenceUnits = (text: string) =>
+  Math.max(1, (text.match(/[.!?]+(?=["'”’)\]]*(?:\s|$))/g) ?? []).length);
+
+/* --------------------------------------------------------------------------------------------- */
 
 // Solo narration (`undefined`) and a blank label are the same speaker, not two different ones —
 // otherwise a producer that omits the field on some chunks breaks on every single utterance.
@@ -117,10 +228,15 @@ export function breakBefore(
   //    alone, so a missed one is far more costly than a spurious one.
   if (speakerKey(open.speaker) !== speakerKey(next.speaker)) return "paragraph";
 
-  // 3. RESERVED — new narrative type = new paragraph. Fiction breaks when the mode changes
-  //    (action -> reaction -> dialogue -> interiority) after ~2 sentences of the previous one; the
-  //    dictated-thought analogue is recall -> intent -> question -> aside. Not implemented: it is
-  //    the highest-false-positive rule in the set and earns its own phase.
+  // 3. New narrative type = new paragraph. Fiction breaks when the mode changes (action ->
+  //    reaction -> dialogue -> interiority); the dictated-thought analogue is narration -> intent
+  //    -> question -> aside. Gated on the OUTGOING run being at least MODE_MIN_SENTENCES long, so
+  //    a single stray cue word cannot break a paragraph that has barely started — this is the
+  //    highest-false-positive rule in the set and the gate is what makes it safe to leave on.
+  if (opts.detectMode !== false && open.sentences >= MODE_MIN_SENTENCES) {
+    const marked = classifyMode(next.text);
+    if (marked && marked !== open.mode) return "paragraph";
+  }
 
   const soft = opts.softCapWords ?? SOFT_CAP_WORDS;
   const hard = opts.hardCapWords ?? HARD_CAP_WORDS;
@@ -148,14 +264,24 @@ export function absorb(
   if (!next.text.trim()) return { kind: "none", open };
 
   const kind = breakBefore(open, next, opts);
-  const carried = kind === "none" ? open.words : 0;
+  const marked = classifyMode(next.text);
+  // A mode change that did NOT break (the gate was still closed) still restarts the run: the
+  // paragraph is in the new mode from here, and the new mode has to earn its own two units before
+  // it can be broken away from. Without this, rapid mode flapping would break on every utterance.
+  const continues = kind === "none";
+  // Unmarked text inherits: within a paragraph it continues the run, and a fresh paragraph opened
+  // by an unmarked utterance starts neutral.
+  const mode = marked ?? (continues ? open.mode : "narration");
+  const sameMode = continues && mode === open.mode;
 
   return {
     kind,
     open: {
       speaker: next.speaker,
-      words: carried + countWords(next.text),
+      words: (continues ? open.words : 0) + countWords(next.text),
       endsSentence: endsSentence(next.text),
+      mode,
+      sentences: (sameMode ? open.sentences : 0) + sentenceUnits(next.text),
     },
   };
 }
@@ -250,7 +376,7 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
   // `speaker` first so the literal's key ORDER matches what absorb() returns — eq() compares
   // JSON, which is order-sensitive.
   const open = (o: Partial<OpenParagraph>): OpenParagraph =>
-    ({ speaker: undefined, words: 0, endsSentence: false, ...o });
+    ({ speaker: undefined, words: 0, endsSentence: false, mode: "narration", sentences: 0, ...o });
 
   // --- first utterance: nothing to break away from ---
   eq(breakBefore(EMPTY_PARAGRAPH, say("hello")), "none", "first utterance never breaks");
@@ -297,16 +423,16 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
   eq(breakBefore(open({ words: 3 }), say("   ", { speaker: "Speaker 9" })), "none",
     "blank text never breaks, even on a speaker change");
   eq(absorb(open({ speaker: "Speaker 1", words: 3 }), say("  ")),
-    { kind: "none", open: { speaker: "Speaker 1", words: 3, endsSentence: false } },
+    { kind: "none", open: open({ speaker: "Speaker 1", words: 3 }) },
     "blank text leaves the open paragraph untouched");
 
   // --- absorb: word accumulation and reset ---
   eq(absorb(open({ speaker: "Speaker 1", words: 4 }), say("two more words here", { speaker: "Speaker 1" })),
-    { kind: "none", open: { speaker: "Speaker 1", words: 8, endsSentence: false } },
+    { kind: "none", open: open({ speaker: "Speaker 1", words: 8, sentences: 1 }) },
     "no break: words accumulate across the paragraph");
-  eq(absorb(open({ speaker: "Speaker 1", words: 40 }), say("done.", { speaker: "Speaker 2" })),
-    { kind: "paragraph", open: { speaker: "Speaker 2", words: 1, endsSentence: true } },
-    "break: word count resets to the new paragraph's first utterance");
+  eq(absorb(open({ speaker: "Speaker 1", words: 40, sentences: 3 }), say("done.", { speaker: "Speaker 2" })),
+    { kind: "paragraph", open: open({ speaker: "Speaker 2", words: 1, endsSentence: true, sentences: 1 }) },
+    "break: word and sentence counts reset to the new paragraph's first utterance");
   eq(absorb(EMPTY_PARAGRAPH, say('he left."')).open.endsSentence, true,
     "a terminator behind a closing quote still ends the sentence");
 
@@ -360,6 +486,70 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
     "a meeting header opens a scene");
   eq(toUtterances({ text: "x", speakerCount: 2, turns: [{ speaker: "Speaker 1", text: "  " }] }, "stt"),
     [], "blank turns are dropped rather than emitted as empty paragraphs");
+
+  // --- classifyMode: the opening words decide, after markers and filler are peeled off ---
+  eq(classifyMode("I need to call the plumber"), "intent", "explicit commitment");
+  eq(classifyMode("let's ship it on Friday"), "intent", "collective commitment");
+  eq(classifyMode("Remind me to renew the domain"), "intent", "reminder phrasing");
+  eq(classifyMode("what if we moved the deadline"), "question", "question cue with no question mark");
+  eq(classifyMode("does that even work"), "question", "auxiliary opener");
+  eq(classifyMode("the build is broken again?"), "question", "a question mark is enough on its own");
+  eq(classifyMode("we shipped the release yesterday"), null, "plain recall marks nothing");
+  eq(classifyMode("what I meant was the other repo"), null,
+    "a bare wh-opener is NOT a question — this is the false positive the narrow cue list avoids");
+
+  eq(classifyMode("actually the build is fine"), "aside", "shift marker in front of narration");
+  eq(classifyMode("actually I need to call him"), "intent",
+    "marker is peeled first, so the real content classifies — not swallowed as an aside");
+  eq(classifyMode("wait what about the budget"), "question", "marker peeled, question underneath");
+  eq(classifyMode("so we merged it"), null, "filler carries no rhetorical weight");
+  eq(classifyMode("okay so actually we should ship"), "intent", "peels repeatedly through mixed openers");
+  eq(classifyMode("Speaker 2: I need to review that"), "intent",
+    "the renderer's speaker prefix does not shadow the cue behind it");
+
+  // --- sentenceUnits: punctuation refines, its absence never blocks ---
+  eq(sentenceUnits("one. two! three?"), 3, "terminators counted");
+  eq(sentenceUnits("no punctuation at all"), 1, "an unpunctuated utterance is still worth one unit");
+  eq(sentenceUnits("he said \"go.\" then left."), 2, "a terminator behind a quote still counts");
+
+  // --- rule 3: gated on the outgoing run, so a lone cue cannot break a young paragraph ---
+  eq(breakBefore(open({ words: 10, mode: "narration", sentences: 1 }), say("I need to call him")), "none",
+    "mode change is held back while the outgoing run is under MODE_MIN_SENTENCES");
+  eq(breakBefore(open({ words: 10, mode: "narration", sentences: 2 }), say("I need to call him")), "paragraph",
+    "...and lands once the outgoing run has earned it");
+  eq(breakBefore(open({ words: 10, mode: "narration", sentences: 5 }), say("we shipped it")), "none",
+    "same mode never breaks, however long the run");
+  eq(breakBefore(open({ words: 10, mode: "narration", sentences: 5 }), say("I need to call him"), { detectMode: false }),
+    "none", "rule 3 is switchable off");
+  eq(breakBefore(open({ speaker: "A", words: 10, mode: "narration", sentences: 5 }), say("I need to", { speaker: "B" })),
+    "paragraph", "speaker still outranks mode (both would break here anyway)");
+
+  // Unmarked text continues the run rather than voting for narration — the property the end-to-end
+  // case below depends on, and the one whose absence made a continued intent run flip mid-paragraph.
+  const run = absorb(open({ words: 10, mode: "intent", sentences: 2 }), say("and book thirty minutes"));
+  eq([run.kind, run.open.mode, run.open.sentences], ["none", "intent", 3],
+    "an unmarked utterance extends the intent run instead of resetting it to narration");
+  eq(absorb(EMPTY_PARAGRAPH, say("just talking")).open.mode, "narration",
+    "a fresh paragraph opened by unmarked text starts neutral");
+
+  // Anti-flap: a blocked mode change still adopts the new mode, so the NEXT utterance compares
+  // against it rather than against a mode the paragraph left two utterances ago.
+  const flap = absorb(open({ words: 10, mode: "narration", sentences: 1 }), say("I need to call him"));
+  eq([flap.kind, flap.open.mode, flap.open.sentences], ["none", "intent", 1],
+    "blocked mode change restarts the run in the new mode instead of accumulating");
+
+  // --- end to end: a realistic dictated stretch ---
+  const dump = joinUtterances([
+    say("I spoke to Dana about the migration this morning"),
+    say("she thinks the read path is the risky bit"),
+    say("I need to write up the rollback plan before Thursday"),
+    say("and book thirty minutes with the platform team"),
+    say("what if we staged it behind a flag instead"),
+  ]);
+  eq(dump.split("\n\n").length, 3,
+    "narration -> intent -> question reads as three paragraphs, on cue words alone");
+  eq(dump.split("\n\n")[1].startsWith("I need to write up"), true,
+    "the break lands where the mode actually turns");
 
   console.log("paragraphs self-check ✓");
 }
