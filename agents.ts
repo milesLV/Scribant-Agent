@@ -48,6 +48,8 @@ export const recentWindow = (ctx: ReadonlyContext, maxWords = 40): string => {
 
 // Every Gemini key in .env, primary first. Free-tier keys exhaust after a run or two, so askAgent
 // rotates through them on 429 before it resorts to waiting.
+// Every Gemini key in .env, primary first. Free-tier keys exhaust after a run or two, so askAgent
+// rotates through them on 429 before it resorts to waiting.
 export const KEYS: string[] = [
   process.env.GEMINI_API_KEY,
   process.env.GEMINI_API_KEY1,
@@ -56,14 +58,23 @@ export const KEYS: string[] = [
   process.env.GOOGLE_API_KEY,
 ].filter((k): k is string => !!k?.trim());
 
-type AgentFactory = (apiKey: string) => LlmAgent;
+export const keyCount = usingVertex ? 1 : Math.max(1, KEYS.length);
+
+export function createGeminiModel(apiKey?: string): Gemini {
+  if (usingVertex || !apiKey?.trim()) {
+    return new Gemini({ model: MODEL });
+  }
+  return new Gemini({ model: MODEL, apiKey: apiKey.trim() });
+}
+
+type AgentFactory = (apiKey?: string) => LlmAgent;
 
 // ---- the agents ------------------------------------------------------------
 
 // Rolling bullet summary while the user is still speaking.
 export const liveSummarizer: AgentFactory = (apiKey) => new LlmAgent({
   name: "live_summarizer",
-  model: new Gemini({ model: MODEL, apiKey }),
+  model: createGeminiModel(apiKey),
   instruction: (ctx) => `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
 The user is speaking or typing their thoughts live.
 Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
@@ -81,7 +92,7 @@ Raw draft thoughts:
 // owns the instruction, the indexed-token prompt and the parsing of the reply.
 export const proofreader: AgentFactory = (apiKey) => new LlmAgent({
   name: "proofreader",
-  model: new Gemini({ model: MODEL, apiKey }),
+  model: createGeminiModel(apiKey),
   instruction: (ctx) =>
     `${PROOFREAD_CORRECT_INSTRUCTION}\n\n${buildProofreadPrompt(ctx.state.get<string>("rawText") ?? "").contents}`,
   generateContentConfig: { responseMimeType: "application/json" },
@@ -93,7 +104,7 @@ export const proofreader: AgentFactory = (apiKey) => new LlmAgent({
 // marker-formatted text (CONDENSED:/DETAILED:) parsed by splitTiers.
 export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
   name: "grounded_searcher",
-  model: new Gemini({ model: MODEL, apiKey }),
+  model: createGeminiModel(apiKey),
   instruction: "You are a research assistant. Use Google Search to ground your answer, then respond in exactly the format the user requests.",
   tools: [GOOGLE_SEARCH],
 });
@@ -103,7 +114,7 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
 // is static; askAgentParts (not askAgent) is what supplies the actual clip.
 export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
   name: "audio_transcriber",
-  model: new Gemini({ model: MODEL, apiKey }),
+  model: createGeminiModel(apiKey),
   instruction: `Transcribe the spoken audio verbatim. If multiple distinct speakers are talking, separate their turns and prefix each turn with a clear speaker label (e.g., 'Speaker 1: ...', 'Speaker 2: ...'). If speakers introduce themselves or address each other by name (e.g., 'Hi Alice', 'Thanks Bob'), use their actual names as the speaker label. If only one person is speaking, transcribe verbatim without speaker labels. No markdown formatting, timestamps, or commentary — return only the transcribed speech in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
   includeContents: "none",
 });
@@ -111,7 +122,7 @@ export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
 // Answers user questions synthesized from retrieved past session memories
 export const memoryAnswerer: AgentFactory = (apiKey) => new LlmAgent({
   name: "memory_answerer",
-  model: new Gemini({ model: MODEL, apiKey }),
+  model: createGeminiModel(apiKey),
   instruction: "You are a helpful personal memory assistant. Based strictly on the user's past session memories provided in the prompt, answer their question directly, clearly, and concisely (1-2 sentences). If the memories do not contain the answer, say so politely.",
   includeContents: "default",
 });
@@ -133,7 +144,7 @@ const analyzeOutputSchema = z.object({
 // summary all come from session state, so the same agent serves the live pipeline and finalize.
 export const intentClassifier: AgentFactory = (apiKey) => new LlmAgent({
   name: "intent_classifier",
-  model: new Gemini({ model: MODEL, apiKey }),
+  model: createGeminiModel(apiKey),
   instruction: (ctx) => `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
 The user is speaking or writing their thoughts in an unfiltered "brain dump" format or recording a meeting/conversation with multiple speakers.
 Analyze the provided stream of thoughts/dialogue and categorize segments into different structured action buckets.
@@ -258,13 +269,13 @@ export async function askAgentParts(
     if (!errEvent) return { text: out, grounding };
 
     const { msg, isQuota, isOverload, stated } = classifyError(errEvent);
-    const plan = (isQuota || isOverload) ? nextAttempt(attempt, KEYS.length, stated, isQuota) : null;
+    const plan = (isQuota || isOverload) ? nextAttempt(attempt, keyCount, stated, isQuota) : null;
     if (!plan) throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
 
-    if (isQuota) keyCursor.rotate(); // no point swapping keys for an overload
+    if (isQuota && !usingVertex) keyCursor.rotate(); // no point swapping keys for an overload or in Vertex mode
     console.warn(
       `[askAgent] ${errEvent.errorCode} on ${agent.name}` +
-      `${isQuota ? ` — switching to key ${keyCursor.index() + 1}/${KEYS.length}` : ""}` +
+      `${isQuota && !usingVertex ? ` — switching to key ${keyCursor.index() + 1}/${KEYS.length}` : ""}` +
       `${plan.sleepS ? `, waiting ${plan.sleepS}s` : ""} (attempt ${attempt})`
     );
     if (plan.sleepS) await sleep(plan.sleepS * 1000);
@@ -300,9 +311,11 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   // point: a `model: "gemini-..."` string would re-read env per call and silently undo rotation.
   const keyOf = (a: LlmAgent) => (a.canonicalModel as any).apiKey;
   assert.ok(liveSummarizer("k-test").canonicalModel instanceof Gemini);
-  assert.equal(keyOf(liveSummarizer("k-test")), "k-test");
-  assert.equal(keyOf(intentClassifier("k-2")), "k-2");
-  assert.equal(keyOf(proofreader("k-3")), "k-3");
+  if (!usingVertex) {
+    assert.equal(keyOf(liveSummarizer("k-test")), "k-test");
+    assert.equal(keyOf(intentClassifier("k-2")), "k-2");
+    assert.equal(keyOf(proofreader("k-3")), "k-3");
+  }
   assert.equal(intentClassifier("k").canonicalBeforeModelCallbacks.length, 1);
 
   // Sub-agents read their input from state, not from the user message — an instruction that ignored

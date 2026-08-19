@@ -838,7 +838,7 @@ async function main() {
   // empty KEYS list is only fatal when GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_ENTERPRISE isn't set.
   const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || process.env.GOOGLE_GENAI_USE_ENTERPRISE || "");
   if (!KEYS.length && !usingVertex) {
-    throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) found in .env, and GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_ENTERPRISE is not set. Please add one.");
+    throw new Error("No Google GenAI credentials found. Please set GOOGLE_GENAI_USE_ENTERPRISE=TRUE in .env (Vertex AI mode) or supply API keys.");
   }
   if (usingVertex && (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION)) {
     throw new Error("GOOGLE_GENAI_USE_VERTEXAI is set but GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION is missing in .env.");

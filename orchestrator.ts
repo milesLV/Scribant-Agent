@@ -20,7 +20,7 @@ import { BaseAgent, SequentialAgent, ParallelAgent, Runner } from "@google/adk";
 import type { Event, InvocationContext } from "@google/adk";
 import { createEvent, createEventActions } from "@google/adk";
 import {
-  KEYS, keyCursor, nextAttempt, classifyError, sleep, sessionService,
+  KEYS, keyCursor, keyCount, nextAttempt, classifyError, sleep, sessionService,
   proofreader, liveSummarizer, intentClassifier, MODEL,
 } from "./agents";
 import { buildProofreadPrompt, parseProofread } from "./transcriber";
@@ -212,7 +212,7 @@ export async function runOrchestrator(opts: {
       if (done.has(stage)) continue; // it errored but still delivered — nothing to retry
       const { msg, isQuota, isOverload, stated } = classifyError(ev);
       const plan = (isQuota || isOverload)
-        ? nextAttempt(++attempts[stage], KEYS.length, stated, isQuota)
+        ? nextAttempt(++attempts[stage], keyCount, stated, isQuota)
         : null;
 
       if (!plan) {
