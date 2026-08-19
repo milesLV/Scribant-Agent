@@ -888,8 +888,65 @@ export const autoMemoryIngestCallback: SingleBeforeModelCallback = async ({ cont
 };
 
 /**
+ * Detects whether the input text contains a genuine memory recall intent
+ * (e.g. asking about past decisions, previous meetings, stored facts, or historical context),
+ * and extracts ONLY the specific query/topic needed for semantic retrieval.
+ *
+ * Returns the clean, extracted query string, or `null` if no memory retrieval is required.
+ */
+export function extractMemoryRecallQuery(text: string): string | null {
+  if (!text || typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  // Short direct questions/queries (e.g. from manual query inputs or search prompts)
+  if (trimmed.length < 90 && (trimmed.endsWith("?") || /^(what|who|where|when|why|how|which|remember|recall|search|find|show me|tell me|did we|do we|have we)/i.test(trimmed))) {
+    return trimmed.replace(/^[\s,:-]*(\b(by the way|hey|also|please|can you|could you)\b[\s,:-]*)+/i, "").replace(/^[\s,:-]+/, "").replace(/[.!?]+$/, "").trim();
+  }
+
+  // Common recall marker regex patterns
+  const recallPatterns: RegExp[] = [
+    // Questions about past meetings/sessions/conversations
+    /(?:(?:what|who|where|when|how|which|why)\s+(?:did|was|were|happened|is|are|we|have we|had we|do we)\b[^.!?\n]+(?:\?|$))/i,
+    // "Remember / Recall / Did we talk about..."
+    /(?:(?:do you\s+)?(?:remember|recall|remind me|look up|check memory|search memory)\s+(?:about|regarding|if|what|who|when|where|how|whether)?\s*[:,-]?\s*[^.!?\n]+(?:\?|$))/i,
+    // References to past sessions, last time, previous notes
+    /(?:(?:in (?:the|our) (?:last|previous|earlier|past)\s+(?:meeting|call|session|sync|notes|discussion)|last time we (?:talked|discussed|met|spoke)|earlier we (?:decided|agreed|said))\s*[,:-]?\s*[^.!?\n]+(?:\?|$)?)/i,
+    // Decisions or status inquiries
+    /(?:(?:what(?:'s|\s+is|\s+was)\s+(?:the\s+)?(?:status|update|decision|plan|agreement|to-do|action item)\s+(?:of|on|for|regarding)\b[^.!?\n]+(?:\?|$)?))/i,
+    // Sentences ending with ? that contain past/historical references
+    /(?:[^.!?\n]*\b(?:last week|last time|yesterday|earlier|previously|before|already decided|agreed upon)\b[^.!?\n]*\?)/i,
+  ];
+
+  // Split into sentences / utterances
+  const sentences = trimmed.split(/(?<=[.!?\n])\s+/);
+
+  for (const sentence of sentences) {
+    const s = sentence.trim();
+    if (!s) continue;
+    for (const pattern of recallPatterns) {
+      const match = s.match(pattern);
+      if (match) {
+        // Clean up leading meta-conversational filler words and punctuation
+        const cleanQuery = match[0].trim()
+          .replace(/^[\s,:-]*(\b(hey|by the way|also|so|well|uh|um|please|can you|could you|tell me|let me know)\b[\s,:-]*)+/i, "")
+          .replace(/^[\s,:-]+/, "")
+          .replace(/[.!?]+$/, "")
+          .trim();
+
+        if (cleanQuery.length >= 4) {
+          return cleanQuery;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * ADK beforeModelCallback that automatically ingests the transcript into Memory Bank AND
- * retrieves relevant past memories to inject directly into the user message before inference.
+ * retrieves relevant past memories ONLY when a specific memory recall need is detected.
  */
 export const memoryBankBeforeModelCallback: SingleBeforeModelCallback = async ({ context, request }) => {
   try {
@@ -903,28 +960,38 @@ export const memoryBankBeforeModelCallback: SingleBeforeModelCallback = async ({
       (request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ")) || "";
 
     if (text.trim()) {
-      // Run auto-ingest and memory retrieval concurrently in parallel to preserve full long-term memory at lowest latency
-      const [, searchRes] = await Promise.all([
-        ingestTranscriptToMemoryBank({
-          text: text.trim(),
-          sessionId,
-          userId,
-          appName,
-          memoryService,
-        }),
-        retrieveFromMemoryBank(text.trim(), {
-          userId,
-          appName,
-          memoryService,
-        }),
-      ]);
+      // 1. Ingest session transcript into Memory Bank
+      const ingestPromise = ingestTranscriptToMemoryBank({
+        text: text.trim(),
+        sessionId,
+        userId,
+        appName,
+        memoryService,
+      });
 
-      // Preload past context into the user message
-      if (searchRes && searchRes.memories && searchRes.memories.length > 0) {
-        injectMemoryIntoUserMessage(
-          request,
-          searchRes.memories.map(m => m.text)
-        );
+      // 2. Only retrieve when a genuine memory recall question/intent is present
+      const recallQuery = extractMemoryRecallQuery(text.trim());
+
+      if (recallQuery) {
+        const [, searchRes] = await Promise.all([
+          ingestPromise,
+          retrieveFromMemoryBank(recallQuery, {
+            userId,
+            appName,
+            memoryService,
+          }),
+        ]);
+
+        // Preload past context into the user message
+        if (searchRes && searchRes.memories && searchRes.memories.length > 0) {
+          injectMemoryIntoUserMessage(
+            request,
+            searchRes.memories.map(m => m.text)
+          );
+        }
+      } else {
+        // When no recall query is detected, await ingestion without wasting search latency/tokens
+        await ingestPromise;
       }
     }
   } catch (e: any) {
@@ -1145,9 +1212,22 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
       assert.ok(cbRetrieve.count >= 1);
       assert.ok(cbRetrieve.memories.some(m => m.text.includes("Alex")));
 
-      // 2. Test memoryBankBeforeModelCallback with user message injection
-      const mockRequest2: any = { contents: [{ role: "user", parts: [{ text: "Schedule meeting" }] }], config: {} };
-      await memoryBankBeforeModelCallback({ context: mockContext, request: mockRequest2 });
+      // 2. Test extractMemoryRecallQuery
+      assert.equal(extractMemoryRecallQuery("Schedule a product demo with Alex on Friday"), null);
+      assert.equal(extractMemoryRecallQuery("What did we decide about Alex in our last meeting?"), "What did we decide about Alex in our last meeting");
+      assert.equal(extractMemoryRecallQuery("By the way, remember what we said about the database migration?"), "remember what we said about the database migration");
+
+      // 3. Test memoryBankBeforeModelCallback with user message injection on recall intent
+      const mockRecallState: Record<string, any> = { corrected: "What did we decide about Alex in our last meeting?" };
+      const mockRecallContext: any = {
+        invocationContext: {
+          memoryService: cbMemService,
+          session: { id: "run-cb-2", userId: "cb-user", appName: "scribant" },
+        },
+        state: { get: (k: string) => mockRecallState[k] },
+      };
+      const mockRequest2: any = { contents: [{ role: "user", parts: [{ text: "Meeting recap" }] }], config: {} };
+      await memoryBankBeforeModelCallback({ context: mockRecallContext, request: mockRequest2 });
       assert.ok(
         mockRequest2.contents[0].parts.some((p: any) =>
           typeof p.text === "string" && p.text.includes("[Relevant Context from Memory Bank]")

@@ -77,14 +77,6 @@ const safeIngest = (tag: string, sessionId: unknown, entry: { text: string }) =>
   }).catch(e => console.warn(`[${tag}] memory bank ingest failed:`, e?.message || e));
 };
 
-// Non-blocking Vertex AI Memory Bank retrieval helper
-const safeRetrieve = (tag: string, query: string, options?: { userId?: string; sessionId?: string }) => {
-  if (!query || !query.trim()) return;
-  retrieveFromMemoryBank(query.trim(), {
-    userId: options?.userId,
-  }).catch(e => console.warn(`[${tag}] memory bank retrieve failed:`, e?.message || e));
-};
-
 // Every route below is a caller of ONE orchestrator (orchestrator.ts) with a different stage set,
 // so no two of them can drift apart the way four hand-wired agent calls did.
 
@@ -127,9 +119,6 @@ app.post("/api/analyze", async (req, res) => {
       return;
     }
     const { text, currentLocalTime, liveSummary, sessionId } = v.data;
-
-    // Auto-retrieve relevant past memories for this transcript
-    safeRetrieve("analyze", text, { sessionId: safeSeg(sessionId, "session") });
 
     // Durably save the raw transcript BEFORE calling the model, so the user's words survive even if
     // the plan call below fails — `plan` is omitted for now, filled in once it resolves below. A
@@ -230,9 +219,6 @@ app.post("/api/live", async (req, res) => {
     if (sessionId) {
       safeCapture("live", sessionId, { text, plan: latestPlan });
       safeIngest("live", sessionId, { text });
-      if (text.length >= 15 && withPlan !== false) {
-        safeRetrieve("live", text, { sessionId: safeSeg(sessionId, "session") });
-      }
     }
   } catch (error: any) {
     console.error("Live API failed:", error);
