@@ -272,6 +272,18 @@ export default function TokenVisualizer({
   const summaryTokens = stats?.compaction?.compactedTokens ?? Math.ceil(liveSummary.length / 3.8);
   const compactionRatio = stats?.compaction?.ratioPercent ?? (rawTokens > summaryTokens && rawTokens > 0 ? Number((((rawTokens - summaryTokens) / rawTokens) * 100).toFixed(1)) : 0);
 
+  const rawWords = (rawTranscript || "").trim().split(/\s+/).filter(Boolean);
+  const deltaText = rawWords.length <= 40 ? rawTranscript : "..." + rawWords.slice(-40).join(" ");
+  const deltaTokens = Math.ceil((deltaText || "").length / 3.8);
+  const combinedReasoningTokens = summaryTokens + deltaTokens;
+  const rollingSavingsRatio = rawTokens > combinedReasoningTokens && rawTokens > 0
+    ? Number((((rawTokens - combinedReasoningTokens) / rawTokens) * 100).toFixed(1))
+    : compactionRatio;
+  const deltaSavingsRatio = rawTokens > deltaTokens && rawTokens > 0
+    ? Number((((rawTokens - deltaTokens) / rawTokens) * 100).toFixed(1))
+    : 0;
+  const deltaTokensSaved = Math.max(0, rawTokens - deltaTokens);
+
   // Maximum tokens across time-series buckets for chart scale
   const maxBucketTokens = Math.max(
     ...timeSeries.map((p) => p.totalTokens),
@@ -1018,25 +1030,30 @@ export default function TokenVisualizer({
           
           {/* Live Context Compaction Card */}
           <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-xs space-y-3">
-            <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-100 pb-2">
               <span className="text-xs font-bold text-stone-800 font-mono flex items-center gap-1.5">
                 <Layers className="w-4 h-4 text-amber-600" />
                 Live Context Compaction Pipeline
               </span>
-              <span className="text-xs font-mono font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
-                ⚡ {compactionRatio}% Compression
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-mono font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                  ⚡ Macro Summary: {compactionRatio}% Compaction
+                </span>
+                <span className="text-xs font-mono font-bold text-blue-800 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                  🚀 Rolling Window Savings: {deltaSavingsRatio}%
+                </span>
+              </div>
             </div>
 
             <p className="text-xs text-stone-600 leading-relaxed">
-              Instead of streaming raw speech history into expensive reasoning sub-agents on every tick, the <b>Live Summarizer</b> continuously compacts spoken dialogue into dense, structured markdown bullet points.
+              Instead of streaming raw speech history into expensive reasoning sub-agents on every tick, the <b>Live Summarizer</b> continuously compacts spoken dialogue into dense markdown bullet points, while the <b>Rolling Window</b> restricts the verbatim prompt to the active ~40-word delta.
             </p>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-              {/* Raw Speech Input */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+              {/* 1. Raw Speech Input */}
               <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
                 <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
-                  <span>1. Raw Speech Stream</span>
+                  <span>1. Full Raw Speech</span>
                   <span className="text-amber-700 font-bold">{rawTokens} tokens</span>
                 </div>
                 <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
@@ -1044,16 +1061,44 @@ export default function TokenVisualizer({
                 </div>
               </div>
 
-              {/* Compacted Output */}
+              {/* 2. Compacted Macro Summary */}
               <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
                 <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
-                  <span>2. Compacted Context</span>
-                  <span className="text-emerald-700 font-bold">{summaryTokens} tokens</span>
+                  <span>2. Compacted Summary</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200 font-semibold">-{compactionRatio}%</span>
+                    <span className="text-emerald-700 font-bold">{summaryTokens} tokens</span>
+                  </div>
                 </div>
                 <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
                   {liveSummary || <span className="text-stone-400 italic">No active live summary yet...</span>}
                 </div>
               </div>
+
+              {/* 3. Active Rolling Delta Window */}
+              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
+                  <span>3. Active Delta Window</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200 font-semibold">-{deltaSavingsRatio}% vs raw</span>
+                    <span className="text-blue-700 font-bold">{deltaTokens} tokens</span>
+                  </div>
+                </div>
+                <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
+                  {deltaText || <span className="text-stone-400 italic">No delta window yet...</span>}
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Compaction & Complexity Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-100 text-xs font-mono">
+              <span className="text-stone-600 flex items-center gap-1.5">
+                ⚡ Active Reasoning Payload: <b className="text-emerald-700 font-bold">{combinedReasoningTokens} tokens</b> 
+                <span className="text-stone-400 font-normal">({rollingSavingsRatio}% Effective Compaction)</span>
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-stone-100 text-stone-700 text-[11px] font-semibold border border-stone-200">
+                Prompt Complexity: Capped O(1) (~40 words)
+              </span>
             </div>
           </div>
 

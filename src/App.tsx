@@ -107,18 +107,19 @@ export default function App() {
   };
   // Normalize string for fuzzy comparison (strip punctuation, extra spaces, casing)
   const normalizeText = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9\s]/gi, "").replace(/\s+/g, " ").trim();
-  const isQueryMatch = (q1: string, q2: string): boolean => {
-    const n1 = normalizeText(q1);
-    const n2 = normalizeText(q2);
+  const isTextMatch = (t1: string, t2: string, threshold = 0.55): boolean => {
+    const n1 = normalizeText(t1);
+    const n2 = normalizeText(t2);
     if (!n1 || !n2) return false;
     if (n1 === n2) return true;
-    if (n1.length > 15 && (n1.includes(n2) || n2.includes(n1))) return true;
+    if (n1.includes(n2) || n2.includes(n1)) return true;
     const words1 = new Set(n1.split(" "));
     const words2 = new Set(n2.split(" "));
     const intersection = [...words1].filter(w => words2.has(w)).length;
     const union = new Set([...words1, ...words2]).size;
-    return union > 0 && (intersection / union) >= 0.75;
+    return union > 0 && (intersection / union) >= threshold;
   };
+  const isQueryMatch = (q1: string, q2: string) => isTextMatch(q1, q2, 0.7);
 
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage),
   // merging with previous live draft state to retain all discovered tasks, calendar events, and search queries.
@@ -151,7 +152,7 @@ export default function App() {
 
     for (const evt of incomingEvents) {
       const matchIndex = calendarEvents.findIndex(existing =>
-        (normalizeText(existing.title) === normalizeText(evt.title) && existing.start === evt.start) ||
+        (isTextMatch(existing.title, evt.title, 0.5) && (existing.start === evt.start || !evt.start)) ||
         (evt.sourceText && existing.sourceText && existing.sourceText === evt.sourceText)
       );
 
@@ -172,7 +173,7 @@ export default function App() {
 
     for (const t of incomingTasks) {
       const matchIndex = tasks.findIndex(existing =>
-        normalizeText(existing.title) === normalizeText(t.title) ||
+        isTextMatch(existing.title, t.title, 0.55) ||
         (t.sourceText && existing.sourceText && existing.sourceText === t.sourceText)
       );
 
@@ -665,111 +666,95 @@ export default function App() {
         />
 
         {/* View 1: Workspace Tab */}
-        {activeTab === "workspace" && (
-          <div className="space-y-6">
-            {/* Sync Mode Info Header banner */}
-            {!token && (
-              <div className="bg-amber-50 border border-amber-200/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-inner">
-                <div className="flex items-start gap-2.5">
-                  <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <div className="space-y-0.5">
-                    <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
-                    <p className="text-[11px] text-stone-500 leading-normal font-sans">
-                      No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
-                    </p>
-                  </div>
+        <div className={activeTab === "workspace" ? "space-y-6" : "hidden"}>
+          {/* Sync Mode Info Header banner */}
+          {!token && (
+            <div className="bg-amber-50 border border-amber-200/50 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-inner">
+              <div className="flex items-start gap-2.5">
+                <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <p className="text-xs font-bold text-stone-800 font-sans">Currently running in Sandbox Preview Mode (Simulated APIs)</p>
+                  <p className="text-[11px] text-stone-500 leading-normal font-sans">
+                    No active Google data is modified. Click Sign in with Google on the right to authorize real Google Calendar and Tasks.
+                  </p>
                 </div>
-                <button
-                  onClick={handleGoogleSignIn}
-                  className="px-4.5 py-2 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-stone-100 hover:text-white rounded-lg border border-stone-950 shadow-sm flex items-center justify-center gap-1.5 transition-all self-start md:self-auto shrink-0 w-full md:w-auto"
-                >
-                  <FolderSync className="w-4 h-4" /> Sign in with Google
-                </button>
               </div>
-            )}
-
-            {/* Content layout: Top Row (Microphone) */}
-            <div className="w-full">
-              <AudioRecorder
-                key={recorderKey}
-                onAnalyze={handleAnalyzeStream}
-                isProcessing={isProcessing}
-                onShowToast={showToast}
-                onChangeTranscript={setLiveTranscript}
-                liveSummary={liveSummary}
-                proofResult={proofResult}
-                busy={busy}
-                onRunNow={() => runLive(liveTranscript.trim())}
-                onSaveToDrive={() => handleSaveToDrive(
-                  "Scribant Session",
-                  "Live Notes.md",
-                  liveSummary,
-                )}
-                savingDrive={savingDrive}
-              />
-            </div>
-
-            {/* Results layout: rendered cleanly underneath the Microphone */}
-            <div className="pt-2">
-              <ActiveSession
-                run={displayedRun}
-                onExecuteCalendar={i => executeItem("calendar", i)}
-                onExecuteTask={i => executeItem("task", i)}
-                onExecuteSearch={i => executeItem("search", i)}
-                onUndoCalendar={i => handleUndo("calendar", i)}
-                onUndoTask={i => handleUndo("task", i)}
-                onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
-                onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
-                onSaveToDrive={() => handleSaveToDrive(
-                  "Scribant Session",
-                  "Session Summary.md",
-                  activeAnalysis?.summary || "",
-                )}
-                savingDrive={savingDrive}
-                isLiveAnalyzing={busy.plan}
-              />
-            </div>
-
-            {/* Brain Dump Archive: Memory Bank & past session records (Commented out per user request)
-            <div id="brain-dump-archive-section" className="pt-6 border-t border-stone-200/65 space-y-4">
-              <SessionHistory
-                runs={runs}
-                selectedRunId={selectedRunId}
-                onSelectRun={setSelectedRunId}
-              />
-            </div>
-            */}
-
-            {/* Clear All Session Data button */}
-            <div className="pt-4 flex justify-center">
               <button
-                onClick={handleClearAll}
-                className="flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-stone-400 hover:text-red-600 bg-transparent hover:bg-red-50 border border-dashed border-stone-200 hover:border-red-300 rounded-xl transition-all cursor-pointer"
+                onClick={handleGoogleSignIn}
+                className="px-4.5 py-2 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-stone-100 hover:text-white rounded-lg border border-stone-950 shadow-sm flex items-center justify-center gap-1.5 transition-all self-start md:self-auto shrink-0 w-full md:w-auto"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                Clear All Session Data
+                <FolderSync className="w-4 h-4" /> Sign in with Google
               </button>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* View 2: Administration & Monitoring Tab */}
-        {activeTab === "admin" && (
-          <div id="admin-monitoring-section" className="pt-2">
-            <AdminMonitoring
-              onEventsCountChange={setEventsCount}
-              rawTranscript={liveTranscript}
+          {/* Content layout: Top Row (Microphone) */}
+          <div className="w-full">
+            <AudioRecorder
+              key={recorderKey}
+              onAnalyze={handleAnalyzeStream}
+              isProcessing={isProcessing}
+              onShowToast={showToast}
+              onChangeTranscript={setLiveTranscript}
               liveSummary={liveSummary}
+              proofResult={proofResult}
+              busy={busy}
+              onRunNow={() => runLive(liveTranscript.trim())}
+              onSaveToDrive={() => handleSaveToDrive(
+                "Scribant Session",
+                "Live Notes.md",
+                liveSummary,
+              )}
+              savingDrive={savingDrive}
             />
           </div>
-        )}
+
+          {/* Results layout: rendered cleanly underneath the Microphone */}
+          <div className="pt-2">
+            <ActiveSession
+              run={displayedRun}
+              onExecuteCalendar={i => executeItem("calendar", i)}
+              onExecuteTask={i => executeItem("task", i)}
+              onExecuteSearch={i => executeItem("search", i)}
+              onUndoCalendar={i => handleUndo("calendar", i)}
+              onUndoTask={i => handleUndo("task", i)}
+              onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
+              onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
+              onSaveToDrive={() => handleSaveToDrive(
+                "Scribant Session",
+                "Session Summary.md",
+                activeAnalysis?.summary || "",
+              )}
+              savingDrive={savingDrive}
+              isLiveAnalyzing={busy.plan}
+            />
+          </div>
+
+          {/* Clear All Session Data button */}
+          <div className="pt-4 flex justify-center">
+            <button
+              onClick={handleClearAll}
+              className="flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-stone-400 hover:text-red-600 bg-transparent hover:bg-red-50 border border-dashed border-stone-200 hover:border-red-300 rounded-xl transition-all cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Clear All Session Data
+            </button>
+          </div>
+        </div>
+
+        {/* View 2: Administration & Monitoring Tab */}
+        <div id="admin-monitoring-section" className={activeTab === "admin" ? "pt-2" : "hidden"}>
+          <AdminMonitoring
+            onEventsCountChange={setEventsCount}
+            rawTranscript={liveTranscript}
+            liveSummary={liveSummary}
+          />
+        </div>
 
         {/* View 3: API Documentation Tab */}
-        {activeTab === "docs" && (
-          <div id="api-docs-section" className="pt-2">
-            <ApiDocsView />
-          </div>
-        )}
+        <div id="api-docs-section" className={activeTab === "docs" ? "pt-2" : "hidden"}>
+          <ApiDocsView />
+        </div>
 
       </div>
 

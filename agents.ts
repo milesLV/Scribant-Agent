@@ -33,8 +33,18 @@ if (usingVertex) {
 // Sub-agents read their input from session state rather than the user message: inside the
 // orchestrator the message is the raw transcript, but everything downstream of the proofreader must
 // reason over the CORRECTED text. `corrected` is seeded by the orchestrator for callers that skip
-// the proofread stage, so this key is always populated.
 const corrected = (ctx: ReadonlyContext) => ctx.state.get<string>("corrected") ?? "";
+
+// Rolling window context compactor: limits the verbatim speech stream to the active recent window
+// (~40 words) so intent classification stays fast with constant O(1) token complexity regardless
+// of how long the meeting/session runs. Historical context is preserved via liveSummary in ctx.state.
+export const recentWindow = (ctx: ReadonlyContext, maxWords = 40): string => {
+  const full = corrected(ctx);
+  if (!full) return "";
+  const words = full.trim().split(/\s+/);
+  if (words.length <= maxWords) return full;
+  return "..." + words.slice(-maxWords).join(" ");
+};
 
 // Every Gemini key in .env, primary first. Free-tier keys exhaust after a run or two, so askAgent
 // rotates through them on 429 before it resorts to waiting.
@@ -140,8 +150,8 @@ CRITICAL: If there are no items matching a category's strict criteria, you MUST 
 
 Current Time context: ${ctx.state.get<string>("refISO") ?? ""}
 
-Stream of thoughts:
-"${corrected(ctx)}"`,
+Stream of thoughts (Active Recent Window):
+"${recentWindow(ctx)}"`,
   outputSchema: analyzeOutputSchema,
   outputKey: "planRaw",
   includeContents: "none",
