@@ -79,7 +79,6 @@ export default function Header({
           </div>
           <div className="space-y-0.5">
             <h1 className="text-base font-extrabold tracking-tight font-sans text-stone-800">Scribant</h1>
-            <p className="text-[11px] text-stone-500 font-sans">Listen to unfiltered thinking streams, transcribe, and run Google Workspace actions</p>
           </div>
         </div>
 
@@ -127,7 +126,7 @@ export default function Header({
               }`}
             >
               <BrainCircuit className={`w-4 h-4 ${activeTab === "workspace" ? "text-amber-600" : "text-stone-400"}`} />
-              <span>Workspace</span>
+              <span>Board</span>
             </button>
 
             <button
