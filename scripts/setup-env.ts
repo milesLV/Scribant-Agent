@@ -116,15 +116,8 @@ async function main() {
   console.log("\n[2/3] Writing localized .env configuration...");
   const envPath = path.join(process.cwd(), ".env");
 
-  // Read existing .env to preserve any custom keys if present
-  let existingEnv = "";
-  try {
-    existingEnv = await fs.readFile(envPath, "utf-8");
-  } catch {}
-
-  // In Vertex AI mode, keep GEMINI_API_KEY commented out so SDK doesn't emit redundant warnings
-  const geminiKeyMatch = existingEnv.match(/(?:#\s*)?(GEMINI_API_KEY\w*=.*)/);
-  const preservedKey = geminiKeyMatch ? `# Preserved API Key (uncomment to switch from Vertex AI to Developer API keys)\n# ${geminiKeyMatch[1].replace(/^#\s*/, "")}\n` : "";
+  // Vertex AI ADC is the only auth path — agents.ts deletes GEMINI_API_KEY / GOOGLE_API_KEY from the
+  // environment at import, so there is no API key to carry over from a previous .env.
 
   const newEnvContent = `# Scribant Agent Local Environment Configuration
 # Automatically generated/updated by scripts/setup-env.ts
@@ -135,8 +128,7 @@ GOOGLE_CLOUD_LOCATION=global
 GEMINI_MODEL=${model}
 VERTEX_AI_AGENT_ENGINE_ID=${agentEngineId}
 VERTEX_AI_LOCATION=${location}
-
-${preservedKey}`.trim() + "\n";
+`.trim() + "\n";
 
   await fs.writeFile(envPath, newEnvContent, "utf-8");
   console.log(`  ✓ Updated ${envPath}`);

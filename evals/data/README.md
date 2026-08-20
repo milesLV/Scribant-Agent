@@ -144,8 +144,8 @@ Grading is **deterministic** for the structural/factual `judge` fields —
 `condensedSentences`/`inDepthSentences` (sentence-count ranges), `mustMention`,
 `sourcesMin`, `titleMentions`, `detailMentions`, `startDate`/`startHour`. The
 optional `judge.quality` field is a natural-language rubric graded by an **LLM
-judge**, run only under `npm run eval -- --judge` (costs tokens; needs a
-`GEMINI_API_KEY`). Search cases hit `/api/search`; calendar/task cases hit
+judge**, run only under `npm run eval -- --judge` (costs Vertex AI quota; needs
+working ADC). Search cases hit `/api/search`; calendar/task cases hit
 `/api/analyze` and inspect the first produced item (routed by the `calendar` /
 `task` tag).
 

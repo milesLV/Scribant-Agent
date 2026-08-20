@@ -25,8 +25,8 @@ Welcome to Scribant! Scribant is an intelligent thought-partner agent that liste
 - **Core AI Framework**: Google ADK TypeScript (`@google/adk`).
 - **Models & Execution**:
   - Model: Defaults to `gemini-3.6-flash` (configurable via `GEMINI_MODEL` or `MODEL`).
-  - Key Rotation: Built-in multi-key load balancer in [`agents.ts`](file:///Users/luissala/development/agent-clinic-103/Scribant-Agent/agents.ts) rotating across `GEMINI_API_KEY`, `GEMINI_API_KEY1`, `GEMINI_API_KEY2`, `GEMINI_API_KEY3`, `GOOGLE_API_KEY` on rate limits (429s).
-  - Vertex AI Mode: Enabled via `GOOGLE_GENAI_USE_VERTEXAI=true` or `GOOGLE_GENAI_USE_ENTERPRISE=true`, using Google Cloud ADC / IAM instead of API keys.
+  - Auth: **Vertex AI only.** `agents.ts` forces `GOOGLE_GENAI_USE_VERTEXAI=true` (also settable as `GOOGLE_GENAI_USE_ENTERPRISE`) and deletes `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` / `GOOGLE_API_KEY` from the environment at import. There is no API-key path and no key rotation — credentials come from Google Cloud ADC / IAM.
+  - Rate limits: a 429 or 503 backs off and retries twice (15s, then 30s), honoring the model's own `retryDelay` when it sends one. See `nextAttempt` in `agents.ts`.
 
 ---
 
@@ -34,7 +34,7 @@ Welcome to Scribant! Scribant is an intelligent thought-partner agent that liste
 
 ```
 Scribant-Agent/
-├── agents.ts              # Specialist ADK LLM Agents & key rotation runner
+├── agents.ts              # Specialist ADK LLM Agents & Vertex AI runner (backoff retries)
 ├── orchestrator.ts        # ADK SequentialAgent pipeline (proofread -> summarize/classify -> plan)
 ├── memory.ts              # Vertex AI Memory Bank & local fallback memory system
 ├── adk-events.ts          # Append-only immutable ADK Event Stream & disk persistence
@@ -84,21 +84,14 @@ Scribant-Agent/
 
 Create or update `.env` in the repository root:
 ```ini
-# Primary Gemini API key (Required)
-GEMINI_API_KEY=AIzaSy...
-
-# Optional additional keys for automated rate-limit rotation
-GEMINI_API_KEY1=AIzaSy...
-GEMINI_API_KEY2=AIzaSy...
-GEMINI_API_KEY3=AIzaSy...
+# Vertex AI mode (Required) — auth is Google Cloud ADC, not an API key.
+# Run `gcloud auth application-default login` first.
+GOOGLE_GENAI_USE_VERTEXAI=true
 
 # Vertex AI Memory Bank (Optional - falls back to in-memory/local JSON if omitted)
 GOOGLE_CLOUD_PROJECT=your-gcp-project-id
 GOOGLE_CLOUD_LOCATION=us-central1
 VERTEX_MEMORY_BANK_ID=your-memory-bank-id
-
-# Vertex AI Enterprise Mode (Optional - uses ADC instead of API keys)
-# GOOGLE_GENAI_USE_VERTEXAI=true
 
 # Application Identification
 APP_NAME=scribant

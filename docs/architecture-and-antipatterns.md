@@ -289,36 +289,33 @@ A common temptation in agent engineering is giving the LLM immediate autonomous 
 
 ---
 
-## 6. Resilience & Production Load-Balancing Engine
+## 6. Resilience & Retry Engine
 
-To prevent free-tier API exhaustion and transient overload (503s), `agents.ts` implements an intelligent key rotation runner:
-
-![Multi-Key Rotation & Resilience Engine](./assets/diagram_key_rotation.png)
-
-<details>
-<summary>View Mermaid Source</summary>
+Auth is Vertex AI ADC against a single Google Cloud project — `agents.ts` deletes every API-key
+environment variable at import, so there is no pool of keys to rotate through. Transient model
+failures are absorbed by backoff alone:
 
 ```mermaid
 flowchart TD
-    Req["askAgent / runOrchestrator Request"] --> Try["Execute with Current Key (keyCursor)"]
+    Req["askAgent / runOrchestrator Request"] --> Try["Execute (Vertex AI ADC)"]
     Try --> Status{"Response Status?"}
-    
+
     Status -->|"200 OK"| Done["Emit Event & Return Result"]
-    
-    Status -->|"429 Quota Exceeded"| CheckKeys{"Remaining Unused Keys?"}
-    CheckKeys -->|"Yes"| Swap["keyCursor.rotate()<br/>Instant Key Swap (0s sleep)"] --> Try
-    CheckKeys -->|"No (All Keys Exhausted)"| Backoff["Exponential Backoff / Honor retryDelay"] --> Try
-    
-    Status -->|"503 Overloaded"| OverloadWait["Overload Backoff (15s, 30s...)<br/>Do NOT swap keys"] --> Try
-    
-    Status -->|"Fatal Error / Exhausted"| Err["Throw Model Error"]
+
+    Status -->|"429 Quota / 503 Overloaded"| Plan{"nextAttempt(attempt, retryDelay)"}
+    Plan -->|"attempt 1 -> 15s<br/>attempt 2 -> 30s"| Wait["Sleep, then retry"] --> Try
+    Plan -->|"attempt 3 -> null"| Err["Throw Model Error"]
+
+    Status -->|"Fatal Error"| Err
 ```
-</details>
 
 ### Key Properties:
-- **Instant Swaps on Quota**: If Key 1 hits a 429, the runner immediately rotates to Key 2 with **0 seconds delay**.
-- **Overload Awareness (503)**: Since 503 is a backend model overload, swapping keys does not help. The runner backs off immediately rather than burning through other keys.
-- **Sticky Cursors**: Once rotation discovers a healthy key, subsequent requests start on that key rather than repeating the failure cycle on exhausted keys.
+- **Model-stated delay wins**: when a 429 carries a `retryDelay`, that value replaces the 15s/30s ramp.
+- **Same policy for 429 and 503**: neither is fixable by retrying instantly, so both back off.
+- **Bounded**: three attempts total, then the stage reports its own error. Inside the orchestrator the
+  REST of the pipeline still runs — a failed classifier must not cost the user their proofread.
+- **Pure and checked**: `nextAttempt` takes no I/O, so `agents.ts`'s self-check pins the policy without
+  burning a request.
 
 ---
 

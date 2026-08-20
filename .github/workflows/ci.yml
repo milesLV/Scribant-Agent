@@ -20,16 +20,23 @@ jobs:
       - run: npm ci
       - run: npm run check
 
-  # Live model eval — costs Gemini tokens and needs quota, so it's manual only
-  # (workflow_dispatch). Add a GEMINI_API_KEY repo secret first; it grades against
-  # evals/baseline.json and fails if a metric regresses (once a baseline is committed).
+  # Live model eval — costs Vertex AI quota, so it's manual only (workflow_dispatch).
+  # Auth is Vertex AI ADC, the same as the app: there are no API keys anywhere in this
+  # repo. Set two repo secrets first — GCP_SA_KEY (a service account JSON with the
+  # Vertex AI User role) and GCP_PROJECT_ID. Grades against evals/baseline.json and
+  # fails if a metric regresses (once a baseline is committed).
   eval:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GOOGLE_GENAI_USE_VERTEXAI: "true"
+      GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      GOOGLE_CLOUD_LOCATION: global
     steps:
       - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -43,5 +50,5 @@ jobs:
             curl -sf -o /dev/null http://localhost:3000/ && exit 0
             sleep 2
           done
-          echo "server never came up (bad/exhausted GEMINI_API_KEY?)" && exit 1
+          echo "server never came up (bad ADC credentials or missing Vertex AI quota?)" && exit 1
       - run: npm run eval

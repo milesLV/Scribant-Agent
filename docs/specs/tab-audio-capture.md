@@ -79,8 +79,8 @@ This is the one that should gate scope. Gemini free-tier keys already exhaust af
 higher call volume than anything the app does today. Recommend:
 - Ship this **off by default**, explicit opt-in per session.
 - Make the chunk interval a named constant so it's a one-line dial, not a redeploy.
-- Consider gating behind whichever `GEMINI_API_KEY*` slot is least contended, or a distinct "audio" key
-  if quota separation matters.
+- If quota separation matters, run the audio calls against a separate Google Cloud project or a
+  dedicated Vertex AI quota, not a second credential — there is only one ADC identity.
 
 ## Phasing
 

@@ -1,8 +1,8 @@
 // The four agents behind the API — one factory each, plus the runner that calls them.
 //
-// Factories, not singletons: Gemini captures the API key when the INSTANCE is constructed, so
-// rotating onto a fresh key means building a fresh agent. Any agent cached across requests would
-// pin the first key forever and silently defeat the rotation in askAgent.
+// Factories, not singletons: an agent instance captures its model config and callbacks at
+// construction, so a cached agent would pin one request's memory service and session state across
+// every later request. Building a fresh one per call keeps each request independent.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -174,21 +174,13 @@ Stream of thoughts (Active Recent Window):
 
 // ---- the runner ------------------------------------------------------------
 
-// Retry policy for a transient model failure. A quota error is KEY-specific, so swap to every other
-// key first — a fresh key beats a 15s sleep. Once they're all limited, back off. An overload (503)
-// is not key-specific: no key helps, so it goes straight to backoff rather than hammering a struggling
-// backend with instant retries. Returns null when there's no road left and the caller should throw.
-// Pure so the branching is checkable without burning a request.
-export function nextAttempt(
-  attempt: number,
-  keyCount: number,
-  statedDelayS: number | null,
-  isQuota: boolean,
-): { sleepS: number } | null {
-  const freeSwaps = isQuota ? keyCount - 1 : 0; // one instant swap per OTHER key
-  if (attempt >= freeSwaps + 3) return null;    // then two backoff retries, then give up
-  if (attempt <= freeSwaps) return { sleepS: 0 };
-  return { sleepS: statedDelayS ?? 15 * (attempt - freeSwaps) };
+// Retry policy for a transient model failure (quota or overload). Auth is Vertex AI ADC against one
+// project, so there is nothing to swap to — an instant retry would only hammer a backend that just
+// said no. Back off instead: two retries at 15s then 30s, then give up. Returns null when there's no
+// road left and the caller should throw. Pure so the branching is checkable without burning a request.
+export function nextAttempt(attempt: number, statedDelayS: number | null): { sleepS: number } | null {
+  if (attempt >= 3) return null;
+  return { sleepS: statedDelayS ?? 15 * attempt };
 }
 
 export const sessionService = new InMemorySessionService();
@@ -259,7 +251,7 @@ export async function askAgentParts(
     if (!errEvent) return { text: out, grounding };
 
     const { msg, isQuota, isOverload, stated } = classifyError(errEvent);
-    const plan = (isQuota || isOverload) ? nextAttempt(attempt, 1, stated, isQuota) : null;
+    const plan = (isQuota || isOverload) ? nextAttempt(attempt, stated) : null;
     if (!plan) throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
 
     console.warn(
@@ -273,27 +265,13 @@ export async function askAgentParts(
 // ponytail: self-check pins the retry policy (the only branching here). Run: tsx agents.ts
 // import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
-  // Quota, 4 keys: swap to the other three instantly, then back off from 15s.
-  assert.deepEqual(nextAttempt(1, 4, null, true), { sleepS: 0 });
-  assert.deepEqual(nextAttempt(3, 4, null, true), { sleepS: 0 });
-  assert.deepEqual(nextAttempt(4, 4, null, true), { sleepS: 15 });
-  assert.deepEqual(nextAttempt(5, 4, null, true), { sleepS: 30 });
-  assert.equal(nextAttempt(6, 4, null, true), null);          // out of road -> throw
+  // Sleep and ramp, 3 runs total, then out of road -> throw.
+  assert.deepEqual(nextAttempt(1, null), { sleepS: 15 });
+  assert.deepEqual(nextAttempt(2, null), { sleepS: 30 });
+  assert.equal(nextAttempt(3, null), null);
 
-  // Quota, 1 key: no one to swap to, so sleep and ramp — 3 runs total.
-  assert.deepEqual(nextAttempt(1, 1, null, true), { sleepS: 15 });
-  assert.deepEqual(nextAttempt(2, 1, null, true), { sleepS: 30 });
-  assert.equal(nextAttempt(3, 1, null, true), null);
-
-  // Overload (503): a fresh key cannot help, so never spend the instant retries on it — back off
-  // immediately, however many keys are configured.
-  assert.deepEqual(nextAttempt(1, 4, null, false), { sleepS: 15 });
-  assert.deepEqual(nextAttempt(2, 4, null, false), { sleepS: 30 });
-  assert.equal(nextAttempt(3, 4, null, false), null);
-
-  // Gemini's own retryDelay wins over our ramp, but never delays a free key swap.
-  assert.deepEqual(nextAttempt(4, 4, 22, true), { sleepS: 22 });
-  assert.deepEqual(nextAttempt(1, 4, 22, true), { sleepS: 0 });
+  // The model's own retryDelay wins over our ramp.
+  assert.deepEqual(nextAttempt(1, 22), { sleepS: 22 });
 
   assert.ok(liveSummarizer().canonicalModel instanceof Gemini);
   assert.equal(intentClassifier().canonicalBeforeModelCallbacks.length, 1);

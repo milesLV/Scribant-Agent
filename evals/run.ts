@@ -226,8 +226,8 @@ async function post(pathname: string, body: any): Promise<any> {
 // ---- LLM judge (eval-only, gated behind --judge) ---------------------------
 // Deterministic checks cover structure/facts (sentence counts, mentions, source count).
 // The judge grades only the SUBJECTIVE `judge.quality` rubric. Kept in eval-land, not prod.
-// Built on the same askAgent the app uses, so the judge gets key rotation for free instead of a
-// second Gemini SDK with its own key lookup.
+// Built on the same askAgent the app uses, so the judge shares its Vertex AI auth and retry policy
+// instead of standing up a second Gemini SDK of its own.
 const judgeAgent = () => new LlmAgent({
   name: "eval_judge",
   model: createGeminiModel(),

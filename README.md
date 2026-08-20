@@ -8,21 +8,26 @@ otherwise.
 
 ## Run locally
 
-**Prerequisites:** Node.js, and at least one Gemini API key.
+**Prerequisites:** Node.js, and a Google Cloud project with the Vertex AI API
+enabled. There are no API keys — auth is Application Default Credentials.
 
 1. Install dependencies:
    ```
    npm install
    ```
-2. Create a `.env` with one or more Gemini keys. Free-tier keys exhaust quickly,
-   so on a rate limit the server switches to the next key immediately and only
-   waits once every key is limited:
+2. Authenticate with Google Cloud and point the app at your project:
    ```
-   GEMINI_API_KEY=...
-   GEMINI_API_KEY1=...   # optional extra keys for rotation
-   GEMINI_API_KEY2=...
-   GEMINI_API_KEY3=...
+   gcloud auth application-default login
+   gcloud auth application-default set-quota-project YOUR_PROJECT_ID
    ```
+   Then create a `.env`:
+   ```
+   GOOGLE_GENAI_USE_VERTEXAI=true
+   GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID
+   GOOGLE_CLOUD_LOCATION=global
+   ```
+   `make setup` writes this for you. On a rate limit the server backs off and
+   retries twice (15s, then 30s) before surfacing the error.
 3. Start the dev server (Express + Vite):
    ```
    npm run dev

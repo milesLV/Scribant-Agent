@@ -116,7 +116,7 @@ export interface OrchestratorResult {
 }
 
 // Runs the orchestrator and reports each stage the moment it lands (that streaming is what /api/live
-// is built on). Retry policy is askAgent's: rotate onto another key first, then back off. A stage
+// is built on). Retry policy is askAgent's: back off, then retry. A stage
 // that runs out of road reports its own error and the REST of the pipeline continues — a 429 on the
 // classifier must not cost the user their proofread.
 export async function runOrchestrator(opts: {
@@ -212,7 +212,7 @@ export async function runOrchestrator(opts: {
       if (done.has(stage)) continue; // it errored but still delivered — nothing to retry
       const { msg, isQuota, isOverload, stated } = classifyError(ev);
       const plan = (isQuota || isOverload)
-        ? nextAttempt(++attempts[stage], 1, stated, isQuota)
+        ? nextAttempt(++attempts[stage], stated)
         : null;
 
       if (!plan) {
