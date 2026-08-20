@@ -185,14 +185,16 @@ export default function ActiveSession({
     );
   }
 
-  // Spinner-on-the-clicked-row for a write: optional confirm, mark the row busy, always clear it.
+  // Spinner-on-the-clicked-row for a write: mark the row busy, always clear it. No confirmation
+  // step — every one of these writes is reversible from the UndoChip the button becomes, and the
+  // card already shows the exact values being sent, so a blocking prompt only re-read data the
+  // user was looking at. Auto-execution (see isAutoExecutable in App.tsx) never prompted either;
+  // this makes the deliberate path consistent with it.
   const runOnRow = async (
     kind: "calendar" | "task" | "search",
     idx: number,
     exec: () => Promise<void>,
-    confirmMsg?: string,
   ) => {
-    if (confirmMsg && !window.confirm(confirmMsg)) return;
     setExecuting(e => ({ ...e, [kind]: idx }));
     try {
       await exec();
@@ -200,17 +202,6 @@ export default function ActiveSession({
       setExecuting(e => ({ ...e, [kind]: null }));
     }
   };
-
-  const handleCalClick = (idx: number, event: CalendarEvent) =>
-    runOnRow("calendar", idx, () => onExecuteCalendar(idx),
-      `Confirm Action: Double-check schedule details.\n\nEvent: ${event.title}\nStarts: ${new Date(event.start).toLocaleString()}\nEnds: ${new Date(event.end).toLocaleString()}\n\nDo you want to confirm and schedule this event on Google Calendar?`);
-
-  const handleTaskClick = (idx: number, task: TaskItem) =>
-    runOnRow("task", idx, () => onExecuteTask(idx),
-      `Confirm Action: Log to-do task.\n\nTask: ${task.title}\nNotes: ${task.notes || "None"}\n\nDo you want to push this to Google Tasks?`);
-
-  const handleSearchClick = (idx: number) =>
-    runOnRow("search", idx, () => onExecuteSearch(idx));
 
   const toDatetimeLocalString = (isoString: string): string => {
     if (!isoString) return "";
@@ -232,14 +223,137 @@ export default function ActiveSession({
         </div>
       )}
       
-      {/* Grid of parsed actions */}
+      {/* Grid of parsed actions. The actionable writes (Calendar Events, To-Do's) lead — they
+          are what the user actually clicks — and the read-only Main Ideas / Info Queries follow. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        {/* Schedule Calendar appointments */}
+        <Panel icon={Calendar} iconClass="text-emerald-600" title="Calendar Events">
+          {!analysis ? (
+            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No calendar events scheduled yet. Say things like &ldquo;Let's meet tomorrow at 3pm&rdquo; to suggest calendar actions.</p>
+          ) : analysis.calendarEvents.length === 0 ? (
+            <p className="text-xs text-stone-400 italic py-2">No calendar matches found in this stream of thoughts.</p>
+          ) : (
+            <div className="space-y-3.5 max-h-[350px] overflow-y-auto pr-1">
+              {analysis.calendarEvents.map((item, idx) => {
+                const setDate = (field: "start" | "end") => (e: React.ChangeEvent<HTMLInputElement>) => {
+                  try {
+                    const val = e.target.value;
+                    onUpdateCalendar(idx, {
+                      ...item,
+                      [field]: val ? (val.length === 16 ? `${val}:00` : val) : "",
+                      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+                    });
+                  } catch {}
+                };
+                return (
+                  <ItemCard
+                    key={idx}
+                    tone="emerald"
+                    uncertain={!!item.uncertain}
+                    uncertainLabel="Draft"
+                    badge={
+                      <>
+                        {item.allDay && (
+                          <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
+                            All-day
+                          </span>
+                        )}
+                        {item.speaker && (
+                          <span className="inline-block text-[9px] font-bold text-emerald-800 bg-emerald-100/70 border border-emerald-250/50 px-1.5 py-0.2 rounded-full mb-1 ml-1 font-mono">
+                            Speaker: {item.speaker}
+                          </span>
+                        )}
+                      </>
+                    }
+                    isDone={item.status === 'scheduled'}
+                    error={item.status === 'failed' ? item.error : undefined}
+                    title={item.title}
+                    onTitle={v => onUpdateCalendar(idx, { ...item, title: v })}
+                    titlePlaceholder="Configure title..."
+                    subtitle={item.description}
+                    onSubtitle={v => onUpdateCalendar(idx, { ...item, description: v })}
+                    subtitlePlaceholder="Configure description..."
+                    chip={<UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />}
+                    button={<ActionButton busy={executing.calendar === idx} disabled={executing.calendar !== null}
+                      onClick={() => runOnRow("calendar", idx, () => onExecuteCalendar(idx))} icon={Calendar} label="Add Event" />}
+                  >
+                    <div className="grid grid-cols-2 gap-2 text-[10px] font-sans pt-1 w-full">
+                      {(["start", "end"] as const).map(field => (
+                        <input
+                          key={field}
+                          type="datetime-local"
+                          value={toDatetimeLocalString(item[field])}
+                          onChange={setDate(field)}
+                          className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded px-1.5 py-1 focus:border-amber-500 focus:bg-white outline-none font-mono text-[10px] text-stone-600 w-full min-w-0"
+                        />
+                      ))}
+                    </div>
+                  </ItemCard>
+                );
+              })}
+            </div>
+          )}
+        </Panel>
+
+        {/* Actionable Tasks to Google Tasks */}
+        <Panel icon={CheckSquare} iconClass="text-purple-600" title={<>To-Do's</>}>
+          {!analysis ? (
+            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No checklist actions logged yet. State tasks in your thoughts (e.g. &ldquo;Pick up groceries on the way home&rdquo;, &ldquo;Drop package off at the post office&rdquo;, &rdquo;Water plants in the garden&rdquo;) to see todo suggestions.</p>
+          ) : analysis.tasks.length === 0 ? (
+            <p className="text-xs text-stone-400 italic py-2">No checklist elements identified.</p>
+          ) : (
+            <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
+              {analysis.tasks.map((item, idx) => (
+                <ItemCard
+                  key={idx}
+                  tone="purple"
+                  uncertain={!!item.uncertain}
+                  uncertainLabel="Draft"
+                  isDone={item.status === 'created'}
+                  error={item.status === 'failed' ? item.error : undefined}
+                  title={item.title}
+                  onTitle={v => onUpdateTask(idx, { ...item, title: v })}
+                  titlePlaceholder="Configure task..."
+                  subtitle={item.notes}
+                  onSubtitle={v => onUpdateTask(idx, { ...item, notes: v })}
+                  subtitlePlaceholder="Add notes..."
+                  chip={<UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />}
+                  button={<ActionButton busy={executing.task === idx} disabled={executing.task !== null}
+                    onClick={() => runOnRow("task", idx, () => onExecuteTask(idx))} icon={CheckSquare} label="Log To-Do" />}
+                >
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                    {item.assignee && (
+                      <span className="text-[9px] font-bold text-purple-800 bg-purple-100 border border-purple-200/60 px-1.5 py-0.5 rounded font-mono">
+                        Assignee: {item.assignee}
+                      </span>
+                    )}
+                    {item.requestedBy && (
+                      <span className="text-[9px] font-semibold text-stone-600 bg-stone-100 border border-stone-200/70 px-1.5 py-0.5 rounded font-mono">
+                        Requested by: {item.requestedBy}
+                      </span>
+                    )}
+                    {item.dueDate && (
+                      <span className="text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
+                        Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                </ItemCard>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         
         {/* General Summary / Bulletin */}
         <Panel
           icon={FileText}
           iconClass="text-amber-600"
-          title={<>Bulletins &amp; General Ideas</>}
+          title={<>Main Ideas</>}
           action={
             <button
               type="button"
@@ -267,7 +381,7 @@ export default function ActiveSession({
         </Panel>
 
         {/* Web query searches */}
-        <Panel icon={Search} iconClass="text-blue-600" title="Real-time Info Queries">
+        <Panel icon={Search} iconClass="text-blue-600" title="Info Queries">
           {!analysis ? (
             <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No search queries identified yet. Ask questions in your thoughts (e.g. &ldquo;I wonder who designed the Concorde&rdquo;) to trigger research actions.</p>
           ) : analysis.searchQueries.length === 0 ? (
@@ -327,7 +441,7 @@ export default function ActiveSession({
                       {queryLine}
                       {item.status === 'pending' && (
                         <button
-                          onClick={() => handleSearchClick(idx)}
+                          onClick={() => runOnRow("search", idx, () => onExecuteSearch(idx))}
                           disabled={executing.search !== null}
                           className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
                         >
@@ -350,128 +464,6 @@ export default function ActiveSession({
                   </div>
                 );
               })}
-            </div>
-          )}
-        </Panel>
-
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-
-        {/* Schedule Calendar appointments */}
-        <Panel icon={Calendar} iconClass="text-emerald-600" title="Detected Calendar Schedules">
-          {!analysis ? (
-            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No calendar events scheduled yet. Say things like &ldquo;Let's meet tomorrow at 3pm&rdquo; to suggest calendar actions.</p>
-          ) : analysis.calendarEvents.length === 0 ? (
-            <p className="text-xs text-stone-400 italic py-2">No calendar matches found in this stream of thoughts.</p>
-          ) : (
-            <div className="space-y-3.5 max-h-[350px] overflow-y-auto pr-1">
-              {analysis.calendarEvents.map((item, idx) => {
-                const setDate = (field: "start" | "end") => (e: React.ChangeEvent<HTMLInputElement>) => {
-                  try {
-                    const val = e.target.value;
-                    onUpdateCalendar(idx, {
-                      ...item,
-                      [field]: val ? (val.length === 16 ? `${val}:00` : val) : "",
-                      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-                    });
-                  } catch {}
-                };
-                return (
-                  <ItemCard
-                    key={idx}
-                    tone="emerald"
-                    uncertain={!!item.uncertain}
-                    uncertainLabel="Uncertain Draft"
-                    badge={
-                      <>
-                        {item.allDay && (
-                          <span className="inline-block text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200/40 px-1.5 py-0.2 rounded-full uppercase tracking-wider mb-1 ml-1 font-mono">
-                            All-day
-                          </span>
-                        )}
-                        {item.speaker && (
-                          <span className="inline-block text-[9px] font-bold text-emerald-800 bg-emerald-100/70 border border-emerald-250/50 px-1.5 py-0.2 rounded-full mb-1 ml-1 font-mono">
-                            Speaker: {item.speaker}
-                          </span>
-                        )}
-                      </>
-                    }
-                    isDone={item.status === 'scheduled'}
-                    error={item.status === 'failed' ? item.error : undefined}
-                    title={item.title}
-                    onTitle={v => onUpdateCalendar(idx, { ...item, title: v })}
-                    titlePlaceholder="Configure title..."
-                    subtitle={item.description}
-                    onSubtitle={v => onUpdateCalendar(idx, { ...item, description: v })}
-                    subtitlePlaceholder="Configure description..."
-                    chip={<UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />}
-                    button={<ActionButton busy={executing.calendar === idx} disabled={executing.calendar !== null}
-                      onClick={() => handleCalClick(idx, item)} icon={Calendar} label="Add Event" />}
-                  >
-                    <div className="grid grid-cols-2 gap-2 text-[10px] font-sans pt-1 w-full">
-                      {(["start", "end"] as const).map(field => (
-                        <input
-                          key={field}
-                          type="datetime-local"
-                          value={toDatetimeLocalString(item[field])}
-                          onChange={setDate(field)}
-                          className="bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded px-1.5 py-1 focus:border-amber-500 focus:bg-white outline-none font-mono text-[10px] text-stone-600 w-full min-w-0"
-                        />
-                      ))}
-                    </div>
-                  </ItemCard>
-                );
-              })}
-            </div>
-          )}
-        </Panel>
-
-        {/* Actionable Tasks to Google Tasks */}
-        <Panel icon={CheckSquare} iconClass="text-purple-600" title={<>Identified Actions &amp; To-Dos</>}>
-          {!analysis ? (
-            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No checklist actions logged yet. State tasks in your thoughts (e.g. &ldquo;Pick up groceries on the way home&rdquo;, &ldquo;Drop package off at the post office&rdquo;, &rdquo;Water plants in the garden&rdquo;) to see todo suggestions.</p>
-          ) : analysis.tasks.length === 0 ? (
-            <p className="text-xs text-stone-400 italic py-2">No checklist elements identified.</p>
-          ) : (
-            <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
-              {analysis.tasks.map((item, idx) => (
-                <ItemCard
-                  key={idx}
-                  tone="purple"
-                  uncertain={!!item.uncertain}
-                  uncertainLabel="Uncertain To-Do"
-                  isDone={item.status === 'created'}
-                  error={item.status === 'failed' ? item.error : undefined}
-                  title={item.title}
-                  onTitle={v => onUpdateTask(idx, { ...item, title: v })}
-                  titlePlaceholder="Configure task..."
-                  subtitle={item.notes}
-                  onSubtitle={v => onUpdateTask(idx, { ...item, notes: v })}
-                  subtitlePlaceholder="Add notes..."
-                  chip={<UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />}
-                  button={<ActionButton busy={executing.task === idx} disabled={executing.task !== null}
-                    onClick={() => handleTaskClick(idx, item)} icon={CheckSquare} label="Log To-Do" />}
-                >
-                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                    {item.assignee && (
-                      <span className="text-[9px] font-bold text-purple-800 bg-purple-100 border border-purple-200/60 px-1.5 py-0.5 rounded font-mono">
-                        Assignee: {item.assignee}
-                      </span>
-                    )}
-                    {item.requestedBy && (
-                      <span className="text-[9px] font-semibold text-stone-600 bg-stone-100 border border-stone-200/70 px-1.5 py-0.5 rounded font-mono">
-                        Requested by: {item.requestedBy}
-                      </span>
-                    )}
-                    {item.dueDate && (
-                      <span className="text-[9px] font-bold text-purple-700 bg-purple-50 border border-purple-200/50 px-1.5 py-0.5 rounded font-mono">
-                        Due {new Date(item.dueDate + "T00:00:00").toLocaleDateString()}
-                      </span>
-                    )}
-                  </div>
-                </ItemCard>
-              ))}
             </div>
           )}
         </Panel>
