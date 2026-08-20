@@ -399,9 +399,11 @@ export default function TokenVisualizer({
 
       </div>
 
-      {/* Sub-Navigation Tabs */}
-      <div className="flex items-center justify-between border-b border-stone-200 pb-2">
-        <div className="flex items-center space-x-1">
+      {/* Sub-Navigation Tabs. The tab row owns its own line; the time-series toolbar sits on a
+          second line BELOW it so the controls read as subordinate to the selected tab rather than
+          competing with it for the same row. */}
+      <div className="space-y-[13px] border-b border-stone-200 pb-2">
+        <div className="flex flex-wrap items-center gap-1">
           <button
             type="button"
             onClick={() => setActiveTab("timeseries")}
@@ -442,80 +444,110 @@ export default function TokenVisualizer({
 
         {activeTab === "timeseries" && (
           <div className="flex flex-wrap items-center gap-2">
-            {/* Diarization Filter */}
-            <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
-              <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Diarization:</span>
+            {/* Diarization + Provider, folded behind one Filter button. The native popover
+                attribute supplies open/close, click-outside dismissal and Escape; anchor
+                positioning parks it under the button (elsewhere it centres in the viewport). */}
+            <div>
               <button
                 type="button"
-                onClick={() => setDiarizationFilter("all")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                  diarizationFilter === "all"
-                    ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
-                    : "text-stone-600 hover:text-stone-900"
+                popoverTarget="token-filter-popover"
+                title="Diarization and provider filters"
+                style={{ anchorName: "--token-filter-btn" } as React.CSSProperties}
+                className={`px-2 py-1 text-[11px] font-mono rounded-lg border cursor-pointer transition-colors flex items-center gap-1.5 ${
+                  diarizationFilter !== "all" || providerFilter !== "all"
+                    ? "bg-stone-800 text-white border-stone-800 font-bold"
+                    : "bg-stone-100 text-stone-600 border-stone-200 hover:text-stone-900 hover:bg-stone-200/70"
                 }`}
               >
-                All
+                <Filter className="w-3.5 h-3.5" />
+                Filters
+                {(diarizationFilter !== "all" || providerFilter !== "all") && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                )}
               </button>
-              <button
-                type="button"
-                onClick={() => setDiarizationFilter("diarized")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                  diarizationFilter === "diarized"
-                    ? "bg-emerald-600 text-white font-bold shadow-2xs"
-                    : "text-emerald-750 hover:text-emerald-900"
-                }`}
-              >
-                Diarized Only
-              </button>
-              <button
-                type="button"
-                onClick={() => setDiarizationFilter("non_diarized")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                  diarizationFilter === "non_diarized"
-                    ? "bg-stone-800 text-white font-bold shadow-2xs"
-                    : "text-stone-600 hover:text-stone-900"
-                }`}
-              >
-                Non-Diarized
-              </button>
-            </div>
 
-            {/* Provider Filter */}
-            <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
-              <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Provider:</span>
-              <button
-                type="button"
-                onClick={() => setProviderFilter("all")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                  providerFilter === "all"
-                    ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
-                    : "text-stone-600 hover:text-stone-900"
-                }`}
+              <div
+                id="token-filter-popover"
+                popover="auto"
+                style={{ positionAnchor: "--token-filter-btn", positionArea: "bottom span-right", margin: "0.375rem 0 0 0" } as React.CSSProperties}
+                className="bg-white border border-stone-200 rounded-xl shadow-lg p-2.5 space-y-2.5 w-max"
               >
-                All
-              </button>
-              <button
-                type="button"
-                onClick={() => setProviderFilter("gemini")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                  providerFilter === "gemini"
-                    ? "bg-amber-600 text-white font-bold shadow-2xs"
-                    : "text-amber-800 hover:text-amber-900"
-                }`}
-              >
-                Gemini
-              </button>
-              <button
-                type="button"
-                onClick={() => setProviderFilter("google_cloud_stt")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                  providerFilter === "google_cloud_stt"
-                    ? "bg-indigo-600 text-white font-bold shadow-2xs"
-                    : "text-indigo-750 hover:text-indigo-900"
-                }`}
-              >
-                Cloud STT
-              </button>
+                {/* Diarization Filter */}
+                <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+                  <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Diarization:</span>
+                  <button
+                    type="button"
+                    onClick={() => setDiarizationFilter("all")}
+                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                      diarizationFilter === "all"
+                        ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
+                        : "text-stone-600 hover:text-stone-900"
+                    }`}
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDiarizationFilter("diarized")}
+                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                      diarizationFilter === "diarized"
+                        ? "bg-emerald-600 text-white font-bold shadow-2xs"
+                        : "text-emerald-750 hover:text-emerald-900"
+                    }`}
+                  >
+                    Diarized Only
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDiarizationFilter("non_diarized")}
+                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                      diarizationFilter === "non_diarized"
+                        ? "bg-stone-800 text-white font-bold shadow-2xs"
+                        : "text-stone-600 hover:text-stone-900"
+                    }`}
+                  >
+                    Non-Diarized
+                  </button>
+                </div>
+
+                {/* Provider Filter */}
+                <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+                  <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Provider:</span>
+                  <button
+                    type="button"
+                    onClick={() => setProviderFilter("all")}
+                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                      providerFilter === "all"
+                        ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
+                        : "text-stone-600 hover:text-stone-900"
+                    }`}
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProviderFilter("gemini")}
+                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                      providerFilter === "gemini"
+                        ? "bg-amber-600 text-white font-bold shadow-2xs"
+                        : "text-amber-800 hover:text-amber-900"
+                    }`}
+                  >
+                    Gemini
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProviderFilter("google_cloud_stt")}
+                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
+                      providerFilter === "google_cloud_stt"
+                        ? "bg-indigo-600 text-white font-bold shadow-2xs"
+                        : "text-indigo-750 hover:text-indigo-900"
+                    }`}
+                  >
+                    Cloud STT
+                  </button>
+                  </div>
+                </div>
             </div>
 
             {/* Time Range Preset Buttons */}
