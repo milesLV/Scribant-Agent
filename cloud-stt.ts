@@ -251,10 +251,17 @@ export async function transcribeWithCloudStt(
 // The V1 `config` block, split out from the request so it can be asserted without a network call.
 //
 // ponytail: the speaker floor stays at 1 — do NOT "help" the clusterer by raising it.
-// Measured against the live V1 API: minSpeakerCount:2 MANDATES k>=2 clusters, so genuinely solo
-// audio is split at an arbitrary pause and one person alternates Speaker 1/Speaker 2. Auto-detect
-// is correct on real speech (Google's own two-speaker sample, commercial_mono.wav: 2 tags, 7
-// well-placed segments at min=1). Raising this floor shipped once, in bce2bd7, and was reverted.
+//
+// Measured against the live V1 API, minSpeakerCount is ADVISORY, not the hard k>=N constraint the
+// name suggests, and every effect observed from raising it was harmful:
+//   - Real speech ignores it. On Google's own two-speaker sample (commercial_mono.wav), min=1 and
+//     min=2 gave byte-identical output on every 8s chunk, and a genuinely single-speaker span
+//     stayed at 1 speaker for min=1, min=2 AND min=3. Raising it buys nothing on clean audio.
+//   - It only bites when the clusterer is UNCERTAIN, and then it fabricates: on low-confidence
+//     audio a floor of 2 split one continuous speaker at an arbitrary pause, which is what a
+//     noisy shared-room mic looks like to the recognizer.
+// Zero measured benefit, non-zero measured harm. The live capture path pins this at 1 and the
+// Admin control sets the upper bound only. Raising the floor shipped once, in bce2bd7.
 //
 // Nothing else belongs here either: `model` (video/phone_call/latest_long) and `useEnhanced` were
 // measured to give byte-identical diarization, so they are cost without effect.
