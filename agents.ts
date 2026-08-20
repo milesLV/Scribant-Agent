@@ -78,7 +78,8 @@ export const liveSummarizer: AgentFactory = () => new LlmAgent({
   instruction: (ctx) => `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
 The user is speaking or typing their thoughts live.
 Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
-Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points. Highlight key terms or entities in bold format (e.g., **Key Term**).
+Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points.
+Write each bullet as the content itself, not as a labelled entry. Never open a bullet with a topic label followed by a colon (no "**Budget**: we need to cut costs" — just "Need to cut costs, mostly on **contractors**"). Bold key terms or entities inline where they fall in the sentence. A colon is fine mid-sentence when the sentence genuinely needs one.
 
 Raw draft thoughts:
 "${corrected(ctx)}"`,
@@ -131,7 +132,7 @@ export const memoryAnswerer: AgentFactory = () => new LlmAgent({
 // ideasSummary (1), each skill (2..) — the calendar criteria's "(see #3)" reference relies on
 // tasks landing at index 3.
 const analyzeCriteriaText = [
-  { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "AI Live Notes Summary". If the AI Live Notes Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
+  { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "Bullet Point Summary". If the Bullet Point Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
   ...SKILLS.map(s => ({ key: s.name, body: s.description })),
 ].map((e, i) => `${i + 1}. "${e.key}": ${e.body}`).join("\n");
 
@@ -151,7 +152,7 @@ Analyze the provided stream of thoughts/dialogue and categorize segments into di
 Be proactive and vigilant in identifying all actionable tasks, to-dos, follow-ups, and commitments mentioned in casual conversation or stream-of-consciousness dialogue (e.g. "I'll do X", "I need to Y", "We should follow up with Z", "Make sure to W", "Don't forget to...").
 If speaker labels are present in the transcript (e.g., 'You:', 'Alice:', 'Speaker 1:'), attribute extracted tasks with the responsible speaker in 'assignee' (the person who volunteered or was assigned) and 'requestedBy' (the person who requested it). Attribute calendar events with 'speaker'.
 
-AI Live Notes Summary: "${ctx.state.get<string>("liveSummary") ?? ""}"
+Bullet Point Summary: "${ctx.state.get<string>("liveSummary") ?? ""}"
 
 You MUST output strictly a JSON object with the following keys and criteria:
 
