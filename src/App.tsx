@@ -707,6 +707,12 @@ export default function App() {
                 liveSummary,
               )}
               savingDrive={savingDrive}
+              mainIdeas={activeAnalysis?.summary || ""}
+              onSaveMainIdeasToDrive={() => handleSaveToDrive(
+                "Scribant Session",
+                "Session Summary.md",
+                activeAnalysis?.summary || "",
+              )}
             />
           </div>
 
@@ -721,12 +727,6 @@ export default function App() {
               onUndoTask={i => handleUndo("task", i)}
               onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
               onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
-              onSaveToDrive={() => handleSaveToDrive(
-                "Scribant Session",
-                "Session Summary.md",
-                activeAnalysis?.summary || "",
-              )}
-              savingDrive={savingDrive}
               isLiveAnalyzing={busy.plan}
             />
           </div>

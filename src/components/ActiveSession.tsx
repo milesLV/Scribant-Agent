@@ -1,10 +1,9 @@
 import { useState } from "react";
 import { StreamRun, CalendarEvent, TaskItem } from "../types";
 import {
-  Calendar, CheckSquare, Search, FileText, Check,
-  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown, Undo2, FolderPlus
+  Calendar, CheckSquare, Search, Check,
+  ExternalLink, Play, Sparkles, AlertCircle, RefreshCw, ChevronDown, Undo2
 } from "lucide-react";
-import MarkdownBullets from "./MarkdownBullets";
 
 // Completed-state chip ("Marked"/"Logged") that turns into an Undo button on hover. Undo deletes
 // exactly the resource this chip's create returned the id for.
@@ -149,8 +148,6 @@ interface ActiveSessionProps {
   onUndoTask: (index: number) => Promise<void>;
   onUpdateCalendar: (index: number, updated: CalendarEvent) => void;
   onUpdateTask: (index: number, updated: TaskItem) => void;
-  onSaveToDrive: () => void;  // saves this session's summary into its Drive folder
-  savingDrive: boolean;
   isLiveAnalyzing?: boolean;
 }
 
@@ -163,8 +160,6 @@ export default function ActiveSession({
   onUndoTask,
   onUpdateCalendar,
   onUpdateTask,
-  onSaveToDrive,
-  savingDrive,
   isLiveAnalyzing = false
 }: ActiveSessionProps) {
   // Which row (if any) of each list is mid-write. One record instead of three parallel useStates —
@@ -347,128 +342,94 @@ export default function ActiveSession({
 
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        
-        {/* General Summary / Bulletin */}
-        <Panel
-          icon={FileText}
-          iconClass="text-amber-600"
-          title={<>Main Ideas</>}
-          action={
-            <button
-              type="button"
-              onClick={onSaveToDrive}
-              disabled={savingDrive || !analysis?.summary?.trim()}
-              title="Save this summary to a Google Drive folder for the session"
-              className="text-[11px] font-semibold text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 disabled:opacity-40 transition-colors"
-            >
-              {savingDrive ? (
-                <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
-              ) : (
-                <FolderPlus className="w-3.5 h-3.5" />
-              )}
-              Save to Drive
-            </button>
-          }
-        >
-          <div className="prose prose-sm text-stone-600 leading-relaxed text-sm font-sans max-h-[300px] overflow-y-auto pr-1">
-            {analysis ? (
-              <MarkdownBullets text={analysis.summary} />
-            ) : (
-              <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No bulletin ideas generated yet. Speak or type your thoughts to see summarized ideas.</p>
-            )}
-          </div>
-        </Panel>
+      {/* Web query searches. Full width: Main Ideas used to sit beside this as the second
+          grid column, and now lives as a slide-out on the Bullet Point Summary panel. */}
+      <Panel icon={Search} iconClass="text-blue-600" title="Info Queries">
+        {!analysis ? (
+          <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No search queries identified yet. Ask questions in your thoughts (e.g. &ldquo;I wonder who designed the Concorde&rdquo;) to trigger research actions.</p>
+        ) : analysis.searchQueries.length === 0 ? (
+          <p className="text-xs text-stone-400 italic py-2">No search topics identified in this stream.</p>
+        ) : (
+          <div className="space-y-4 max-h-[300px] overflow-y-auto pr-1">
+            {analysis.searchQueries.map((item, idx) => {
+              const queryLine = (
+                <p className="text-xs font-semibold text-stone-700 italic font-sans">
+                  &ldquo;{item.query}&rdquo;
+                </p>
+              );
 
-        {/* Web query searches */}
-        <Panel icon={Search} iconClass="text-blue-600" title="Info Queries">
-          {!analysis ? (
-            <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No search queries identified yet. Ask questions in your thoughts (e.g. &ldquo;I wonder who designed the Concorde&rdquo;) to trigger research actions.</p>
-          ) : analysis.searchQueries.length === 0 ? (
-            <p className="text-xs text-stone-400 italic py-2">No search topics identified in this stream.</p>
-          ) : (
-            <div className="space-y-4 max-h-[300px] overflow-y-auto pr-1">
-              {analysis.searchQueries.map((item, idx) => {
-                const queryLine = (
-                  <p className="text-xs font-semibold text-stone-700 italic font-sans">
-                    &ldquo;{item.query}&rdquo;
-                  </p>
-                );
-
-                // Completed answers collapse/expand on click (native <details>); body caps at 150px and scrolls.
-                if (item.status === 'completed' && item.answer) {
-                  return (
-                    <details key={idx} className="group border border-stone-100 rounded-xl bg-stone-50/50">
-                      <summary className="flex items-start justify-between gap-3 p-4 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
-                        <div className="min-w-0">
-                          {queryLine}
-                          {item.condensed && (
-                            <p className="text-xs text-stone-600 leading-relaxed mt-1 font-sans font-normal">{item.condensed}</p>
-                          )}
-                        </div>
-                        <ChevronDown className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5 transition-transform group-open:rotate-180" />
-                      </summary>
-                      <div className="px-4 pb-4">
-                        <div className="text-xs text-stone-600 leading-relaxed bg-white border border-stone-100 p-3 rounded-lg font-sans max-h-[150px] overflow-y-auto">
-                          <p className="mb-2 font-normal whitespace-pre-wrap">{item.answer}</p>
-                          {item.sources && item.sources.length > 0 && (
-                            <div className="pt-2 border-t border-stone-50">
-                              <p className="text-[9px] font-bold text-stone-400 uppercase tracking-wider mb-1.5 font-mono">Sources:</p>
-                              <div className="flex flex-wrap gap-1.5">
-                                {item.sources.map((src, sIdx) => (
-                                  <a
-                                    key={sIdx}
-                                    href={src.uri}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-[10px] text-blue-600 hover:underline bg-stone-50 border border-stone-200/50 px-2 py-0.5 rounded flex items-center gap-0.5"
-                                  >
-                                    {src.title} <ExternalLink className="w-2.5 h-2.5" />
-                                  </a>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </details>
-                  );
-                }
-
+              // Completed answers collapse/expand on click (native <details>); body caps at 150px and scrolls.
+              if (item.status === 'completed' && item.answer) {
                 return (
-                  <div key={idx} className="border border-stone-100 rounded-xl p-4 bg-stone-50/50 space-y-2.5">
-                    <div className="flex items-start justify-between gap-3">
-                      {queryLine}
-                      {item.status === 'pending' && (
-                        <button
-                          onClick={() => runOnRow("search", idx, () => onExecuteSearch(idx))}
-                          disabled={executing.search !== null}
-                          className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
-                        >
-                          {executing.search === idx ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Play className="w-2.5 h-2.5" />
-                          )}
-                          Research
-                        </button>
-                      )}
-                    </div>
-
-                    {item.status === 'failed' && (
-                      <div className="text-xs text-red-600 bg-red-50 border border-red-100 p-2.5 rounded-lg flex items-center gap-1.5">
-                        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                        <span>Search failed: {item.error}</span>
+                  <details key={idx} className="group border border-stone-100 rounded-xl bg-stone-50/50">
+                    <summary className="flex items-start justify-between gap-3 p-4 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+                      <div className="min-w-0">
+                        {queryLine}
+                        {item.condensed && (
+                          <p className="text-xs text-stone-600 leading-relaxed mt-1 font-sans font-normal">{item.condensed}</p>
+                        )}
                       </div>
+                      <ChevronDown className="w-3.5 h-3.5 text-stone-400 shrink-0 mt-0.5 transition-transform group-open:rotate-180" />
+                    </summary>
+                    <div className="px-4 pb-4">
+                      <div className="text-xs text-stone-600 leading-relaxed bg-white border border-stone-100 p-3 rounded-lg font-sans max-h-[150px] overflow-y-auto">
+                        <p className="mb-2 font-normal whitespace-pre-wrap">{item.answer}</p>
+                        {item.sources && item.sources.length > 0 && (
+                          <div className="pt-2 border-t border-stone-50">
+                            <p className="text-[9px] font-bold text-stone-400 uppercase tracking-wider mb-1.5 font-mono">Sources:</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {item.sources.map((src, sIdx) => (
+                                <a
+                                  key={sIdx}
+                                  href={src.uri}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[10px] text-blue-600 hover:underline bg-stone-50 border border-stone-200/50 px-2 py-0.5 rounded flex items-center gap-0.5"
+                                >
+                                  {src.title} <ExternalLink className="w-2.5 h-2.5" />
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </details>
+                );
+              }
+
+              return (
+                <div key={idx} className="border border-stone-100 rounded-xl p-4 bg-stone-50/50 space-y-2.5">
+                  <div className="flex items-start justify-between gap-3">
+                    {queryLine}
+                    {item.status === 'pending' && (
+                      <button
+                        onClick={() => runOnRow("search", idx, () => onExecuteSearch(idx))}
+                        disabled={executing.search !== null}
+                        className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md shrink-0 flex items-center gap-1"
+                      >
+                        {executing.search === idx ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Play className="w-2.5 h-2.5" />
+                        )}
+                        Research
+                      </button>
                     )}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </Panel>
 
-      </div>
+                  {item.status === 'failed' && (
+                    <div className="text-xs text-red-600 bg-red-50 border border-red-100 p-2.5 rounded-lg flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>Search failed: {item.error}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
 
     </div>
   );

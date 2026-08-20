@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus, ScreenShare, ScreenShareOff, Radio, Users } from "lucide-react";
+import { Mic, MicOff, Send, HelpCircle, Keyboard, RefreshCw, Sparkles, FileText, SpellCheck, FolderPlus, ScreenShare, ScreenShareOff, Radio, Users, Copy, Lightbulb, X } from "lucide-react";
 import MarkdownBullets from "./MarkdownBullets";
 import { Word, ProofResult } from "../types";
 import { applyCorrections, preserveHead, CONFIDENCE_THRESHOLD } from "../utils/transcript";
@@ -26,10 +26,57 @@ interface AudioRecorderProps {
   onRunNow: () => void;
   onSaveToDrive: () => void;  // saves the live notes into this session's Drive folder
   savingDrive: boolean;
+  // The plan stage's condensed "Main Ideas". Rendered as a slide-out over the summary panel rather
+  // than as its own card, so the two summaries sit in one place instead of two screens apart.
+  mainIdeas: string;
+  onSaveMainIdeasToDrive: () => void;
   // Bumped by App's "Clear All". A counter rather than a remount (`key`) on purpose: remounting
   // would tear down the recognizer and the shared-tab capture as a side effect, and capture only
   // ever stops when the user stops it.
   clearSignal: number;
+}
+
+// Copy + Save to Drive. Both the Bullet Point Summary header and the Main Ideas slide-out carry
+// the same pair, differing only in what text they act on.
+function PanelActions({ text, label, onSave, saving, onShowToast }: {
+  text: string;
+  label: string;
+  onSave: () => void;
+  saving: boolean;
+  onShowToast: (msg: string) => void;
+}) {
+  const empty = !text.trim();
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard.writeText(text);
+          onShowToast(`${label} copied to clipboard!`);
+        }}
+        disabled={empty}
+        title={`Copy ${label.toLowerCase()} to the clipboard`}
+        aria-label={`Copy ${label.toLowerCase()}`}
+        className="text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-1.5 py-1 flex items-center disabled:opacity-40 transition-colors cursor-pointer"
+      >
+        <Copy className="w-3.5 h-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onSave}
+        disabled={saving || empty}
+        title={`Save ${label.toLowerCase()} to a Google Drive folder for this session`}
+        className="text-[11px] font-semibold text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 disabled:opacity-40 transition-colors cursor-pointer"
+      >
+        {saving ? (
+          <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
+        ) : (
+          <FolderPlus className="w-3.5 h-3.5" />
+        )}
+        Save to Drive
+      </button>
+    </>
+  );
 }
 
 declare global {
@@ -125,6 +172,8 @@ export default function AudioRecorder({
   onRunNow,
   onSaveToDrive,
   savingDrive,
+  mainIdeas,
+  onSaveMainIdeasToDrive,
   clearSignal
 }: AudioRecorderProps) {
   const [isListening, setIsListening] = useState(false);
@@ -329,6 +378,30 @@ export default function AudioRecorder({
   // Keyed on length, not content: only growth matters, and a number compares in O(1).
   const transcriptScrollRef = useStickToBottom<HTMLDivElement>(transcript.length + interimTranscript.length);
   const summaryScrollRef = useStickToBottom<HTMLDivElement>(liveSummary.length);
+
+  // Main Ideas slides out over the summary panel. It is absolutely positioned inside that panel so
+  // it can be sized against it (85% of its width, its exact height), which rules out the native
+  // popover used elsewhere in the app: a popover lives in the top layer, where its containing block
+  // is the viewport and neither the sizing nor the clipping would follow the panel.
+  const [showMainIdeas, setShowMainIdeas] = useState(false);
+  const mainIdeasRef = useRef<HTMLDivElement>(null);
+  const mainIdeasBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!showMainIdeas) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      // The toggle is excluded so its own click doesn't close and reopen in the same gesture.
+      if (!mainIdeasRef.current?.contains(t) && !mainIdeasBtnRef.current?.contains(t)) setShowMainIdeas(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowMainIdeas(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showMainIdeas]);
 
   // Swap a misheard word for one of its suggestions. Splice into the proofed text and shift every
   // later word's offsets by the length delta, so the OTHER highlights survive the edit intact.
@@ -675,7 +748,7 @@ export default function AudioRecorder({
   };
 
   return (
-    <div id="audio-recorder-panel" className="bg-white border border-stone-200 rounded-2xl p-6 shadow-sm transition-all hover:shadow-md">
+    <div id="audio-recorder-panel" className="bg-white border border-stone-200 rounded-2xl p-6 pb-2 shadow-sm transition-all hover:shadow-md">
       <div className="flex items-center justify-between mb-4 pb-3 border-b border-stone-100">
         <div className="flex items-center gap-2">
           <div className={`w-2.5 h-2.5 rounded-full ${isListening ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`} />
@@ -861,8 +934,8 @@ export default function AudioRecorder({
           </div>
         </div>
 
-        {/* Right Column: AI Live Summarized Notes */}
-        <div className="border border-stone-200 bg-stone-50/20 rounded-xl px-4 pt-2.5 pb-3 flex flex-col h-[400px] space-y-2.5">
+        {/* Right Column: AI Live Summarized Notes, with Main Ideas sliding out over it. */}
+        <div className="relative overflow-hidden border border-stone-200 bg-stone-50/20 rounded-xl px-4 pt-2.5 pb-3 flex flex-col h-[400px] space-y-2.5">
           <div className="flex items-center justify-between border-b border-stone-100 pb-2">
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-500" />
@@ -872,24 +945,36 @@ export default function AudioRecorder({
             </div>
             
             <div className="flex items-center gap-2">
+              <PanelActions
+                text={liveSummary}
+                label="Summarized live notes"
+                onSave={onSaveToDrive}
+                saving={savingDrive}
+                onShowToast={onShowToast}
+              />
               <button
+                ref={mainIdeasBtnRef}
                 type="button"
-                onClick={onSaveToDrive}
-                disabled={savingDrive || !liveSummary.trim()}
-                title="Save these live notes to a Google Drive folder for this session"
-                className="text-[11px] font-semibold text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 disabled:opacity-40 transition-colors cursor-pointer"
+                onClick={() => setShowMainIdeas(v => !v)}
+                disabled={!mainIdeas.trim()}
+                aria-expanded={showMainIdeas}
+                title="Show the condensed Main Ideas for this session"
+                className={`text-[11px] font-semibold border rounded-md px-2 py-1 flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                  showMainIdeas
+                    ? "bg-amber-600 text-white border-amber-600"
+                    : "text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border-stone-200"
+                }`}
               >
-                {savingDrive ? (
-                  <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
-                ) : (
-                  <FolderPlus className="w-3.5 h-3.5" />
-                )}
-                Save to Drive
+                <Lightbulb className="w-3.5 h-3.5" />
+                Show Main Points
               </button>
             </div>
           </div>
 
-          <div ref={summaryScrollRef} className="flex-1 overflow-y-auto pr-1">
+          <div
+            ref={summaryScrollRef}
+            className={`flex-1 overflow-y-auto pr-1 transition-opacity ${showMainIdeas ? "opacity-40" : ""}`}
+          >
             {liveSummary ? (
               <MarkdownBullets text={liveSummary} />
             ) : (
@@ -909,34 +994,72 @@ export default function AudioRecorder({
           </div>
           
           {liveSummary && (
-            <div className="pt-2 border-t border-stone-150/70 flex items-center justify-between text-[9px] text-stone-400 font-mono">
+            <div className={`pt-2 border-t border-stone-150/70 flex items-center text-[9px] text-stone-400 font-mono transition-opacity ${showMainIdeas ? "opacity-40" : ""}`}>
               <span className="flex items-center gap-1">
                 <div className={`w-1.5 h-1.5 rounded-full ${busy.summary ? 'bg-amber-400 animate-pulse' : 'bg-stone-300'}`} />
                 {busy.summary ? "Updating bullets..." : "Notes synchronized"}
               </span>
-              <button
-                type="button"
-                onClick={() => {
-                  navigator.clipboard.writeText(liveSummary);
-                  onShowToast("Summarized live notes copied to clipboard!");
-                }}
-                className="hover:text-stone-700 hover:underline cursor-pointer"
-              >
-                Copy Notes
-              </button>
             </div>
           )}
+
+          {/* Main Ideas. Always mounted so it can slide rather than pop; parked off-canvas and
+              click-through while stowed. */}
+          <div
+            ref={mainIdeasRef}
+            aria-hidden={!showMainIdeas}
+            className={`absolute top-0 right-0 h-full w-[85%] z-20 bg-white border-l border-stone-200 shadow-xl rounded-r-xl px-4 pt-2.5 pb-3 flex flex-col space-y-2.5 transition-transform duration-200 ease-out ${
+              showMainIdeas ? "translate-x-0" : "translate-x-full pointer-events-none"
+            }`}
+          >
+            <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+              <div className="flex items-center gap-1.5">
+                <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                <span className="text-xs font-bold text-stone-700 uppercase tracking-widest font-mono">
+                  Main Ideas
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <PanelActions
+                  text={mainIdeas}
+                  label="Main ideas"
+                  onSave={onSaveMainIdeasToDrive}
+                  saving={savingDrive}
+                  onShowToast={onShowToast}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowMainIdeas(false)}
+                  title="Hide main points"
+                  aria-label="Hide main points"
+                  className="text-stone-500 hover:text-stone-800 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-1.5 py-1 flex items-center transition-colors cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-1">
+              {mainIdeas.trim() ? (
+                <MarkdownBullets text={mainIdeas} />
+              ) : (
+                <div className="text-stone-400 italic text-[11px] h-full flex flex-col justify-center items-center text-center px-4 leading-normal">
+                  <span>No main ideas yet.</span>
+                  <span className="mt-1 text-[10px] text-stone-400 font-light">They are distilled from the session once there is enough to condense.</span>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
       </div>
 
       {/* Control Buttons */}
-      <div className="flex items-center justify-end gap-2.5 mt-4 pt-3 border-t border-stone-100">
+      <div className="flex items-center justify-end gap-2.5 mt-1.5">
         <button
           onClick={resetTranscriptState}
           disabled={isProcessing || !(transcript || interimTranscript).trim()}
           title="Clear the transcript. Does not stop the microphone or tab capture."
-          className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-stone-500 hover:text-stone-800 bg-stone-100/50 hover:bg-stone-100 rounded-lg transition-colors border border-stone-200/50 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-stone-500 disabled:hover:bg-stone-100/50"
+          className="px-2 py-0.5 text-[10px] font-semibold text-stone-500 hover:text-stone-800 hover:bg-stone-100 rounded-md transition-colors border border-stone-200/50 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-stone-500 disabled:hover:bg-transparent"
         >
           Clear Text
         </button>
