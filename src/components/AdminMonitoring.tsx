@@ -81,25 +81,20 @@ export default function AdminMonitoring({
       const saved = localStorage.getItem("scribant_stt_config");
       if (saved) {
         const parsed = JSON.parse(saved);
-        const rangeMode = Boolean(parsed.speakerRangeMode);
-        const min = clampSpeaker(Number(parsed.minSpeakers || 1));
-        const max = Math.max(min, Math.min(SPEAKER_MAX, Number(parsed.maxSpeakers || 5)));
         return {
           enableDiarization: Boolean(parsed.enableDiarization),
-          minSpeakers: min,
-          // Exact-count mode is min === max by definition; collapse anything a range-mode session
-          // (or a pre-existing 1..5 config) left behind.
-          maxSpeakers: rangeMode ? max : min,
-          speakerRangeMode: rangeMode,
+          // A pre-existing config may carry minSpeakers and speakerRangeMode from when this was a
+          // two-bound control. Both are ignored: the lower bound is now always 1. An old EXACT-count
+          // config stored its number in minSpeakers with maxSpeakers equal to it, so falling back to
+          // minSpeakers keeps that number meaning "up to N" rather than silently resetting to 5.
+          maxSpeakers: clampSpeaker(Number(parsed.maxSpeakers || parsed.minSpeakers || 5)),
           provider: parsed.enableDiarization ? "google_cloud_stt" : "gemini",
         };
       }
     } catch {}
     return {
       enableDiarization: false,
-      minSpeakers: 1,
-      maxSpeakers: 1,
-      speakerRangeMode: false,
+      maxSpeakers: 5,
       provider: "gemini",
     };
   });
@@ -109,45 +104,18 @@ export default function AdminMonitoring({
   // being edited" — the box renders straight from sttConfig instead.
   const [speakerDraft, setSpeakerDraft] = useState<string | null>(null);
 
-  // Digits-only editing. In range mode the dash is punctuation the user never types: after the
-  // first digit we append it ourselves, so pressing "2" then "3" yields "2-3" without the caret
-  // ever leaving the box. Each keystroke that produces a usable bound also moves the slider.
+  // Digits-only editing. One bound, one digit — SPEAKER_MAX is 8, so a single keystroke is always
+  // a complete value and there is no half-typed state to guard.
   const handleSpeakerInput = (raw: string) => {
-    const digits = raw.replace(/\D/g, "").slice(0, sttConfig.speakerRangeMode ? 2 : 1);
-    if (!sttConfig.speakerRangeMode) {
-      setSpeakerDraft(digits);
-      if (digits) {
-        const n = clampSpeaker(Number(digits));
-        setSttConfig((prev) => ({ ...prev, minSpeakers: n, maxSpeakers: n }));
-      }
-      return;
-    }
-    // Trailing dash after one digit is what keeps the field feeling like a range mid-typing.
-    setSpeakerDraft(digits.length === 0 ? "" : digits.length === 1 ? `${digits}-` : `${digits[0]}-${digits[1]}`);
-    if (digits.length >= 1) {
-      const lo = clampSpeaker(Number(digits[0]));
-      // One digit so far: hold the upper bound at the lower one until the second digit lands.
-      const hi = digits.length === 2 ? clampSpeaker(Number(digits[1])) : lo;
-      setSttConfig((prev) => ({
-        ...prev,
-        minSpeakers: Math.min(lo, hi),
-        maxSpeakers: Math.max(lo, hi),
-      }));
-    }
+    const digits = raw.replace(/\D/g, "").slice(0, 1);
+    setSpeakerDraft(digits);
+    if (digits) setSttConfig((prev) => ({ ...prev, maxSpeakers: clampSpeaker(Number(digits)) }));
   };
 
-  // Blur/Enter finalises the draft and re-renders the box from the (clamped, ordered) config, which
-  // is what cleans up a dangling "2-". A range given as a single digit is not an error — it means
-  // "start here", so widen it to N..N+1 — the same rule the "Use a range" button applies, which at
-  // the top of the scale slides the lower bound down instead (8 commits as 7-8).
-  const commitSpeakerInput = () => {
-    const digits = (speakerDraft ?? "").replace(/\D/g, "");
-    if (sttConfig.speakerRangeMode && digits.length === 1) {
-      const lo = Math.min(clampSpeaker(Number(digits)), SPEAKER_MAX - 1);
-      setSttConfig((prev) => ({ ...prev, minSpeakers: lo, maxSpeakers: lo + 1 }));
-    }
-    setSpeakerDraft(null);
-  };
+  // Blur/Enter just clears the draft so the box re-renders from the clamped config; an empty box
+  // falls back to whatever the config already holds rather than committing a 0.
+  const commitSpeakerInput = () => setSpeakerDraft(null);
+
 
   const [sttStatus, setSttStatus] = useState<SttStatus | null>(null);
   const [isTestingStt, setIsTestingStt] = useState(false);
@@ -328,7 +296,7 @@ export default function AdminMonitoring({
           mimeType: "audio/wav",
           source: "mic",
           enableDiarization: sttConfig.enableDiarization,
-          minSpeakers: sttConfig.minSpeakers,
+          minSpeakers: 1, // pinned; a floor above 1 makes the recognizer invent a speaker
           maxSpeakers: sttConfig.maxSpeakers,
         }),
       });
@@ -536,69 +504,34 @@ export default function AdminMonitoring({
                 </button>
               </div>
 
-              {/* Expected speakers — ONE control. Default is a plain slider setting an exact count
-                  (min === max); the "Use a range" button grows a second thumb on the same track so
-                  a lower and upper bound can be set independently. Both modes write the same
-                  minSpeakers/maxSpeakers pair, so nothing downstream needs to know which is active. */}
+              {/* Expected speakers — ONE control, ONE thumb. It sets the UPPER bound only; the
+                  lower bound is pinned at 1 everywhere (see cloud-stt.ts buildV1Config), so there
+                  is deliberately no way to raise it from the UI. */}
               <div className="p-4 bg-stone-50/70 border border-stone-200/80 rounded-xl space-y-2">
                 <div className="flex items-center justify-between gap-3">
                   <label className="text-xs font-bold text-stone-800 flex items-center gap-1.5 font-sans">
                     <Users className="w-3.5 h-3.5 text-stone-500" />
                     <span>Expected Speakers</span>
                   </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      aria-label={sttConfig.speakerRangeMode ? "Expected speaker range" : "Expected speaker count"}
-                      value={speakerDraft ??
-                        (sttConfig.speakerRangeMode
-                          ? `${sttConfig.minSpeakers}-${sttConfig.maxSpeakers}`
-                          : String(sttConfig.minSpeakers))}
-                      disabled={!sttConfig.enableDiarization}
-                      onChange={(e) => handleSpeakerInput(e.target.value)}
-                      onFocus={(e) => e.currentTarget.select()}
-                      onBlur={commitSpeakerInput}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") e.currentTarget.blur();
-                      }}
-                      className={`text-xs font-mono font-bold text-stone-900 bg-white px-2 py-0.5 rounded border border-stone-200 text-center focus:border-indigo-500 focus:outline-none disabled:opacity-40 ${
-                        sttConfig.speakerRangeMode ? "w-14" : "w-9"
-                      }`}
-                    />
-                    <button
-                      type="button"
-                      disabled={!sttConfig.enableDiarization}
-                      onClick={() => {
-                        setSpeakerDraft(null);
-                        setSttConfig((prev) => {
-                          // Collapse back to an exact count, keeping the lower bound; or open a
-                          // visible span so the new second thumb isn't stacked on the first — the
-                          // same N..N+1 rule the text box commits with, sliding down at the top.
-                          if (prev.speakerRangeMode)
-                            return { ...prev, speakerRangeMode: false, maxSpeakers: prev.minSpeakers };
-                          const lo = Math.min(prev.minSpeakers, SPEAKER_MAX - 1);
-                          return { ...prev, speakerRangeMode: true, minSpeakers: lo, maxSpeakers: lo + 1 };
-                        });
-                      }}
-                      className="text-[10px] font-bold font-mono px-2 py-1 rounded border border-stone-200 bg-white text-stone-600 hover:bg-stone-100 hover:text-stone-900 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {sttConfig.speakerRangeMode ? "Use exact count" : "Use a range"}
-                    </button>
-                  </div>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    aria-label="Maximum expected speakers"
+                    value={speakerDraft ?? String(sttConfig.maxSpeakers)}
+                    disabled={!sttConfig.enableDiarization}
+                    onChange={(e) => handleSpeakerInput(e.target.value)}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onBlur={commitSpeakerInput}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.currentTarget.blur();
+                    }}
+                    className="w-9 text-xs font-mono font-bold text-stone-900 bg-white px-2 py-0.5 rounded border border-stone-200 text-center focus:border-indigo-500 focus:outline-none disabled:opacity-40"
+                  />
                 </div>
 
-                {/* Live capture sends the upper bound only. Saying so matters: this control used to
-                    write a lower bound of 2 into localStorage, and a floor above 1 is what makes the
-                    recognizer split one voice into two. */}
-                <p className="text-[10px] text-stone-500 leading-snug font-sans">
-                  Upper bound only — live capture always sends a lower bound of 1. Forcing a floor
-                  makes the recognizer split a single voice into two speakers.
-                </p>
-
-                {/* One timeline for both modes: a shared track carrying a tick per whole number, the
-                    selected span, one or two thumbs, and the numbers underneath. Everything is
-                    placed with speakerOffset so a tick, its label and its thumb share a centre. */}
+                {/* One track: a tick per whole number, the span from 1 to the chosen maximum, and
+                    a single thumb. Everything is placed with speakerOffset so a tick, its label and
+                    the thumb share a centre. */}
                 <div className="pt-1">
                   <div className="relative h-10">
                     <div className="absolute inset-x-0 top-[10px] -translate-y-1/2 h-1.5 rounded-full bg-stone-200" />
@@ -607,14 +540,14 @@ export default function AdminMonitoring({
                         sttConfig.enableDiarization ? "bg-indigo-600" : "bg-stone-300"
                       }`}
                       style={{
-                        left: speakerOffset(sttConfig.minSpeakers),
-                        width: `calc(${speakerOffset(sttConfig.maxSpeakers)} - ${speakerOffset(sttConfig.minSpeakers)})`,
+                        left: speakerOffset(1),
+                        width: `calc(${speakerOffset(sttConfig.maxSpeakers)} - ${speakerOffset(1)})`,
                       }}
                     />
                     {/* One pass per whole number: the dot on the track and the number under it are
                         the same element, so they can never drift apart. */}
                     {SPEAKER_TICKS.map((n) => {
-                      const inSpan = n >= sttConfig.minSpeakers && n <= sttConfig.maxSpeakers;
+                      const inSpan = n <= sttConfig.maxSpeakers;
                       return (
                         <span
                           key={n}
@@ -644,49 +577,24 @@ export default function AdminMonitoring({
                     })}
                     <input
                       type="range"
-                      aria-label={sttConfig.speakerRangeMode ? "Minimum expected speakers" : "Expected speakers"}
+                      aria-label="Maximum expected speakers"
                       min={1}
                       max={SPEAKER_MAX}
                       step={1}
-                      value={sttConfig.minSpeakers}
+                      value={sttConfig.maxSpeakers}
                       disabled={!sttConfig.enableDiarization}
                       onChange={(e) => {
                         setSpeakerDraft(null);
-                        const n = Number(e.target.value);
-                        setSttConfig((prev) => ({
-                          ...prev,
-                          minSpeakers: prev.speakerRangeMode ? Math.min(n, prev.maxSpeakers) : n,
-                          maxSpeakers: prev.speakerRangeMode ? prev.maxSpeakers : n,
-                        }));
+                        setSttConfig((prev) => ({ ...prev, maxSpeakers: Number(e.target.value) }));
                       }}
                       className={RANGE_THUMB}
                     />
-                    {sttConfig.speakerRangeMode && (
-                      <input
-                        type="range"
-                        aria-label="Maximum expected speakers"
-                        min={1}
-                        max={SPEAKER_MAX}
-                        step={1}
-                        value={sttConfig.maxSpeakers}
-                        disabled={!sttConfig.enableDiarization}
-                        onChange={(e) => {
-                          setSpeakerDraft(null);
-                          setSttConfig((prev) => ({
-                            ...prev,
-                            maxSpeakers: Math.max(Number(e.target.value), prev.minSpeakers),
-                          }));
-                        }}
-                        className={RANGE_THUMB}
-                      />
-                    )}
                   </div>
                 </div>
 
                 <span className="text-[10px] text-stone-500 block">
-                  {sttConfig.speakerRangeMode
-                    ? "Lower and upper bound on how many people Cloud STT should expect. Type a range as two digits \u2014 the dash is added for you."
-                    : "Exact number of people expected. Default: 1 \u2014 clean single-speaker brain-dumps with no artificial speaker splits."}
+                  Most people Cloud STT should expect. It still auto-detects below this — a solo
+                  brain-dump stays one speaker at any setting.
                 </span>
               </div>
 
