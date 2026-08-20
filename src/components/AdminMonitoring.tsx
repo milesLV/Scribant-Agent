@@ -475,7 +475,7 @@ export default function AdminMonitoring({
                     Enable Google Cloud STT V2 Speaker Diarization
                   </span>
                   <p className="text-xs text-stone-600 leading-relaxed">
-                    Acoustically distinguishes between multiple speakers (1–5 voices) and labels individual turns (<code className="text-stone-800 font-mono font-semibold">Speaker 1:</code>, <code className="text-stone-800 font-mono font-semibold">Speaker 2:</code>). Automatically falls back to Gemini when disabled or unauthenticated.
+                    Acoustically distinguishes between multiple speakers (up to the maximum below) and labels individual turns (<code className="text-stone-800 font-mono font-semibold">Speaker 1:</code>, <code className="text-stone-800 font-mono font-semibold">Speaker 2:</code>). Automatically falls back to Gemini when disabled or unauthenticated.
                   </p>
                 </div>
 

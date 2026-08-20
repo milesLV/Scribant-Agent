@@ -614,8 +614,10 @@ app.post("/api/transcribe-audio", async (req, res) => {
         });
 
         res.json({
-          // Already carries "Speaker N: " prefixes when this chunk held more than one voice,
-          // and omits them when it held one. Only read if `turns` is unusable.
+          // Whenever diarization is on this ALWAYS carries "Speaker N: " prefixes, even for a
+          // one-voice chunk (groupWordsIntoSpeakerTurns is called with alwaysPrefixSpeaker). The
+          // client builds its transcript from `turns`, which are unprefixed, and only falls back
+          // to this when there are none — so the prefixes here never reach the transcript.
           text: cloudResult.text,
           source: source === "tab" ? "tab" : "mic",
           provider: "google_cloud_stt",

@@ -304,9 +304,20 @@ export function foldUtterances(
   let current = open;
 
   for (const u of utterances) {
-    const text = u.text.trim();
+    let text = u.text.trim();
     if (!text) continue;
     const { kind, open: next } = absorb(current, u, opts);
+    // `toUtterances` bakes the "Speaker N: " prefix into the text, because that is what the editor
+    // and the downstream agents read. When this utterance CONTINUES the open paragraph it is by
+    // definition the same speaker (break rule 2), so re-stating the label mid-paragraph would
+    // render "Speaker 2: hey Speaker 2: still me" — one label per 8s chunk, forever. A label that
+    // opens a NEW paragraph is kept: a length-capped monologue should name its speaker again.
+    // `current.words > 0` matters: the FIRST utterance also reports "none" (there is nothing to
+    // break away from), and stripping there would leave the opening paragraph unattributed.
+    if (kind === "none" && current.words > 0 && u.speaker) {
+      const prefix = `${u.speaker}: `;
+      if (text.startsWith(prefix)) text = text.slice(prefix.length);
+    }
     addition += SEPARATORS[kind] + text;
     current = next;
   }
@@ -365,9 +376,10 @@ export interface TranscribeResponse {
  *
  * "Session", not "chunk", is load-bearing and was the original bug. Deciding per chunk means a
  * window in which only one of two people happened to speak comes back unlabelled, and `speakerKey`
- * treats an absent label as matching whatever paragraph is open — so that speaker's words are
- * silently folded into the OTHER speaker's paragraph. The server latches the fact once two voices
- * are confirmed across chunks and sends it as `multiSpeaker`.
+ * maps every absent label to "" — so two CONSECUTIVE unlabelled windows share a key and merge into
+ * one paragraph, running two different people together. (An unlabelled window after a labelled one
+ * does break.) The server latches the fact once two voices are confirmed across chunks and sends it
+ * as `multiSpeaker`.
  *
  * Speaker labels themselves are CHUNK-LOCAL — "Speaker 1" in consecutive chunks is not guaranteed
  * to be the same person. Acoustic re-identification across requests was tried and measurably made
@@ -419,6 +431,7 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
   const eq = (a: unknown, b: unknown, m: string) => {
     if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
   };
+  const ok = (cond: boolean, m: string) => { if (!cond) throw new Error(m); };
   const say = (text: string, extra: Partial<Utterance> = {}): Utterance =>
     ({ text, source: "stt", ...extra });
   // n words of filler, unpunctuated unless asked — the caps are the only rule that reads length.
@@ -550,8 +563,22 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
     [{ text: "Speaker 2: still just me", speaker: "Speaker 2", source: "stt", startsScene: undefined }],
     "a latched session labels a window holding only one voice");
   eq(joinUtterances([...toUtterances(twoSpeakers, "stt"), ...toUtterances(latchedSolo, "stt")]),
-    "Speaker 1: morning\n\nSpeaker 2: hey Speaker 2: still just me",
+    "Speaker 1: morning\n\nSpeaker 2: hey still just me",
     "...and that label keeps Speaker 2's window out of Speaker 1's paragraph");
+  // The label is stated ONCE per paragraph. Every chunk arrives prefixed, so without the strip in
+  // foldUtterances a single speaker renders "Speaker 2: hey Speaker 2: still just me" and gains a
+  // label every 8 seconds for as long as they keep talking.
+  ok(!joinUtterances([...toUtterances(twoSpeakers, "stt"), ...toUtterances(latchedSolo, "stt")])
+    .includes("hey Speaker 2:"), "a continued speaker does not re-state their label mid-paragraph");
+  // ...but a paragraph the length cap forces open DOES re-state it, so the new block is attributed.
+  eq(joinUtterances([
+      { text: `Speaker 1: ${filler(HARD_CAP_WORDS)}`, speaker: "Speaker 1", source: "stt" },
+      { text: "Speaker 1: and then some more", speaker: "Speaker 1", source: "stt" }])
+      .split("\n\n").length, 2, "a length-capped break opens a new paragraph");
+  ok(joinUtterances([
+      { text: `Speaker 1: ${filler(HARD_CAP_WORDS)}`, speaker: "Speaker 1", source: "stt" },
+      { text: "Speaker 1: and then some more", speaker: "Speaker 1", source: "stt" }])
+      .endsWith("Speaker 1: and then some more"), "...and it keeps the label at the top of it");
 
   eq(toUtterances({ ...solo, multiSpeaker: false }, "stt"),
     [{ text: "just me talking", speaker: undefined, source: "stt", startsScene: undefined }],
