@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
+import { WebSocketServer } from "ws";
 import { setLogLevel, LogLevel } from "@google/adk";
 import { splitTiers, safeSeg, estimateTokens, computeCompaction, stripSpeakerLabels } from "./server-utils";
 import {
@@ -23,6 +24,7 @@ import { MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, mem
 import { runOrchestrator, type Stage } from "./orchestrator";
 import { transcribeWithCloudStt, checkCloudSttStatus } from "./cloud-stt";
 import { noteChunk } from "./speaker-registry";
+import { openSttStream, SEGMENT_MS, type SttStream } from "./stt-stream";
 import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
 import {
   registerOpenApiRoutes,
@@ -35,6 +37,7 @@ import {
   MemoryRetrieveQuerySchema,
   SearchRequestSchema,
   TranscribeAudioRequestSchema,
+  SttStreamControlSchema,
   ExecuteRequestSchema,
   TokenStatsQuerySchema,
   TokenTelemetryTimeSeriesQuerySchema,
@@ -891,7 +894,7 @@ async function main() {
     }
   }).catch(e => console.warn("[memory] Startup memory sync failed:", e?.message || e));
 
-  app.listen(PORT, "127.0.0.1", () => {
+  const server = app.listen(PORT, "127.0.0.1", () => {
     const memService = getMemoryService();
     const isVertexMem = memService instanceof VertexAiMemoryBankService;
     const memDesc = isVertexMem
@@ -900,6 +903,120 @@ async function main() {
     const authDesc = `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`;
     console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc} | ${memDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
+  });
+
+  registerSttStream(server);
+}
+
+/**
+ * Live diarized transcription over one long-lived Cloud STT recognition (see stt-stream.ts).
+ *
+ * A WebSocket rather than the SSE endpoint next door because this one needs the CLIENT to talk:
+ * SSE is server->client only, and the audio flows the other way.
+ *
+ * The socket carries two kinds of frame. Text frames are JSON control messages validated against
+ * SttStreamControlSchema; binary frames are raw audio appended to the open recognition. Audio
+ * arriving before `start`, or after an error, is dropped rather than buffered — a recognition that
+ * failed to open will not succeed later in the same segment, and buffering audio for a stream that
+ * does not exist is how a leak starts.
+ */
+function registerSttStream(server: import("http").Server) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (req, socket, head) => {
+    // Only OUR path. Vite's HMR runs its own upgrade listener on the same server in dev, so a
+    // socket.destroy() here for anything unrecognised would kill hot reload.
+    if (!req.url?.startsWith("/api/stt/stream")) return;
+    wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
+  });
+
+  wss.on("connection", ws => {
+    let stream: SttStream | null = null;
+    let cfg: { sessionId?: string; source?: "mic" | "tab"; maxSpeakers?: number; mimeType?: string } = {};
+    let segments = 0;
+    let segmentTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopping = false;
+    const send = (msg: unknown) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); };
+
+    const closeStream = () => {
+      if (segmentTimer) { clearTimeout(segmentTimer); segmentTimer = null; }
+      stream?.end();
+      stream = null;
+    };
+
+    const openSegment = async () => {
+      closeStream();
+      segments++;
+      try {
+        stream = await openSttStream({ maxSpeakers: cfg.maxSpeakers, mimeType: cfg.mimeType }, {
+          onInterim: text => send({ type: "interim", text }),
+          onFinal: ({ turns, speakers }) => send({
+            type: "final",
+            turns: turns.map(({ speaker, text, startMs, endMs }) => ({ speaker, text, startMs, endMs })),
+            speakers,
+          }),
+          onError: message => { closeStream(); send({ type: "error", message }); },
+          onEnd: () => { if (stopping) ws.close(); },
+        });
+        // Ask the client to cut before Google closes the recognition out from under us. It has to
+        // restart its recorder in the same move, so it cannot be done server-side alone.
+        segmentTimer = setTimeout(() => send({ type: "segment_due" }), SEGMENT_MS);
+      } catch (err: any) {
+        send({ type: "error", message: err?.message || "Failed to open Cloud STT stream" });
+      }
+    };
+
+    ws.on("message", async (data: Buffer, isBinary: boolean) => {
+      if (isBinary) { stream?.write(data); return; }
+
+      let parsed: unknown;
+      try { parsed = JSON.parse(data.toString()); } catch { return; }
+      const v = validatePayload(SttStreamControlSchema, parsed);
+      if (!v.success) { send({ type: "error", message: v.error }); return; }
+
+      switch (v.data.type) {
+        case "start":
+          cfg = { sessionId: v.data.sessionId, source: v.data.source, maxSpeakers: v.data.maxSpeakers, mimeType: v.data.mimeType };
+          console.log(`[stt-stream] open (${cfg.source || "mic"}, max ${cfg.maxSpeakers ?? 5} speakers)`);
+          await openSegment();
+          break;
+        case "segment":
+          // A new recognition is a new clustering space, so speaker numbering restarts here.
+          console.log(`[stt-stream] segment ${segments + 1} (${cfg.source || "mic"})`);
+          await openSegment();
+          break;
+        case "stop":
+          // Close on the recognition's `end`, not here: results for audio already sent are still
+          // in flight, and closing now would throw away the last thing the user said. The timer is
+          // the backstop for a stream that never drains.
+          stopping = true;
+          closeStream();
+          setTimeout(() => ws.close(), 5000);
+          break;
+      }
+    });
+
+    ws.on("close", () => {
+      closeStream();
+      if (segments) {
+        emitAdkEvent(createEvent({
+          author: "google_cloud_stt",
+          invocationId: `stt-stream-${Date.now()}`,
+          content: { role: "model", parts: [{ text: `streaming recognition closed after ${segments} segment(s)` }] },
+          actions: createEventActions({
+            stateDelta: {
+              eventType: "stt:stream_close",
+              provider: "google_cloud_stt",
+              transport: "streaming",
+              segments,
+              diarizationEnabled: true,
+              source: cfg.source === "tab" ? "tab" : "mic",
+            },
+          }),
+        }));
+      }
+    });
+    ws.on("error", () => closeStream());
   });
 }
 

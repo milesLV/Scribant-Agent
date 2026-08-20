@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { type Utterance } from "../utils/paragraphs";
-import { useChunkedCapture } from "./useChunkedCapture";
+import { useLiveCapture } from "./useLiveCapture";
 
 export interface TabAudioChunk {
   // Diarized turns when Cloud STT produced them, otherwise a single undivided utterance. Handed up
@@ -17,18 +17,23 @@ interface Options {
   sessionId: string;
 }
 
-// Captures a shared Chrome tab's audio and periodically transcribes it server-side. The record →
-// transcribe loop itself lives in useChunkedCapture, shared with the mic path; what's left here is
-// only the getDisplayMedia acquisition, which has no mic equivalent.
+// Captures a shared Chrome tab's audio and transcribes it server-side. The transport itself lives
+// in useLiveCapture, shared with the mic path; what's left here is only the getDisplayMedia
+// acquisition, which has no mic equivalent.
+//
+// Note that the tab and the mic are two independent recognitions, so a speaker label from one is
+// unrelated to a label from the other. Merging them would need the two MediaStreams mixed into one
+// before capture — a real option for the "room mic plus video call" setup, but it would also
+// collapse the mic/tab source tagging the transcript relies on.
 export function useTabAudioCapture({ onChunk, onError, sessionId }: Options) {
   const [isSharing, setIsSharing] = useState(false);
   const stopRef = useRef<(() => void) | null>(null);
 
-  const capture = useChunkedCapture({
+  const capture = useLiveCapture({
     source: "tab",
     sourceTag: "tab",
     onChunk,
-    onDegraded: p => onError(`Diarization unavailable — transcribed with ${p} instead, speakers may be merged.`),
+    onNotice: onError,
   });
 
   const stop = useCallback(() => {

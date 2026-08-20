@@ -8,7 +8,8 @@ import {
   type Utterance, type OpenParagraph,
 } from "../utils/paragraphs";
 import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
-import { useChunkedCapture, readSttConfig } from "../hooks/useChunkedCapture";
+import { readSttConfig } from "../hooks/useChunkedCapture";
+import { useLiveCapture } from "../hooks/useLiveCapture";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useClickToEditCaret } from "../hooks/useClickToEditCaret";
 import { usePreservedSelection } from "../hooks/usePreservedSelection";
@@ -210,14 +211,17 @@ export default function AudioRecorder({
   // which is nulled between runs and would drop the latch mid-conversation.
   const captureSessionRef = useRef(`cap-${Date.now()}`);
 
-  const micCapture = useChunkedCapture({
+  const micCapture = useLiveCapture({
     source: "stt",
     sourceTag: "mic",
     onChunk: ({ utterances }) => {
       appendUtterances(utterances);
       setInterimTranscript("");
     },
-    onDegraded: p => setTabAudioError(`Diarization unavailable — transcribed with ${p} instead, speakers may be merged.`),
+    // Cloud STT's own preview while streaming. It replaces Web Speech's, which is suppressed in
+    // diarization mode, so the box is never blank while someone is mid-sentence.
+    onInterim: text => setInterimTranscript(text),
+    onNotice: msg => setTabAudioError(msg),
   });
 
   // Ref to block recognition results after a clear signal
@@ -424,10 +428,13 @@ export default function AudioRecorder({
       }
 
       if (diarizingRef.current) {
-        // In Diarization mode: Web Speech provides instant live typing preview, while Cloud STT
-        // (V1 — V2 cannot diarize at all) provides the authoritative diarized turns.
-        const preview = (finalStr + " " + interimStr).replace(/\s+/g, " ").trim();
-        setInterimTranscript(preview);
+        // In Diarization mode Cloud STT (V1 — V2 cannot diarize at all) owns the transcript. Web
+        // Speech is only a preview here, and ONLY while the chunked transport is running: the
+        // streaming transport sends its own interim results, and two writers on one preview box
+        // overwrite each other every few hundred milliseconds.
+        if (micCapture.mode() !== "streaming") {
+          setInterimTranscript((finalStr + " " + interimStr).replace(/\s+/g, " ").trim());
+        }
         return;
       }
 

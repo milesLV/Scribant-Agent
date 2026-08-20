@@ -280,6 +280,39 @@ export const TranscribeAudioResponseSchema = z.object({
   degraded: z.boolean().optional().describe("True when diarization was requested but could not be produced (Cloud STT failed, Gemini answered)."),
 });
 
+/* --- /api/stt/stream (WebSocket) ---------------------------------------------------------------
+ * Not a REST path, so it has no OpenAPI entry — but its messages are payloads crossing a trust
+ * boundary, so they are defined here with the rest and validated with validatePayload, same as
+ * every other endpoint. The client opens the socket, sends ONE start message, then raw binary
+ * audio frames; `segment` cuts a fresh recognition before Google's 305s streaming limit.
+ */
+export const SttStreamStartSchema = z.object({
+  type: z.literal("start"),
+  sessionId: z.string().optional().describe("Capture session key, for telemetry correlation."),
+  source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
+  maxSpeakers: z.number().min(1).max(8).optional().describe("Upper bound on speakers (default: 5). The lower bound is always 1."),
+  mimeType: z.string().optional().describe("MediaRecorder container, e.g. 'audio/webm;codecs=opus'. Selects WEBM_OPUS vs OGG_OPUS."),
+});
+
+export const SttStreamControlSchema = z.discriminatedUnion("type", [
+  SttStreamStartSchema,
+  z.object({ type: z.literal("segment") }).describe("Close the current recognition and open a new one. Speaker numbering restarts."),
+  z.object({ type: z.literal("stop") }).describe("Close the recognition and the socket."),
+]);
+
+export const SttStreamMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("interim"), text: z.string() })
+    .describe("Non-final preview text. Never appended to the transcript."),
+  z.object({
+    type: z.literal("final"),
+    turns: z.array(z.object({ speaker: z.string(), text: z.string(), startMs: z.number().optional(), endMs: z.number().optional() })),
+    speakers: z.number().describe("Distinct speakers seen in this recognition so far. Stream-wide, not per-turn."),
+  }).describe("Committed turns. Append-only: previously sent turns are never revised."),
+  z.object({ type: z.literal("segment_due") })
+    .describe("The open recognition is nearing Google's 305s limit. The client must cut its recorder and reply with `segment`."),
+  z.object({ type: z.literal("error"), message: z.string() }),
+]);
+
 export const SttStatusResponseSchema = z.object({
   available: z.boolean().describe("Whether Google Cloud STT V2 is available."),
   authenticated: z.boolean().describe("Whether Google Cloud ADC authentication is active."),
