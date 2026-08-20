@@ -77,8 +77,9 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  // Bumped on Clear All and used as AudioRecorder's `key` — remounting is the reset, so the
-  // component's own mic/recognizer/proofread state never needs a second reset path to keep in sync.
+  // Bumped on Clear All and handed to AudioRecorder as `clearSignal`. It used to be the `key`, but
+  // remounting also tore down the live mic and shared-tab capture; those now only stop when the
+  // user stops them, so the recorder resets its own text state off this counter instead.
   const [recorderKey, setRecorderKey] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [liveDraft, setLiveDraft] = useState<AnalysisResult | null>(null);
@@ -596,7 +597,7 @@ export default function App() {
   };
 
   const handleClearAll = () => {
-    if (window.confirm("Are you sure you want to clear everything? This will reset the transcript, AI notes, bulletins, calendar events, search queries, and to-dos.")) {
+    if (window.confirm("Are you sure you want to clear everything? This will reset the transcript, AI notes, main ideas, calendar events, search queries, and to-dos.")) {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
@@ -691,7 +692,7 @@ export default function App() {
           {/* Content layout: Top Row (Microphone) */}
           <div className="w-full">
             <AudioRecorder
-              key={recorderKey}
+              clearSignal={recorderKey}
               onAnalyze={handleAnalyzeStream}
               isProcessing={isProcessing}
               onShowToast={showToast}

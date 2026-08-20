@@ -26,6 +26,10 @@ interface AudioRecorderProps {
   onRunNow: () => void;
   onSaveToDrive: () => void;  // saves the live notes into this session's Drive folder
   savingDrive: boolean;
+  // Bumped by App's "Clear All". A counter rather than a remount (`key`) on purpose: remounting
+  // would tear down the recognizer and the shared-tab capture as a side effect, and capture only
+  // ever stops when the user stops it.
+  clearSignal: number;
 }
 
 declare global {
@@ -120,7 +124,8 @@ export default function AudioRecorder({
   busy,
   onRunNow,
   onSaveToDrive,
-  savingDrive
+  savingDrive,
+  clearSignal
 }: AudioRecorderProps) {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscriptState] = useState("");
@@ -134,7 +139,7 @@ export default function AudioRecorder({
   }, []);
   // The paragraph the next utterance will either join or break away from. A ref rather than state:
   // it is advanced from inside async chunk handlers and the speech callback, and nothing rendered
-  // reads it. Cleared alongside the transcript in handleClear.
+  // reads it. Cleared alongside the transcript in resetTranscriptState.
   const openParagraphRef = useRef<OpenParagraph>(EMPTY_PARAGRAPH);
 
   // EVERY producer — Web Speech, the mic's Cloud STT chunks, and shared-tab audio — appends through
@@ -234,6 +239,27 @@ export default function AudioRecorder({
 
   // Persistent desired listening state. Web Speech stops itself on silence; we auto-restart only if shouldListenRef is true.
   const shouldListenRef = useRef(false);
+
+  // The mic stays on until the USER turns it off. Chrome ends a SpeechRecognition session on its
+  // own all the time — a long silence, an internal `no-speech`/`network` hiccup, a tab throttle —
+  // and a bare rec.start() inside onend throws InvalidStateError if the engine hasn't finished
+  // tearing the old session down. The previous code treated that throw as "give up", which is
+  // exactly the silent shutoff we're eliminating: retry with backoff instead, and never clear
+  // shouldListenRef here. Only handleToggleListening and a genuine permission denial clear it.
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const pumpRecognition = React.useCallback(() => {
+    clearTimeout(restartTimerRef.current ?? undefined);
+    restartTimerRef.current = null;
+    if (!shouldListenRef.current) return;
+    try {
+      recognitionRef.current?.start();
+    } catch {
+      // InvalidStateError just means "already starting/running" — the session is coming back, so
+      // re-check shortly rather than tearing the desired state down. One tick is enough.
+      restartTimerRef.current = setTimeout(pumpRecognition, 300);
+    }
+  }, []);
 
   const [isEditingTranscript, setIsEditingTranscript] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -414,35 +440,34 @@ export default function AudioRecorder({
         setIsListening(false);
         setRecognitionError("Microphone access denied. Please grant microphone permissions or type your thoughts below!");
       } else if (event.error === "no-speech") {
-        // Safe to ignore minor timeouts — onend will auto-restart only if shouldListenRef is true.
+        // A quiet stretch is not a stop. Chrome fires this then ends the session; onend pumps it
+        // back up, so don't surface an error the user would read as "the mic died".
       } else {
-        setRecognitionError(`Speech recognition error: ${event.error}`);
+        // network/aborted-by-engine and friends: keep the desired state, let onend restart.
+        console.warn("Speech recognition error (recovering):", event.error);
       }
     };
 
     rec.onend = () => {
-      // Auto-restart only if the user explicitly wants to keep listening
+      // Auto-restart only if the user explicitly wants to keep listening. A silence-triggered end
+      // lands here too, so restarting is the whole reason the mic survives a quiet stretch.
       if (!shouldListenRef.current) {
         setIsListening(false);
         return;
       }
-      try {
-        rec.start();
-      } catch {
-        setIsListening(false);
-        shouldListenRef.current = false;
-      }
+      pumpRecognition();
     };
 
     recognitionRef.current = rec;
 
     return () => {
+      clearTimeout(restartTimerRef.current ?? undefined);
       if (recognitionRef.current) {
         shouldListenRef.current = false;
         try { recognitionRef.current.abort(); } catch {}
       }
     };
-  }, []);
+  }, [pumpRecognition]);
 
   // Unmounting (recorderKey bump on Clear All, in App.tsx) must tear down the shared-tab capture the
   // same way the mic recognizer does above — otherwise the browser keeps recording/uploading a tab
@@ -457,7 +482,11 @@ export default function AudioRecorder({
 
   const handleToggleListening = async () => {
     if (isListening || shouldListenRef.current) {
+      // User-initiated stop — the one and only way the mic goes quiet. Clear the desired-state flag
+      // FIRST so a restart already in flight sees it and bails, then cancel any pending retry.
       shouldListenRef.current = false;
+      clearTimeout(restartTimerRef.current ?? undefined);
+      restartTimerRef.current = null;
       setIsListening(false);
       setInterimTranscript("");
       try {
@@ -489,19 +518,10 @@ export default function AudioRecorder({
         }
       }
 
-      // Also start Web Speech API for instant client-side preview
-      try {
-        setInterimTranscript("");
-        recognitionRef.current?.start();
-      } catch (err: any) {
-        // If Web Speech API fails, but MediaRecorder is running, continue with MediaRecorder
-        if (!micStreamRef.current) {
-          console.error("Failed to start voice recognition:", err);
-          setRecognitionError("Could not initialize microphone. Please reload or dump your thoughts directly in the typewriter box.");
-          shouldListenRef.current = false;
-          setIsListening(false);
-        }
-      }
+      // Also start Web Speech API for instant client-side preview. Goes through the same pump the
+      // auto-restart uses, so a still-shutting-down engine is retried rather than reported dead.
+      setInterimTranscript("");
+      pumpRecognition();
     }
   };
 
@@ -510,30 +530,15 @@ export default function AudioRecorder({
     const fullText = (transcript + " " + interimTranscript).trim();
     if (!fullText) return;
 
-    if (isListening || shouldListenRef.current) {
-      shouldListenRef.current = false;
-      setIsListening(false);
-      setInterimTranscript("");
-      try { recognitionRef.current?.abort(); } catch {}
-      micStoppingRef.current = true;
-      if (micRecorderRef.current?.state === "recording") micRecorderRef.current.stop();
-      micStreamRef.current?.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
-    }
-
+    // Submitting for analysis leaves capture untouched — the user is the only one who stops the mic.
     setIsEditingTranscript(false);
     onAnalyze(fullText);
   };
 
-  const handleClear = () => {
-    shouldListenRef.current = false;
-    setIsListening(false);
-    ignoreSpeechResultsRef.current = true;
-    try { recognitionRef.current?.abort(); } catch {}
-    micStoppingRef.current = true;
-    if (micRecorderRef.current?.state === "recording") micRecorderRef.current.stop();
-    micStreamRef.current?.getTracks().forEach((t) => t.stop());
-    micStreamRef.current = null;
+  // Clearing text is not "turn the mic off". Wipe the transcript and proofread state only; the
+  // recognizer, the diarization chunk loop and the shared-tab capture all keep running, so a clear
+  // mid-session just gives you a blank page to keep talking onto.
+  const resetTranscriptState = React.useCallback(() => {
     setTranscript("");
     openParagraphRef.current = EMPTY_PARAGRAPH;
     setInterimTranscript("");
@@ -541,9 +546,12 @@ export default function AudioRecorder({
     setWords(null);
     setActiveChip(null);
     proofedTextRef.current = "";
-  };
+  }, [setTranscript]);
 
-  const flagCount = words ? words.filter(w => w.confidence < CONFIDENCE_THRESHOLD).length : 0;
+  // App's "Clear All" used to reset this component by remounting it. Now it bumps a counter and we
+  // reset only the text, leaving the mic and tab capture exactly as the user left them. The extra
+  // run on mount is a no-op — everything it clears is already empty.
+  useEffect(() => { resetTranscriptState(); }, [clearSignal, resetTranscriptState]);
 
   // Render the proofed transcript with misheard words as clickable correction chips.
   const renderProofed = () => {
@@ -691,10 +699,10 @@ export default function AudioRecorder({
         </div>
       )}
 
-      {!useKeyboard && (
-        <div className="flex flex-col items-center justify-center py-4 border-b border-stone-100/75 mb-4">
+      <div className="flex flex-col items-center justify-center py-4 border-b border-stone-100/75 mb-4">
           <div className="flex items-center justify-center gap-6">
             {/* Pulse Recording Trigger */}
+            {!useKeyboard && (
             <div className="flex flex-col items-center">
               <button
                 id="mic-pulse-button"
@@ -724,6 +732,7 @@ export default function AudioRecorder({
                 </span>
               )}
             </div>
+            )}
 
             {/* Shared-tab audio capture — a separate pipeline from the mic above (see
                 useTabAudioCapture); only shown where getDisplayMedia exists at all. */}
@@ -755,13 +764,12 @@ export default function AudioRecorder({
             )}
           </div>
         </div>
-      )}
 
       {/* Grid containing Input/Transcript on the left, Summarized Notes on the right */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-2">
         
         {/* Left Column: Input Box (Live Transcript or Textarea) */}
-        <div className="border border-stone-200 bg-stone-50/20 rounded-xl p-4 flex flex-col h-[280px] space-y-3">
+        <div className="border border-stone-200 bg-stone-50/20 rounded-xl px-4 pt-2.5 pb-3 flex flex-col h-[400px] space-y-2.5">
           <div className="flex items-center justify-between border-b border-stone-100 pb-2">
             <div className="flex items-center gap-1.5">
               {useKeyboard || isEditingTranscript ? (
@@ -769,16 +777,11 @@ export default function AudioRecorder({
               ) : (
                 <FileText className="w-3.5 h-3.5 text-stone-500" />
               )}
-              <span className="text-[10px] font-bold text-stone-700 uppercase tracking-widest font-mono">
+              <span className="text-xs font-bold text-stone-700 uppercase tracking-widest font-mono">
                 {useKeyboard || isEditingTranscript ? "Editable Input Text" : "Live Transcript"}
               </span>
             </div>
             <div className="flex items-center gap-2">
-              {flagCount > 0 && !isEditingTranscript && (
-                <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
-                  {flagCount} misheard
-                </span>
-              )}
               {!useKeyboard && (
                 <button
                   type="button"
@@ -859,12 +862,12 @@ export default function AudioRecorder({
         </div>
 
         {/* Right Column: AI Live Summarized Notes */}
-        <div className="border border-stone-200 bg-stone-50/20 rounded-xl p-4 flex flex-col h-[280px] space-y-3">
+        <div className="border border-stone-200 bg-stone-50/20 rounded-xl px-4 pt-2.5 pb-3 flex flex-col h-[400px] space-y-2.5">
           <div className="flex items-center justify-between border-b border-stone-100 pb-2">
             <div className="flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-              <span className="text-[10px] font-bold text-stone-700 uppercase tracking-widest font-mono">
-                AI Live Notes Summary
+              <span className="text-xs font-bold text-stone-700 uppercase tracking-widest font-mono">
+                Bullet Point Summary
               </span>
             </div>
             
@@ -874,13 +877,14 @@ export default function AudioRecorder({
                 onClick={onSaveToDrive}
                 disabled={savingDrive || !liveSummary.trim()}
                 title="Save these live notes to a Google Drive folder for this session"
-                className="p-1 text-stone-500 hover:text-amber-700 hover:bg-stone-100 rounded transition-colors disabled:opacity-40 cursor-pointer"
+                className="text-[11px] font-semibold text-stone-600 hover:text-amber-700 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-md px-2 py-1 flex items-center gap-1 disabled:opacity-40 transition-colors cursor-pointer"
               >
                 {savingDrive ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
+                  <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
                 ) : (
                   <FolderPlus className="w-3.5 h-3.5" />
                 )}
+                Save to Drive
               </button>
             </div>
           </div>
@@ -928,15 +932,14 @@ export default function AudioRecorder({
 
       {/* Control Buttons */}
       <div className="flex items-center justify-end gap-2.5 mt-4 pt-3 border-t border-stone-100">
-        {(transcript || interimTranscript) && (
-          <button
-            onClick={handleClear}
-            disabled={isProcessing}
-            className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-stone-500 hover:text-stone-800 bg-stone-100/50 hover:bg-stone-100 rounded-lg transition-colors border border-stone-200/50 cursor-pointer"
-          >
-            Clear Text
-          </button>
-        )}
+        <button
+          onClick={resetTranscriptState}
+          disabled={isProcessing || !(transcript || interimTranscript).trim()}
+          title="Clear the transcript. Does not stop the microphone or tab capture."
+          className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-stone-500 hover:text-stone-800 bg-stone-100/50 hover:bg-stone-100 rounded-lg transition-colors border border-stone-200/50 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-stone-500 disabled:hover:bg-stone-100/50"
+        >
+          Clear Text
+        </button>
         {/* "Analyze Thoughts" button commented out — thoughts are analyzed live in real time
         <button
           onClick={handleFormSubmit}
