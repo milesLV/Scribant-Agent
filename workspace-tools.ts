@@ -17,7 +17,12 @@ async function googleFetch(method: "GET" | "POST", url: string, token: string, b
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error?.message || `Google API error ${res.status}`);
+  // Keep the status and Google's reason code — "Not Found" alone can't distinguish a missing record
+  // from an API that is disabled or not provisioned for the account.
+  if (!res.ok) {
+    const e = data.error || {}, u = new URL(url), reason = e.errors?.[0]?.reason || e.status;
+    throw new Error(`${e.message || "Google API error"} (HTTP ${res.status}${reason ? `, ${reason}` : ""}) @ ${method} ${u.host}${u.pathname}`);
+  }
   return data;
 }
 const googlePost = (url: string, token: string, body: unknown) => googleFetch("POST", url, token, body);
@@ -51,10 +56,22 @@ export async function gcalCreateEvent(token: string, event: EventInput): Promise
   return data.id;
 }
 
+// Tasks has no "@default" alias on the tasklist path the way Calendar has "primary" — the id has to
+// be looked up, and an account that has never opened Tasks owns no list at all. Both cases surface
+// as a bare 404 "Not Found". The first list is the account's default one.
+async function resolveTaskListId(token: string): Promise<string> {
+  const lists = await googleGet("https://www.googleapis.com/tasks/v1/users/@me/lists?maxResults=100", token);
+  return lists.items?.[0]?.id
+    ?? (await googlePost("https://www.googleapis.com/tasks/v1/users/@me/lists", token, { title: "My Tasks" })).id;
+}
+
+const tasksUrl = (listId: string, taskId?: string) =>
+  `https://www.googleapis.com/tasks/v1/lists/${encodeURIComponent(listId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`;
+
 // Google Tasks keeps only the date portion of `due`.
 export async function gtasksCreateTask(token: string, task: TaskInput): Promise<string> {
   const data = await googlePost(
-    "https://www.googleapis.com/tasks/v1/lists/@default/tasks",
+    tasksUrl(await resolveTaskListId(token)),
     token,
     { title: task.title, notes: task.notes, ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {}) },
   );
@@ -71,8 +88,8 @@ async function googleDelete(url: string, token: string): Promise<void> {
 
 export const gcalDeleteEvent = (token: string, eventId: string) =>
   googleDelete(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`, token);
-export const gtasksDeleteTask = (token: string, taskId: string) =>
-  googleDelete(`https://www.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`, token);
+export const gtasksDeleteTask = async (token: string, taskId: string) =>
+  googleDelete(tasksUrl(await resolveTaskListId(token), taskId), token);
 
 // Reuse the session folder if it already exists — every save from the same session names the same
 // folder, and Drive is happy to create a hundred folders with identical names. With the drive.file
@@ -215,16 +232,33 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   // real mode posts the right shape (fetch stubbed)
   const realFetch = globalThis.fetch;
   let captured: any = null;
+  // Tasks writes are two hops: resolve the tasklist id, then post into it.
   globalThis.fetch = (async (url: any, init: any) => {
+    if (String(url).includes("users/@me/lists"))
+      return new Response(JSON.stringify({ items: [{ id: "list-abc" }] }), { status: 200 });
     captured = { url: String(url), body: JSON.parse(init.body) };
     return new Response(JSON.stringify({ id: "real-123" }), { status: 200 });
   }) as any;
   try {
     const id = await gtasksCreateTask("tok", { title: "Buy milk", notes: "", dueDate: "2026-07-11" });
     assert.equal(id, "real-123");
-    assert.ok(captured.url.includes("tasks/v1/lists/@default/tasks"));
+    assert.ok(captured.url.includes("tasks/v1/lists/list-abc/tasks"));
     assert.equal(captured.body.title, "Buy milk");
     assert.ok(captured.body.due.startsWith("2026-07-11"));
+    // no lists yet (fresh account) -> create one and use it
+    let createdList = false;
+    globalThis.fetch = (async (url: any, init: any) => {
+      if (String(url).includes("users/@me/lists")) {
+        if (init.method === "POST") { createdList = true; return new Response(JSON.stringify({ id: "list-new" }), { status: 200 }); }
+        return new Response(JSON.stringify({ items: [] }), { status: 200 });
+      }
+      captured = { url: String(url) };
+      return new Response(JSON.stringify({ id: "t2" }), { status: 200 });
+    }) as any;
+    assert.equal(await gtasksCreateTask("fresh-tok", { title: "First" }), "t2");
+    assert.ok(createdList);
+    assert.ok(captured.url.includes("tasks/v1/lists/list-new/tasks"));
+
     // error surface: non-ok -> throws Google's message
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ error: { message: "Invalid Credentials" } }), { status: 401 })) as any;
@@ -239,10 +273,15 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
     await gcalDeleteEvent("tok", "evt 1");
     assert.ok(delUrl.startsWith("DELETE "));
     assert.ok(delUrl.includes("events/evt%201"), "event id must be URL-encoded");
-    globalThis.fetch = (async () => new Response("{}", { status: 404 })) as any;
+    const withList = (rest: (url: string, init: any) => Response) => (async (url: any, init: any) =>
+      String(url).includes("users/@me/lists")
+        ? new Response(JSON.stringify({ items: [{ id: "list-abc" }] }), { status: 200 })
+        : rest(String(url), init)) as any;
+    globalThis.fetch = withList((url, init) => { delUrl = `${init.method} ${url}`; return new Response("{}", { status: 404 }); });
     await gtasksDeleteTask("tok", "gone"); // must not throw
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ error: { message: "Insufficient Permission" } }), { status: 403 })) as any;
+    assert.ok(delUrl.includes("tasks/v1/lists/list-abc/tasks/gone"));
+    globalThis.fetch = withList(() =>
+      new Response(JSON.stringify({ error: { message: "Insufficient Permission" } }), { status: 403 }));
     await assert.rejects(gtasksDeleteTask("tok", "x"), /Insufficient Permission/);
 
     // Drive folder: an existing folder is reused, and no POST is sent for it.
