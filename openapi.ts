@@ -249,30 +249,43 @@ export const SearchResponseSchema = z.object({
 });
 
 export const TranscribeAudioRequestSchema = z.object({
-  audio: z.string().describe("Base64-encoded audio chunk data (e.g., 8-10s Opus)."),
+  audio: z.string().describe("Base64-encoded audio. With diarization on this is a LINEAR16 WAV of the rolling window, not a single chunk."),
   mimeType: z.string().optional().describe("Audio MIME type (default: audio/webm)."),
   source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
-  enableDiarization: z.boolean().optional().describe("Whether to use Google Cloud STT V2 speaker diarization."),
-  minSpeakers: z.number().min(1).max(8).optional().describe("Minimum expected speakers (default: 1)."),
+  enableDiarization: z.boolean().optional().describe("Whether to use Google Cloud STT speaker diarization."),
+  minSpeakers: z.number().min(1).max(8).optional().describe("Minimum expected speakers (default: 2 when diarization is on)."),
   maxSpeakers: z.number().min(1).max(8).optional().describe("Maximum expected speakers (default: 5)."),
+  // Rolling-window fields. Diarization quality depends on the recognizer seeing far more than one
+  // chunk of audio, so the client re-sends an overlapping window each step; these three let the
+  // server map window-local speaker tags onto session-global ones and commit only the new tail.
+  sessionId: z.string().optional().describe("Session key for the speaker registry. Without it every window is reconciled from scratch."),
+  windowStartMs: z.number().optional().describe("Absolute session time of sample 0 of this window."),
+  commitFromMs: z.number().optional().describe("Absolute session time already committed; turns starting before this are dropped as duplicates."),
+  encoding: z.enum(["LINEAR16", "WEBM_OPUS", "OGG_OPUS"]).optional().describe("Explicit audio encoding; omitted means sniff from the container header."),
+  sampleRateHertz: z.number().min(8000).max(48000).optional().describe("Sample rate, required alongside LINEAR16."),
 });
 
 export const TranscribeAudioResponseSchema = z.object({
   text: z.string().describe("Verbatim or diarized transcribed text."),
   source: z.enum(["mic", "tab"]).describe("Audio capture source tag."),
-  provider: z.enum(["gemini", "google_cloud_stt"]).optional().describe("STT engine used."),
-  speakerCount: z.number().optional().describe("Number of distinct detected speakers."),
+  // Required: a silent fall back to Gemini flattens diarization, and the client can only surface
+  // that degradation if it is always told which engine answered.
+  provider: z.enum(["gemini", "google_cloud_stt"]).describe("STT engine that produced this result."),
+  speakerCount: z.number().optional().describe("Distinct speakers seen SO FAR THIS SESSION, not just in this window."),
   turns: z
     .array(
       z.object({
-        speaker: z.string(),
+        speaker: z.string().describe("Session-global label — already reconciled, never a window-local tag."),
         text: z.string(),
-        startMs: z.number().optional(),
+        startMs: z.number().optional().describe("Absolute session time, not window-relative."),
         endMs: z.number().optional(),
       })
     )
     .optional()
-    .describe("Diarized speaker dialogue turns."),
+    .describe("Diarized speaker dialogue turns, newly committed ones only."),
+  multiSpeaker: z.boolean().optional().describe("Latched: true once the session has ever seen 2+ speakers. Keeps labels on solo windows."),
+  committedThroughMs: z.number().optional().describe("Absolute session time committed through; the client sends this back as commitFromMs."),
+  globalSpeakers: z.record(z.string(), z.string()).optional().describe("Global label -> resolved display name, when a name has been inferred."),
 });
 
 export const SttStatusResponseSchema = z.object({

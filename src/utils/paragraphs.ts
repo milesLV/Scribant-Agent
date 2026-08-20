@@ -346,6 +346,8 @@ export interface TranscribeResponse {
   text: string;
   speakerCount?: number;
   turns?: TranscribeTurn[];
+  /** Server-side latch: true once THIS SESSION has ever held 2+ speakers. See speaker-registry.ts. */
+  multiSpeaker?: boolean;
 }
 
 /**
@@ -357,9 +359,16 @@ export interface TranscribeResponse {
  * `"Speaker "` anywhere. That sniff is what made breaks sticky: once any chunk mentioned a speaker,
  * every later chunk matched too, so every append broke forever after.
  *
- * A speaker label is attached ONLY when the chunk actually holds more than one — a solo recording
+ * A speaker label is attached ONLY when the SESSION holds more than one speaker — a solo recording
  * returns `undefined`, which reads as narration and lets consecutive chunks flow together. Labelling
  * a lone speaker would break the transcript between every chunk.
+ *
+ * "Session", not "chunk", is load-bearing and was the original bug. Deciding per chunk means a
+ * window in which only one of two people happened to speak comes back unlabelled, and `speakerKey`
+ * treats an absent label as matching whatever paragraph is open — so that speaker's words are
+ * silently folded into the OTHER speaker's paragraph. The server latches the fact once two voices
+ * are confirmed and sends it as `multiSpeaker`; the per-chunk count is only a fallback for a
+ * response that predates the latch.
  */
 export function toUtterances(res: TranscribeResponse, source: UtteranceSource): Utterance[] {
   const scene = (text: string) => (text.trimStart().startsWith("[Meeting") ? true : undefined);
@@ -367,7 +376,7 @@ export function toUtterances(res: TranscribeResponse, source: UtteranceSource): 
   const turns = res.turns ?? [];
   if (turns.length) {
     const distinct = new Set(turns.map(t => (t.speaker ?? "").trim()).filter(Boolean));
-    const multi = distinct.size > 1 || (res.speakerCount ?? 0) > 1;
+    const multi = res.multiSpeaker ?? (distinct.size > 1 || (res.speakerCount ?? 0) > 1);
 
     return turns
       .filter(t => t.text?.trim())
@@ -514,6 +523,27 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
     "a meeting header opens a scene");
   eq(toUtterances({ text: "x", speakerCount: 2, turns: [{ speaker: "Speaker 1", text: "  " }] }, "stt"),
     [], "blank turns are dropped rather than emitted as empty paragraphs");
+
+  // --- the latch: a session that has met two people keeps labelling, even on a solo window ------
+  // This is the regression that folded one speaker's whole window into the other's paragraph.
+  const latchedSolo = {
+    text: "still just me",
+    speakerCount: 2,
+    multiSpeaker: true,
+    turns: [{ speaker: "Speaker 2", text: "still just me" }],
+  };
+  eq(toUtterances(latchedSolo, "stt"),
+    [{ text: "Speaker 2: still just me", speaker: "Speaker 2", source: "stt", startsScene: undefined }],
+    "a latched session labels a window holding only one voice");
+  eq(joinUtterances([...toUtterances(twoSpeakers, "stt"), ...toUtterances(latchedSolo, "stt")]),
+    "Speaker 1: morning\n\nSpeaker 2: hey Speaker 2: still just me",
+    "...and that label keeps Speaker 2's window out of Speaker 1's paragraph");
+
+  eq(toUtterances({ ...solo, multiSpeaker: false }, "stt"),
+    [{ text: "just me talking", speaker: undefined, source: "stt", startsScene: undefined }],
+    "an explicit false latch still leaves solo dictation unlabelled");
+  eq(toUtterances({ text: "x", speakerCount: 2, multiSpeaker: false, turns: [{ speaker: "Speaker 1", text: "hi" }] }, "stt")[0].speaker,
+    undefined, "the server's latch outranks a stale per-chunk speakerCount");
 
   // --- classifyMode: the opening words decide, after markers and filler are peeled off ---
   eq(classifyMode("I need to call the plumber"), "intent", "explicit commitment");

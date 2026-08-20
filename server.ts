@@ -17,11 +17,16 @@ import {
   memoryEvents,
   getArchiveTokenMetrics,
   computeMemoryEfficiency,
+  parseSpeakerTurns,
 } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 import { transcribeWithCloudStt, checkCloudSttStatus } from "./cloud-stt";
+import { getRegistry, reconcileWindow } from "./speaker-registry";
+// Pure, dependency-free and browser-safe, so the client and the server share ONE definition of the
+// window geometry rather than each carrying a copy that can drift.
+import { EMIT_LAG_MS } from "./src/utils/audio-window";
 import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
 import {
   registerOpenApiRoutes,
@@ -543,21 +548,33 @@ app.post("/api/transcribe-audio", async (req, res) => {
       res.status(400).json({ error: "audio (base64) is required and must be a string." });
       return;
     }
-    const { audio, mimeType, source, enableDiarization, minSpeakers, maxSpeakers } = v.data;
+    const {
+      audio, mimeType, source, enableDiarization, minSpeakers, maxSpeakers,
+      sessionId, windowStartMs, commitFromMs, encoding, sampleRateHertz,
+    } = v.data;
     const cleanAudio = audio.replace(/^data:audio\/[^;]+;base64,/, "");
 
-    // Check if Cloud STT V2 diarization is requested
+    // Check if Cloud STT diarization is requested
     if (enableDiarization) {
       try {
-        console.log(`[CloudSTT] Transcribing audio chunk (${source || "mic"}, mime: ${mimeType || "audio/webm"}) via Google Cloud STT V2 with Diarization (speakers: ${minSpeakers ?? 1}-${maxSpeakers ?? 5})...`);
+        console.log(`[CloudSTT] Transcribing ${windowStartMs === undefined ? "chunk" : `window @${Math.round(windowStartMs)}ms`} (${source || "mic"}, ${encoding || mimeType || "audio/webm"}) with diarization (speakers: ${minSpeakers ?? 2}-${maxSpeakers ?? 5})...`);
         const cloudResult = await transcribeWithCloudStt(cleanAudio, {
           mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm",
           enableDiarization: true,
-          minSpeakers: minSpeakers ?? 1,
+          minSpeakers: minSpeakers ?? 2,
           maxSpeakers: maxSpeakers ?? 5,
+          encoding,
+          sampleRateHertz,
         });
 
-        console.log(`[CloudSTT] ✓ Diarization success: ${cloudResult.words.length} words, ${cloudResult.speakerCount} detected speaker(s), ${cloudResult.speakerTurns.length} turn(s)`);
+        // Map this window's local speaker tags onto session-global ones and commit only the tail
+        // the client has not already appended. Cloud STT numbers tags per REQUEST, so without this
+        // "Speaker 1" would mean a different person in every window.
+        const reconciled = reconcileWindow(getRegistry(sessionId), cloudResult.speakerTurns, {
+          windowStartMs, commitFromMs, emitLagMs: windowStartMs === undefined ? 0 : EMIT_LAG_MS,
+        });
+
+        console.log(`[CloudSTT] ✓ ${cloudResult.words.length} words, ${cloudResult.speakerTurns.length} window turn(s) -> ${reconciled.turns.length} committed, ${reconciled.speakerCount} session speaker(s)`);
 
         // Emit ADK Telemetry Event
         emitAdkEvent(
@@ -572,9 +589,9 @@ app.post("/api/transcribe-audio", async (req, res) => {
               stateDelta: {
                 eventType: "stt:transcribe",
                 provider: "google_cloud_stt",
-                speakerCount: cloudResult.speakerCount,
+                speakerCount: reconciled.speakerCount,
                 wordCount: cloudResult.words.length,
-                turnCount: cloudResult.speakerTurns.length,
+                turnCount: reconciled.turns.length,
                 diarizationEnabled: true,
                 source: source === "tab" ? "tab" : "mic",
               },
@@ -592,26 +609,31 @@ app.post("/api/transcribe-audio", async (req, res) => {
           provider: "google_cloud_stt",
           source: source === "tab" ? "tab" : "mic",
           metadata: {
-            speakerCount: cloudResult.speakerCount,
+            speakerCount: reconciled.speakerCount,
+            windowSpeakerCount: cloudResult.speakerCount,
             wordCount: cloudResult.words.length,
-            turnCount: cloudResult.speakerTurns.length,
-            minSpeakers: minSpeakers ?? 1,
+            turnCount: reconciled.turns.length,
+            minSpeakers: minSpeakers ?? 2,
             maxSpeakers: maxSpeakers ?? 5,
           },
           promptTokensFallback: Math.ceil(cloudResult.words.length * 1.6),
           candidatesTokensFallback: Math.ceil(cloudResult.words.length * 1.3),
         });
 
+        // Only the reconciled tail crosses the wire. cloudResult holds the WHOLE window, most of
+        // which the transcript already has — and the transcript is append-only, so re-sending it
+        // would duplicate text with no way to take it back.
         res.json({
-          text: cloudResult.text,
+          text: reconciled.turns.map(t => (reconciled.multiSpeaker ? `${t.speaker}: ${t.text}` : t.text)).join("\n\n"),
           source: source === "tab" ? "tab" : "mic",
           provider: "google_cloud_stt",
-          speakerCount: cloudResult.speakerCount,
+          speakerCount: reconciled.speakerCount,
+          multiSpeaker: reconciled.multiSpeaker,
+          committedThroughMs: reconciled.committedThroughMs,
+          globalSpeakers: reconciled.names,
           // Projected onto the declared response shape: SpeakerTurn also carries every word-level
           // diarization token, which is a large payload the client has no use for.
-          turns: cloudResult.speakerTurns.map(({ speaker, text, startMs, endMs }) => ({
-            speaker, text, startMs, endMs,
-          })),
+          turns: reconciled.turns.map(({ speaker, text, startMs, endMs }) => ({ speaker, text, startMs, endMs })),
         });
         return;
       } catch (sttErr: any) {
@@ -637,10 +659,31 @@ app.post("/api/transcribe-audio", async (req, res) => {
 
     console.log(`[STT] ✓ Gemini transcription complete (${text.trim().length} chars)`);
 
+    // The audioTranscriber prompt already asks for "Speaker N:" prefixes, but they used to be left
+    // buried in the flat string — so a response with no `turns` took the client's no-diarization
+    // branch and collapsed the whole clip into ONE unlabelled utterance, silently undoing
+    // diarization every time Cloud STT errored. Lift the labels back out into real turns.
+    const parsed = enableDiarization ? parseSpeakerTurns(text.trim()) : [];
+    // parseSpeakerTurns synthesises a single "user" turn when nothing matched; that means "no
+    // labels present", not "one speaker called user", and inventing a label here would break solo
+    // dictation between every chunk.
+    const labelled = parsed.length > 1 || (parsed.length === 1 && parsed[0].speaker !== "user")
+      ? parsed.map(t => ({ speaker: t.speaker, text: t.text }))
+      : [];
+
     res.json({
       text: text.trim(),
       source: source === "tab" ? "tab" : "mic",
       provider: "gemini",
+      ...(labelled.length
+        ? {
+            turns: labelled,
+            speakerCount: new Set(labelled.map(t => t.speaker)).size,
+            // No absolute timing from Gemini, so the registry cannot anchor these. Report the
+            // window's own count rather than latching the session on an unanchored guess.
+            multiSpeaker: new Set(labelled.map(t => t.speaker)).size > 1,
+          }
+        : {}),
     });
   } catch (error: any) {
     console.error("Audio transcription failed:", error);
@@ -656,7 +699,7 @@ app.get("/api/stt/status", async (_req, res) => {
       available: status.available,
       authenticated: status.authenticated,
       projectId: status.projectId,
-      defaultMinSpeakers: 1,
+      defaultMinSpeakers: 2,
       defaultMaxSpeakers: 5,
       supportedModels: ["chirp_2", "latest_long", "default"],
       error: status.error,

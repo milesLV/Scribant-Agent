@@ -514,11 +514,20 @@ export default function AdminMonitoring({
                 <button
                   type="button"
                   onClick={() =>
-                    setSttConfig((prev) => ({
-                      ...prev,
-                      enableDiarization: !prev.enableDiarization,
-                      provider: !prev.enableDiarization ? "google_cloud_stt" : "gemini",
-                    }))
+                    setSttConfig((prev) => {
+                      const on = !prev.enableDiarization;
+                      // Enabling diarization for ONE speaker is a contradiction, and the server
+                      // floors the count at 2 anyway — so raise the slider with it rather than
+                      // leaving the UI showing a number the request will not use.
+                      const min = on ? Math.max(2, prev.minSpeakers) : prev.minSpeakers;
+                      return {
+                        ...prev,
+                        enableDiarization: on,
+                        minSpeakers: min,
+                        maxSpeakers: Math.max(min, prev.maxSpeakers),
+                        provider: on ? "google_cloud_stt" : "gemini",
+                      };
+                    })
                   }
                   className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                     sttConfig.enableDiarization ? "bg-indigo-600" : "bg-stone-300"

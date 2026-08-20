@@ -28,6 +28,9 @@ export interface CloudSttOptions {
   projectId?: string;
   location?: string;
   model?: string;
+  /** Set explicitly for the rolling window's LINEAR16 WAV; omitted falls back to header sniffing. */
+  encoding?: "LINEAR16" | "WEBM_OPUS" | "OGG_OPUS";
+  sampleRateHertz?: number;
 }
 
 export interface CloudSttResult {
@@ -254,9 +257,12 @@ async function transcribeWithCloudSttV1(
   options: CloudSttOptions
 ): Promise<CloudSttResult> {
   const languageCode = options.languageCode || "en-US";
-  const minSpeakers = Math.max(1, options.minSpeakers ?? 1);
-  const maxSpeakers = Math.max(minSpeakers, options.maxSpeakers ?? 5);
   const enableDiarization = options.enableDiarization !== false;
+  // Floor at 2 when diarization is explicitly on. A caller enabling it is asserting more than one
+  // person is present, and a floor of 1 leaves the clusterer free to answer "one speaker" — which
+  // on a short clip it reliably does, collapsing both voices onto whoever spoke first.
+  const minSpeakers = Math.max(enableDiarization ? 2 : 1, options.minSpeakers ?? (enableDiarization ? 2 : 1));
+  const maxSpeakers = Math.max(minSpeakers, options.maxSpeakers ?? 5);
 
   const url = "https://speech.googleapis.com/v1/speech:recognize";
   const requestBody = {
@@ -264,6 +270,15 @@ async function transcribeWithCloudSttV1(
       languageCode,
       enableAutomaticPunctuation: true,
       enableWordTimeOffsets: true,
+      // The default V1 model is tuned for short commands and diarizes conversation poorly.
+      model: options.model || "latest_long",
+      useEnhanced: true,
+      // Explicit beats header sniffing for the window's WAV, and mono is asserted so a stereo
+      // capture can't be read as two channels to recognize separately.
+      encoding: options.encoding,
+      sampleRateHertz: options.sampleRateHertz,
+      audioChannelCount: 1,
+      enableSeparateRecognitionPerChannel: false,
       diarizationConfig: enableDiarization
         ? {
             enableSpeakerDiarization: true,
