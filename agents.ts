@@ -77,9 +77,25 @@ export const liveSummarizer: AgentFactory = () => new LlmAgent({
   model: createGeminiModel(),
   instruction: (ctx) => `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
 The user is speaking or typing their thoughts live.
-Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
-Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only clean, helpful bullet points.
-Write each bullet as the content itself, not as a labelled entry. Never open a bullet with a topic label followed by a colon (no "**Budget**: we need to cut costs" — just "Need to cut costs, mostly on **contractors**"). Bold key terms or entities inline where they fall in the sentence. A colon is fine mid-sentence when the sentence genuinely needs one.
+Analyze the provided chunk of raw text and extract a high-level summary as a Markdown outline.
+Be extremely concise. Skip any introductory remarks, system summaries, or conversational filler. Output only the outline.
+
+FORMAT — follow exactly:
+- Indentation carries meaning. A top-level "-" is a point that stands on its own; indent a line by two spaces to make it a fact that SUPPORTS the point directly above it. Never go deeper than those two levels, and only indent when the relationship is real — a list of unrelated points stays flat.
+- Use "-" for unordered points. Use "1." "2." "3." ONLY when the items are a genuine sequence, a ranking, or steps in an order the speaker gave. Never number a list just for looking tidy.
+- Bold is rare. Most bullets have NO bold at all. Bold at most one short fragment in a bullet, and only when missing it would change what the reader does: a committed date, a specific number or amount, the person who owns an action, an explicit decision. Never bold a word for being the topic of the bullet. Never bold a whole clause or sentence.
+- Use *italics* only for content the speaker was unsure about ("*maybe* Thursday") or for a phrase quoted back from them. Never underline.
+- Write each bullet as the content itself, not as a labelled entry. Never open a bullet with a topic label followed by a colon (no "**Budget**: we need to cut costs" — just "Need to cut costs, mostly on contractors"). A colon is fine mid-sentence when the sentence genuinely needs one.
+- No headings, no bold section titles, no trailing summary line.
+
+EXAMPLE of the right shape and the right amount of bold (7 lines, one bold span):
+- Contractor spend has to come down before the next quarter
+  - Two contracts renew in September
+  - *Possibly* a third, Alice was not sure
+- Rollout order agreed
+  1. Freeze the schema
+  2. Migrate the staging rows
+  3. Cut over **Friday**
 
 Raw draft thoughts:
 "${corrected(ctx)}"`,
@@ -132,12 +148,31 @@ export const memoryAnswerer: AgentFactory = () => new LlmAgent({
 // ideasSummary (1), each skill (2..) — the calendar criteria's "(see #3)" reference relies on
 // tasks landing at index 3.
 const analyzeCriteriaText = [
-  { key: "ideasSummary", body: `(string) A formatted markdown bullet list summarizing the most important, overall points from the provided "Bullet Point Summary". If the Bullet Point Summary is empty or not provided, summarize the overall points from the raw transcript. Separate items with single newlines.` },
+  { key: "ideasSummary", body: `(string) The 3-5 things the speaker would say if asked "so what was that about?". The Bullet Point Summary above records WHAT WAS SAID; this records WHAT IT MEANT. It is NOT a shorter copy of that summary — never repeat one of its bullets, and never just pick its top few lines.
+Work from the Bullet Point Summary; if it is empty or not provided, work from the raw transcript instead. Separate items with single newlines.
+- At most 5 lines. Every line is a top-level "-" — no indentation, no sub-points, no "1." numbering, ever.
+- Consolidate. If several summary bullets are facets of one idea, they become ONE line here.
+- Leave out supporting detail, examples and asides — those stay in the summary. Do NOT restate individual calendar events, to-dos or search queries; those already have their own panels.
+- Stay close to the summary's own wording — do not swap in synonyms or re-phrase for variety. This is recomputed every few seconds as the speaker talks, and a line that rewords itself on every pass is unreadable.
+- Bold at most ONE short fragment in the WHOLE list — not one per line. Every line here is already important, so marking them all marks nothing. Spend that one mark on the single hardest commitment in the session (a date, a number, an owner) and leave the other lines plain. Never bold a word for being the topic. Use *italics* only for something the speaker was unsure about. Never open a line with a topic label followed by a colon.
+EXAMPLE — for this Bullet Point Summary:
+- Contractor spend has to come down before next quarter
+  - Two contracts renew in September
+  - *Possibly* a third, Alice was not sure
+- Rollout order agreed
+  1. Freeze the schema
+  2. Migrate staging rows
+  3. Cut over **Friday**
+- Need to book the dentist
+you output exactly this (3 lines, the dentist dropped because it is a to-do, the migration steps collapsed into one line):
+- Contractor spend is the binding constraint this quarter
+- The migration is going ahead, cutting over **Friday**
+- Alice owns the September renewals` },
   ...SKILLS.map(s => ({ key: s.name, body: s.description })),
 ].map((e, i) => `${i + 1}. "${e.key}": ${e.body}`).join("\n");
 
 const analyzeOutputSchema = z.object({
-  ideasSummary: z.string().describe("A beautifully organized list of summarized ideas and insights, in markdown bullet points."),
+  ideasSummary: z.string().describe("3-5 flat, standalone takeaways — the distilled meaning of the session, not a shorter copy of the summary."),
   ...skillSchemaProperties(),
 });
 
