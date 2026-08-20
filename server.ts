@@ -3,7 +3,7 @@ import path from "path";
 import { promises as fs } from "fs";
 import { createServer as createViteServer } from "vite";
 import { setLogLevel, LogLevel } from "@google/adk";
-import { splitTiers, safeSeg, estimateTokens, computeCompaction } from "./server-utils";
+import { splitTiers, safeSeg, estimateTokens, computeCompaction, stripSpeakerLabels } from "./server-utils";
 import {
   captureMemoryEvent,
   getMemoryService,
@@ -595,7 +595,7 @@ app.post("/api/transcribe-audio", async (req, res) => {
 
         // Record Token Telemetry Record
         recordTokenUsage({
-          model: "chirp_2",
+          model: "google_stt_v1", // diarization is always V1 — chirp_2 is the non-diarizing V2 path
           agent: "google_cloud_stt",
           stage: "stt",
           modality: "audio",
@@ -655,7 +655,11 @@ app.post("/api/transcribe-audio", async (req, res) => {
     // is worse than having none, because the client cannot tell them from Cloud STT's. Report
     // `degraded` instead so the UI can say diarization dropped out.
     res.json({
-      text: text.trim(),
+      // Dropping `turns` is not enough on its own: the transcriber prompt asks for "Speaker 1:"
+      // prefixes, so the LABELS ALSO LIVE IN THE TEXT and would land in the transcript verbatim —
+      // the same alternating labels, just as a string instead of a structure. Strip them on the
+      // degraded path only, where diarization was asked for and did not happen.
+      text: enableDiarization ? stripSpeakerLabels(text) : text.trim(),
       source: source === "tab" ? "tab" : "mic",
       provider: "gemini",
       ...(enableDiarization ? { degraded: true } : {}),
@@ -674,8 +678,13 @@ app.get("/api/stt/status", async (_req, res) => {
       available: status.available,
       authenticated: status.authenticated,
       projectId: status.projectId,
-      defaultMinSpeakers: 2,
+      // 1, not 2. A floor above 1 is what made the recognizer split one voice in two, and it is
+      // pinned at 1 on every request — advertising 2 here contradicted both the transport and
+      // this endpoint's own published schema (openapi.ts describes it as "(1)").
+      defaultMinSpeakers: 1,
       defaultMaxSpeakers: 5,
+      // chirp_2 is the V2 non-diarizing path only; diarization always runs V1, whose model field
+      // is left at the default. See transcribeWithCloudStt.
       supportedModels: ["chirp_2", "latest_long", "default"],
       error: status.error,
     });

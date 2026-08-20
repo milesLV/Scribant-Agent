@@ -195,6 +195,16 @@ export default function AudioRecorder({
   // third local copy with its own default.
   const isDiarizationActive = () => readSttConfig().enableDiarization;
 
+  // Whether THIS listening session is diarizing, latched when the mic starts.
+  //
+  // Reading localStorage live in onresult instead was a silent data-loss bug: flipping the Admin
+  // toggle mid-session changed which branch onresult took without starting or stopping the Cloud
+  // STT capture that branch assumes. Switching ON mid-session suppressed every Web Speech final
+  // while no chunk capture was running, so the transcript simply stopped growing; switching OFF
+  // left both running and appended everything twice. The session now keeps whatever it started
+  // with until the user stops and starts again.
+  const diarizingRef = useRef(false);
+
   // ONE capture session id for both the mic and the shared tab, so a two-speaker exchange heard on
   // either one latches the session for both. It is deliberately NOT App's orchestrator sessionId,
   // which is nulled between runs and would drop the latch mid-conversation.
@@ -251,7 +261,7 @@ export default function AudioRecorder({
   // Shared-tab capture is entirely separate from the mic's Web Speech pipeline above — its own
   // record/upload/transcribe loop (see the hook) — and only ever APPENDS finished chunks onto the
   // same transcript the mic is building, tagged so they read as a distinct source. Chunks land
-  // roughly in completion order (~9s apart), not precisely interleaved by timestamp against
+  // roughly in completion order (one CHUNK_MS apart), not precisely interleaved by timestamp against
   // concurrent mic speech — good enough for an MVP; true chronological interleaving would need the
   // transcript to be a list of tagged segments instead of one flat string. Chunks now arrive AS
   // tagged segments (see toUtterances), but they are still flattened on append, so ordering is
@@ -413,9 +423,9 @@ export default function AudioRecorder({
         }
       }
 
-      if (isDiarizationActive()) {
-        // In Diarization mode: Web Speech provides instant live typing preview,
-        // while Cloud STT V2 provides authoritative diarized turns into transcript.
+      if (diarizingRef.current) {
+        // In Diarization mode: Web Speech provides instant live typing preview, while Cloud STT
+        // (V1 — V2 cannot diarize at all) provides the authoritative diarized turns.
         const preview = (finalStr + " " + interimStr).replace(/\s+/g, " ").trim();
         setInterimTranscript(preview);
         return;
@@ -503,13 +513,18 @@ export default function AudioRecorder({
       setIsEditingTranscript(false);
       setIsListening(true);
 
-      // Start the rolling Cloud STT window if Diarization mode is active
-      if (isDiarizationActive()) {
+      // Start the chunked Cloud STT capture if Diarization mode is active. Latched for the whole
+      // session so onresult and the capture loop can never disagree about which one owns the text.
+      diarizingRef.current = isDiarizationActive();
+      if (diarizingRef.current) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           micCapture.start(stream, captureSessionRef.current);
         } catch (err: any) {
-          console.warn("[mic-window] Failed to get mic stream for diarization:", err);
+          // No mic stream means no Cloud STT chunks. Unlatch so Web Speech finals keep landing in
+          // the transcript instead of being suppressed in favour of a capture that never started.
+          diarizingRef.current = false;
+          console.warn("[mic-capture] Failed to get mic stream for diarization:", err);
         }
       }
 

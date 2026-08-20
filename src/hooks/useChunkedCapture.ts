@@ -42,9 +42,10 @@ export interface SttSettings { enableDiarization: boolean; maxSpeakers: number }
 /**
  * Diarization settings, read fresh each chunk so a change in Admin takes effect without a restart.
  *
- * Deliberately does NOT read `minSpeakers`. A floor above 1 MANDATES that many clusters, so the
- * recognizer splits a single voice at an arbitrary pause and one person alternates between
- * Speaker 1 and Speaker 2 — the reported bug. The Admin control is an upper bound only.
+ * Deliberately does NOT read `minSpeakers`. The floor is advisory, not binding — measured, it
+ * changes nothing on clean audio, and on low-confidence audio it pushes the recognizer into
+ * splitting a single voice at an arbitrary pause, so one person alternates between Speaker 1 and
+ * Speaker 2. That is the reported bug. The Admin control is an upper bound only.
  *
  * Reading it is not merely unnecessary, it is unsafe: the reverted diarization toggle used to
  * write `minSpeakers: 2` into localStorage, so every browser that switched diarization on while
