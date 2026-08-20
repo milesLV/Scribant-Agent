@@ -253,6 +253,10 @@ export interface SttConfig {
   enableDiarization: boolean;
   minSpeakers: number;
   maxSpeakers: number;
+  // false (default): one slider sets an EXACT speaker count, so min === max. true: the slider grows
+  // a second thumb and min/max are set independently. Only affects how the UI edits the two numbers
+  // below — everything downstream still reads plain minSpeakers/maxSpeakers.
+  speakerRangeMode: boolean;
   provider: "gemini" | "google_cloud_stt";
 }
 
