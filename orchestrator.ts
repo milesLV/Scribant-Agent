@@ -20,7 +20,7 @@ import { BaseAgent, SequentialAgent, ParallelAgent, Runner } from "@google/adk";
 import type { Event, InvocationContext } from "@google/adk";
 import { createEvent, createEventActions } from "@google/adk";
 import {
-  KEYS, keyCursor, keyCount, nextAttempt, classifyError, sleep, sessionService,
+  nextAttempt, classifyError, sleep, sessionService,
   proofreader, liveSummarizer, intentClassifier, MODEL,
 } from "./agents";
 import { buildProofreadPrompt, parseProofread } from "./transcriber";
@@ -90,13 +90,13 @@ const planResolver = () => new Step("plan_resolver", (s) => {
 // Built per request from a stage set: /api/live wants all three (minus `plan` on a small tick),
 // /api/analyze only `plan`, /api/transcribe-correct only `proof`. A retry rebuilds it with the
 // stages that haven't landed yet, which is how a failed stage avoids re-billing the ones that did.
-export function buildOrchestrator(apiKey: string, stages: Set<Stage>): SequentialAgent {
+export function buildOrchestrator(stages: Set<Stage>): SequentialAgent {
   const subAgents: BaseAgent[] = [];
-  if (stages.has("proof")) subAgents.push(proofreader(apiKey), correctionApplier());
+  if (stages.has("proof")) subAgents.push(proofreader(), correctionApplier());
 
   const wide: BaseAgent[] = [];
-  if (stages.has("summary")) wide.push(liveSummarizer(apiKey));
-  if (stages.has("plan")) wide.push(intentClassifier(apiKey));
+  if (stages.has("summary")) wide.push(liveSummarizer());
+  if (stages.has("plan")) wide.push(intentClassifier());
   // Both stages read the same corrected text and write different keys, so there is nothing to
   // serialize between them — running them in parallel keeps the plan off the summary's latency.
   if (wide.length > 1) subAgents.push(new ParallelAgent({ name: "drafting", subAgents: wide }));
@@ -151,7 +151,7 @@ export async function runOrchestrator(opts: {
 
     const runner = new Runner({
       appName: "scribant",
-      agent: buildOrchestrator(keyCursor.current(), remaining),
+      agent: buildOrchestrator(remaining),
       sessionService,
       memoryService: getMemoryService(),
     });
@@ -212,7 +212,7 @@ export async function runOrchestrator(opts: {
       if (done.has(stage)) continue; // it errored but still delivered — nothing to retry
       const { msg, isQuota, isOverload, stated } = classifyError(ev);
       const plan = (isQuota || isOverload)
-        ? nextAttempt(++attempts[stage], keyCount, stated, isQuota)
+        ? nextAttempt(++attempts[stage], 1, stated, isQuota)
         : null;
 
       if (!plan) {
@@ -225,11 +225,9 @@ export async function runOrchestrator(opts: {
         continue;
       }
 
-      if (isQuota) keyCursor.rotate();
       sleepS = Math.max(sleepS, plan.sleepS);
       console.warn(
         `[orchestrator] ${ev.errorCode} on ${ev.author}` +
-        `${isQuota ? ` — switching to key ${keyCursor.index() + 1}/${KEYS.length}` : ""}` +
         `${plan.sleepS ? `, waiting ${plan.sleepS}s` : ""} (stage ${stage}, attempt ${attempts[stage]})`
       );
     }
@@ -245,7 +243,7 @@ export async function runOrchestrator(opts: {
 // import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only.
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   const shape = (stages: Stage[]) =>
-    buildOrchestrator("k", new Set(stages)).subAgents.map(a =>
+    buildOrchestrator(new Set(stages)).subAgents.map(a =>
       a instanceof ParallelAgent ? a.subAgents.map(s => s.name) : a.name);
 
   // Live pipeline: proofread, then summary and plan side by side, then the date pass.

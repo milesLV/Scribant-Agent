@@ -19,7 +19,7 @@ import {
   computeMemoryEfficiency,
 } from "./memory";
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
-import { KEYS, MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
+import { MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
 import { transcribeWithCloudStt, checkCloudSttStatus } from "./cloud-stt";
 import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
@@ -837,9 +837,6 @@ async function main() {
   // startup if .env has neither. Vertex mode auths via ADC/service account, not an API key, so an
   // empty KEYS list is only fatal when GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_GENAI_USE_ENTERPRISE isn't set.
   const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || process.env.GOOGLE_GENAI_USE_ENTERPRISE || "");
-  if (!KEYS.length && !usingVertex) {
-    throw new Error("No Google GenAI credentials found. Please set GOOGLE_GENAI_USE_ENTERPRISE=TRUE in .env (Vertex AI mode) or supply API keys.");
-  }
   if (usingVertex && (!process.env.GOOGLE_CLOUD_PROJECT || !process.env.GOOGLE_CLOUD_LOCATION)) {
     throw new Error("GOOGLE_GENAI_USE_VERTEXAI is set but GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION is missing in .env.");
   }
@@ -871,9 +868,7 @@ async function main() {
     const memDesc = isVertexMem
       ? `Vertex AI Memory Bank (${process.env.VERTEX_AI_AGENT_ENGINE_ID || process.env.AGENT_ENGINE_ID || "active"})`
       : "Custom Memory Bank";
-    const authDesc = usingVertex
-      ? `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`
-      : `${KEYS.length} Gemini key${KEYS.length > 1 ? "s" : ""} | Model: ${MODEL}`;
+    const authDesc = `Vertex AI: ${process.env.GOOGLE_CLOUD_PROJECT}/${process.env.GOOGLE_CLOUD_LOCATION} | Model: ${MODEL}`;
     console.log(`Server running on http://127.0.0.1:${PORT} (${authDesc} | ${memDesc})`);
     console.log(`Also accessible at http://localhost:${PORT}`);
   });

@@ -4,7 +4,24 @@
 // rotating onto a fresh key means building a fresh agent. Any agent cached across requests would
 // pin the first key forever and silently defeat the rotation in askAgent.
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Load .env if process.env is missing keys (e.g. when executing tsx agents.ts directly)
+try {
+  const envPath = path.join(process.cwd(), ".env");
+  if (fs.existsSync(envPath)) {
+    const envFile = fs.readFileSync(envPath, "utf-8");
+    for (const line of envFile.split("\n")) {
+      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+      if (match && match[1] && !process.env[match[1]]) {
+        const val = match[2]?.trim().replace(/^['"]|['"]$/g, "") || "";
+        process.env[match[1]] = val;
+      }
+    }
+  }
+} catch {}
 import { LlmAgent, Gemini, Runner, InMemorySessionService, GOOGLE_SEARCH } from "@google/adk";
 import type { ReadonlyContext } from "@google/adk";
 import { z } from "zod";
@@ -19,15 +36,15 @@ export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.
 if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
   process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;
 }
-
-const usingVertex = /^(1|true)$/i.test(process.env.GOOGLE_GENAI_USE_VERTEXAI || "");
-if (usingVertex) {
-  // In Vertex AI mode, auth is handled via Google Cloud ADC / IAM. Clean API key env vars
-  // so the Google GenAI SDK does not log redundant precedence warnings on every agent invocation.
-  delete process.env.GEMINI_API_KEY;
-  delete process.env.GOOGLE_GENAI_API_KEY;
-  delete process.env.GOOGLE_API_KEY;
+if (!process.env.GOOGLE_GENAI_USE_VERTEXAI) {
+  process.env.GOOGLE_GENAI_USE_VERTEXAI = "true";
 }
+
+// In Vertex AI mode, auth is handled via Google Cloud ADC / IAM. Clean API key env vars
+// so the Google GenAI SDK does not log redundant precedence warnings on every agent invocation.
+delete process.env.GEMINI_API_KEY;
+delete process.env.GOOGLE_GENAI_API_KEY;
+delete process.env.GOOGLE_API_KEY;
 
 
 // Sub-agents read their input from session state rather than the user message: inside the
@@ -46,35 +63,18 @@ export const recentWindow = (ctx: ReadonlyContext, maxWords = 40): string => {
   return "..." + words.slice(-maxWords).join(" ");
 };
 
-// Every Gemini key in .env, primary first. Free-tier keys exhaust after a run or two, so askAgent
-// rotates through them on 429 before it resorts to waiting.
-// Every Gemini key in .env, primary first. Free-tier keys exhaust after a run or two, so askAgent
-// rotates through them on 429 before it resorts to waiting.
-export const KEYS: string[] = [
-  process.env.GEMINI_API_KEY,
-  process.env.GEMINI_API_KEY1,
-  process.env.GEMINI_API_KEY2,
-  process.env.GEMINI_API_KEY3,
-  process.env.GOOGLE_API_KEY,
-].filter((k): k is string => !!k?.trim());
-
-export const keyCount = usingVertex ? 1 : Math.max(1, KEYS.length);
-
-export function createGeminiModel(apiKey?: string): Gemini {
-  if (usingVertex || !apiKey?.trim()) {
-    return new Gemini({ model: MODEL });
-  }
-  return new Gemini({ model: MODEL, apiKey: apiKey.trim() });
+export function createGeminiModel(): Gemini {
+  return new Gemini({ model: MODEL });
 }
 
-type AgentFactory = (apiKey?: string) => LlmAgent;
+type AgentFactory = () => LlmAgent;
 
 // ---- the agents ------------------------------------------------------------
 
 // Rolling bullet summary while the user is still speaking.
-export const liveSummarizer: AgentFactory = (apiKey) => new LlmAgent({
+export const liveSummarizer: AgentFactory = () => new LlmAgent({
   name: "live_summarizer",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: (ctx) => `You are a real-time summarizing assistant for an app that captures a person's unfiltered spoken thoughts.
 The user is speaking or typing their thoughts live.
 Analyze the provided chunk of raw text and extract an elegant, high-level summary using beautiful Markdown bullet points.
@@ -90,9 +90,9 @@ Raw draft thoughts:
 
 // Obvious typos → auto-corrections, ambiguous mishearings → low-confidence flags. transcriber.ts
 // owns the instruction, the indexed-token prompt and the parsing of the reply.
-export const proofreader: AgentFactory = (apiKey) => new LlmAgent({
+export const proofreader: AgentFactory = () => new LlmAgent({
   name: "proofreader",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: (ctx) =>
     `${PROOFREAD_CORRECT_INSTRUCTION}\n\n${buildProofreadPrompt(ctx.state.get<string>("rawText") ?? "").contents}`,
   generateContentConfig: { responseMimeType: "application/json" },
@@ -102,9 +102,9 @@ export const proofreader: AgentFactory = (apiKey) => new LlmAgent({
 
 // Grounded search. Grounding can't be combined with a JSON outputSchema, so the answer stays
 // marker-formatted text (CONDENSED:/DETAILED:) parsed by splitTiers.
-export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
+export const groundedSearcher: AgentFactory = () => new LlmAgent({
   name: "grounded_searcher",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: "You are a research assistant. Use Google Search to ground your answer, then respond in exactly the format the user requests.",
   tools: [GOOGLE_SEARCH],
 });
@@ -112,17 +112,17 @@ export const groundedSearcher: AgentFactory = (apiKey) => new LlmAgent({
 // Verbatim STT for one short audio chunk (shared-tab or mic capture — see /api/transcribe-audio).
 // The user message carries the audio as an inlineData part, not text, so this agent's instruction
 // is static; askAgentParts (not askAgent) is what supplies the actual clip.
-export const audioTranscriber: AgentFactory = (apiKey) => new LlmAgent({
+export const audioTranscriber: AgentFactory = () => new LlmAgent({
   name: "audio_transcriber",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: `Transcribe the spoken audio verbatim. If multiple distinct speakers are talking, separate their turns and prefix each turn with a clear speaker label (e.g., 'Speaker 1: ...', 'Speaker 2: ...'). If speakers introduce themselves or address each other by name (e.g., 'Hi Alice', 'Thanks Bob'), use their actual names as the speaker label. If only one person is speaking, transcribe verbatim without speaker labels. No markdown formatting, timestamps, or commentary — return only the transcribed speech in English. If the clip has no discernible speech (silence, noise, music only), return an empty string.`,
   includeContents: "none",
 });
 
 // Answers user questions synthesized from retrieved past session memories
-export const memoryAnswerer: AgentFactory = (apiKey) => new LlmAgent({
+export const memoryAnswerer: AgentFactory = () => new LlmAgent({
   name: "memory_answerer",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: "You are a helpful personal memory assistant. Based strictly on the user's past session memories provided in the prompt, answer their question directly, clearly, and concisely (1-2 sentences). If the memories do not contain the answer, say so politely.",
   includeContents: "default",
 });
@@ -142,9 +142,9 @@ const analyzeOutputSchema = z.object({
 
 // Turn the transcript into calendar/task/search items. Transcript, reference time and the live
 // summary all come from session state, so the same agent serves the live pipeline and finalize.
-export const intentClassifier: AgentFactory = (apiKey) => new LlmAgent({
+export const intentClassifier: AgentFactory = () => new LlmAgent({
   name: "intent_classifier",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: (ctx) => `You are a high-fidelity intent parsing engine for an app that transcribes a person's unfiltered spoken thoughts and turns them into structured actions.
 The user is speaking or writing their thoughts in an unfiltered "brain dump" format or recording a meeting/conversation with multiple speakers.
 Analyze the provided stream of thoughts/dialogue and categorize segments into different structured action buckets.
@@ -193,17 +193,6 @@ export function nextAttempt(
 export const sessionService = new InMemorySessionService();
 export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// Sticky: after a rotation, later requests start on the key that last worked. Shared with the
-// orchestrator runner — two independent cursors would each rediscover the same exhausted key.
-let keyIdx = 0;
-export const keyCursor = {
-  current: () => KEYS[keyIdx],
-  rotate: () => { keyIdx = (keyIdx + 1) % KEYS.length; return keyIdx; },
-  index: () => keyIdx,
-};
-
-// Classify an ADK error event: quota is per-key (another key may still have headroom); an overload
-// is the model's own problem, so no key swap helps. Shared by both runners.
 export function classifyError(errEvent: { errorCode?: unknown; errorMessage?: unknown }) {
   const msg = String(errEvent.errorMessage || "");
   const isQuota = String(errEvent.errorCode) === "429" || msg.includes("RESOURCE_EXHAUSTED");
@@ -234,7 +223,7 @@ export async function askAgentParts(
   options?: { diarizationEnabled?: boolean; source?: string; metadata?: Record<string, any>; sessionId?: string; userId?: string; stage?: string }
 ): Promise<{ text: string; grounding?: any }> {
   for (let attempt = 1; ; attempt++) {
-    const agent = make(keyCursor.current());
+    const agent = make();
     const runner = new Runner({ appName: "scribant", agent, sessionService, memoryService: getMemoryService() });
     let out = "";
     let grounding: any;
@@ -269,13 +258,11 @@ export async function askAgentParts(
     if (!errEvent) return { text: out, grounding };
 
     const { msg, isQuota, isOverload, stated } = classifyError(errEvent);
-    const plan = (isQuota || isOverload) ? nextAttempt(attempt, keyCount, stated, isQuota) : null;
+    const plan = (isQuota || isOverload) ? nextAttempt(attempt, 1, stated, isQuota) : null;
     if (!plan) throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
 
-    if (isQuota && !usingVertex) keyCursor.rotate(); // no point swapping keys for an overload or in Vertex mode
     console.warn(
       `[askAgent] ${errEvent.errorCode} on ${agent.name}` +
-      `${isQuota && !usingVertex ? ` — switching to key ${keyCursor.index() + 1}/${KEYS.length}` : ""}` +
       `${plan.sleepS ? `, waiting ${plan.sleepS}s` : ""} (attempt ${attempt})`
     );
     if (plan.sleepS) await sleep(plan.sleepS * 1000);
@@ -307,16 +294,8 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.deepEqual(nextAttempt(4, 4, 22, true), { sleepS: 22 });
   assert.deepEqual(nextAttempt(1, 4, 22, true), { sleepS: 0 });
 
-  // The rotated key must actually reach the model. Reaching into Gemini's private apiKey is the
-  // point: a `model: "gemini-..."` string would re-read env per call and silently undo rotation.
-  const keyOf = (a: LlmAgent) => (a.canonicalModel as any).apiKey;
-  assert.ok(liveSummarizer("k-test").canonicalModel instanceof Gemini);
-  if (!usingVertex) {
-    assert.equal(keyOf(liveSummarizer("k-test")), "k-test");
-    assert.equal(keyOf(intentClassifier("k-2")), "k-2");
-    assert.equal(keyOf(proofreader("k-3")), "k-3");
-  }
-  assert.equal(intentClassifier("k").canonicalBeforeModelCallbacks.length, 1);
+  assert.ok(liveSummarizer().canonicalModel instanceof Gemini);
+  assert.equal(intentClassifier().canonicalBeforeModelCallbacks.length, 1);
 
   // Sub-agents read their input from state, not from the user message — an instruction that ignored
   // state would silently summarize/classify an empty transcript inside the orchestrator.
@@ -324,12 +303,12 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
     ({ state: { get: (k: string) => state[k] } }) as any;
   const instructionOf = async (a: LlmAgent, state: Record<string, string>) =>
     String(typeof a.instruction === "function" ? await a.instruction(stateCtx(state)) : a.instruction);
-  assert.match(await instructionOf(liveSummarizer("k"), { corrected: "buy milk" }), /buy milk/);
-  const classifierPrompt = await instructionOf(intentClassifier("k"), { corrected: "buy milk", refISO: "2026-06-27T09:00:00", liveSummary: "notes so far" });
+  assert.match(await instructionOf(liveSummarizer(), { corrected: "buy milk" }), /buy milk/);
+  const classifierPrompt = await instructionOf(intentClassifier(), { corrected: "buy milk", refISO: "2026-06-27T09:00:00", liveSummary: "notes so far" });
   assert.match(classifierPrompt, /buy milk/);
   assert.match(classifierPrompt, /2026-06-27T09:00:00/);
   assert.match(classifierPrompt, /notes so far/);
-  assert.match(await instructionOf(proofreader("k"), { rawText: "buy milk" }), /0:buy 1:milk/);
+  assert.match(await instructionOf(proofreader(), { rawText: "buy milk" }), /0:buy 1:milk/);
 
   console.log("agents self-check ✓");
 })();

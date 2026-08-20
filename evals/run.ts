@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { LlmAgent, Gemini } from "@google/adk";
-import { askAgent, KEYS, keyCount, createGeminiModel, MODEL } from "../agents";
+import { askAgent, createGeminiModel, MODEL } from "../agents";
 import { applyCorrections, CONFIDENCE_THRESHOLD } from "../src/utils/transcript";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -228,14 +228,13 @@ async function post(pathname: string, body: any): Promise<any> {
 // The judge grades only the SUBJECTIVE `judge.quality` rubric. Kept in eval-land, not prod.
 // Built on the same askAgent the app uses, so the judge gets key rotation for free instead of a
 // second Gemini SDK with its own key lookup.
-const judgeAgent = (apiKey?: string) => new LlmAgent({
+const judgeAgent = () => new LlmAgent({
   name: "eval_judge",
-  model: createGeminiModel(apiKey),
+  model: createGeminiModel(),
   instruction: `You are grading an AI answer. Reply ONLY JSON: {"pass": <boolean>, "reason": "<one short sentence>"}`,
   generateContentConfig: { responseMimeType: "application/json" },
 });
 async function judge(rubric: string, content: string): Promise<{ pass: boolean; reason: string }> {
-  if (!keyCount) throw new Error("--judge requires Vertex AI or API key credentials in .env");
   const { text } = await askAgent(judgeAgent, `RUBRIC: ${rubric}\n\nCONTENT:\n${content}`);
   try { return JSON.parse((text || "{}").replace(/```json?|```/g, "").trim()); }
   catch { return { pass: false, reason: "judge output unparseable" }; }
