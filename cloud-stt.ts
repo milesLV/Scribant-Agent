@@ -1,4 +1,6 @@
-// Google Cloud Speech-to-Text V2 provider with acoustic speaker diarization.
+// Google Cloud Speech-to-Text provider with acoustic speaker diarization.
+// Recognition prefers V2; DIARIZATION always routes to V1 — V2's sync Recognize rejects
+// diarizationConfig outright (HTTP 400, every model and location).
 // Uses Google Cloud Application Default Credentials (ADC) to call speech.googleapis.com.
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
@@ -28,9 +30,6 @@ export interface CloudSttOptions {
   projectId?: string;
   location?: string;
   model?: string;
-  /** Set explicitly for the rolling window's LINEAR16 WAV; omitted falls back to header sniffing. */
-  encoding?: "LINEAR16" | "WEBM_OPUS" | "OGG_OPUS";
-  sampleRateHertz?: number;
 }
 
 export interface CloudSttResult {
@@ -249,6 +248,30 @@ export async function transcribeWithCloudStt(
   };
 }
 
+// The V1 `config` block, split out from the request so it can be asserted without a network call.
+//
+// ponytail: the speaker floor stays at 1 — do NOT "help" the clusterer by raising it.
+// Measured against the live V1 API: minSpeakerCount:2 MANDATES k>=2 clusters, so genuinely solo
+// audio is split at an arbitrary pause and one person alternates Speaker 1/Speaker 2. Auto-detect
+// is correct on real speech (Google's own two-speaker sample, commercial_mono.wav: 2 tags, 7
+// well-placed segments at min=1). Raising this floor shipped once, in bce2bd7, and was reverted.
+//
+// Nothing else belongs here either: `model` (video/phone_call/latest_long) and `useEnhanced` were
+// measured to give byte-identical diarization, so they are cost without effect.
+export function buildV1Config(options: CloudSttOptions) {
+  const enableDiarization = options.enableDiarization !== false;
+  const minSpeakerCount = Math.max(1, options.minSpeakers ?? 1);
+  const maxSpeakerCount = Math.max(minSpeakerCount, options.maxSpeakers ?? 5);
+  return {
+    languageCode: options.languageCode || "en-US",
+    enableAutomaticPunctuation: true,
+    enableWordTimeOffsets: true,
+    diarizationConfig: enableDiarization
+      ? { enableSpeakerDiarization: true, minSpeakerCount, maxSpeakerCount }
+      : undefined,
+  };
+}
+
 // Transcribe using Google Cloud STT V1 API (native support for synchronous speaker diarization)
 async function transcribeWithCloudSttV1(
   cleanAudio: string,
@@ -256,41 +279,8 @@ async function transcribeWithCloudSttV1(
   projectId: string,
   options: CloudSttOptions
 ): Promise<CloudSttResult> {
-  const languageCode = options.languageCode || "en-US";
-  const enableDiarization = options.enableDiarization !== false;
-  // Floor at 2 when diarization is explicitly on. A caller enabling it is asserting more than one
-  // person is present, and a floor of 1 leaves the clusterer free to answer "one speaker" — which
-  // on a short clip it reliably does, collapsing both voices onto whoever spoke first.
-  const minSpeakers = Math.max(enableDiarization ? 2 : 1, options.minSpeakers ?? (enableDiarization ? 2 : 1));
-  const maxSpeakers = Math.max(minSpeakers, options.maxSpeakers ?? 5);
-
   const url = "https://speech.googleapis.com/v1/speech:recognize";
-  const requestBody = {
-    config: {
-      languageCode,
-      enableAutomaticPunctuation: true,
-      enableWordTimeOffsets: true,
-      // The default V1 model is tuned for short commands and diarizes conversation poorly.
-      model: options.model || "latest_long",
-      useEnhanced: true,
-      // Explicit beats header sniffing for the window's WAV, and mono is asserted so a stereo
-      // capture can't be read as two channels to recognize separately.
-      encoding: options.encoding,
-      sampleRateHertz: options.sampleRateHertz,
-      audioChannelCount: 1,
-      enableSeparateRecognitionPerChannel: false,
-      diarizationConfig: enableDiarization
-        ? {
-            enableSpeakerDiarization: true,
-            minSpeakerCount: minSpeakers,
-            maxSpeakerCount: maxSpeakers,
-          }
-        : undefined,
-    },
-    audio: {
-      content: cleanAudio,
-    },
-  };
+  const requestBody = { config: buildV1Config(options), audio: { content: cleanAudio } };
 
   const response = await fetch(url, {
     method: "POST",
@@ -439,6 +429,20 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   const singleGrouped = groupWordsIntoSpeakerTurns(singleSpeakerWords);
   assert.equal(singleGrouped.turns.length, 1);
   assert.equal(singleGrouped.text, "Schedule a dentist appointment");
+
+  // 5. Diarization config: the floor must stay at 1. A floor of 2 forces the recognizer to
+  // manufacture a second speaker out of solo audio — the bug bce2bd7 shipped and this reverts.
+  const autoCfg = buildV1Config({ enableDiarization: true });
+  assert.equal(autoCfg.diarizationConfig?.minSpeakerCount, 1, "diarization must auto-detect, never floor at 2");
+  assert.equal(autoCfg.diarizationConfig?.maxSpeakerCount, 5);
+  // An explicit caller override is still honoured, and max is never allowed below min.
+  const forced = buildV1Config({ enableDiarization: true, minSpeakers: 3, maxSpeakers: 2 });
+  assert.equal(forced.diarizationConfig?.minSpeakerCount, 3);
+  assert.equal(forced.diarizationConfig?.maxSpeakerCount, 3, "max is raised to meet min");
+  // Diarization off means no diarizationConfig at all.
+  assert.equal(buildV1Config({ enableDiarization: false }).diarizationConfig, undefined);
+  // These were measured as no-ops for diarization; keep them out of the request.
+  assert.ok(!("model" in autoCfg) && !("useEnhanced" in autoCfg), "no model/useEnhanced cargo cult");
 
   console.log("cloud-stt self-check ✓");
 })();

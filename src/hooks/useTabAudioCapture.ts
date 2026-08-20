@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { type Utterance } from "../utils/paragraphs";
-import { useWindowedCapture } from "./useWindowedCapture";
+import { useChunkedCapture } from "./useChunkedCapture";
 
 export interface TabAudioChunk {
   // Diarized turns when Cloud STT produced them, otherwise a single undivided utterance. Handed up
@@ -18,13 +18,13 @@ interface Options {
 }
 
 // Captures a shared Chrome tab's audio and periodically transcribes it server-side. The record →
-// transcribe loop itself lives in useWindowedCapture, shared with the mic path; what's left here is
+// transcribe loop itself lives in useChunkedCapture, shared with the mic path; what's left here is
 // only the getDisplayMedia acquisition, which has no mic equivalent.
 export function useTabAudioCapture({ onChunk, onError, sessionId }: Options) {
   const [isSharing, setIsSharing] = useState(false);
   const stopRef = useRef<(() => void) | null>(null);
 
-  const capture = useWindowedCapture({
+  const capture = useChunkedCapture({
     source: "tab",
     sourceTag: "tab",
     onChunk,

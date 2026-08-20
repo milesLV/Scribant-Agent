@@ -367,8 +367,11 @@ export interface TranscribeResponse {
  * window in which only one of two people happened to speak comes back unlabelled, and `speakerKey`
  * treats an absent label as matching whatever paragraph is open — so that speaker's words are
  * silently folded into the OTHER speaker's paragraph. The server latches the fact once two voices
- * are confirmed and sends it as `multiSpeaker`; the per-chunk count is only a fallback for a
- * response that predates the latch.
+ * are confirmed across chunks and sends it as `multiSpeaker`.
+ *
+ * Speaker labels themselves are CHUNK-LOCAL — "Speaker 1" in consecutive chunks is not guaranteed
+ * to be the same person. Acoustic re-identification across requests was tried and measurably made
+ * things worse; see speaker-registry.ts.
  */
 export function toUtterances(res: TranscribeResponse, source: UtteranceSource): Utterance[] {
   const scene = (text: string) => (text.trimStart().startsWith("[Meeting") ? true : undefined);
@@ -376,7 +379,12 @@ export function toUtterances(res: TranscribeResponse, source: UtteranceSource): 
   const turns = res.turns ?? [];
   if (turns.length) {
     const distinct = new Set(turns.map(t => (t.speaker ?? "").trim()).filter(Boolean));
-    const multi = res.multiSpeaker ?? (distinct.size > 1 || (res.speakerCount ?? 0) > 1);
+    // Label when THIS chunk shows two voices, or when the session has been latched multi-speaker.
+    // Both halves are load-bearing. Without the first, the chunk that actually catches two people
+    // goes unlabelled (the latch needs corroboration across chunks, so it is still false then).
+    // Without the second, a chunk in which only one of two people speaks comes back unlabelled and
+    // `speakerKey` folds it into whichever paragraph is open — the original bug.
+    const multi = (res.multiSpeaker ?? false) || distinct.size > 1;
 
     return turns
       .filter(t => t.text?.trim())
@@ -544,6 +552,13 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
     "an explicit false latch still leaves solo dictation unlabelled");
   eq(toUtterances({ text: "x", speakerCount: 2, multiSpeaker: false, turns: [{ speaker: "Speaker 1", text: "hi" }] }, "stt")[0].speaker,
     undefined, "the server's latch outranks a stale per-chunk speakerCount");
+
+  // The FIRST chunk to catch two people is always unlatched — corroboration takes two chunks — so
+  // the chunk's own evidence has to be enough on its own, or that exchange goes out unlabelled.
+  eq(toUtterances({ text: "x", multiSpeaker: false, turns: [
+      { speaker: "Speaker 1", text: "morning" }, { speaker: "Speaker 2", text: "hey" }] }, "stt")
+      .map(u => u.speaker),
+    ["Speaker 1", "Speaker 2"], "a chunk holding two voices is labelled before the latch corroborates");
 
   // --- classifyMode: the opening words decide, after markers and filler are peeled off ---
   eq(classifyMode("I need to call the plumber"), "intent", "explicit commitment");

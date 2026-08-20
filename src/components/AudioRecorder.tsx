@@ -8,7 +8,7 @@ import {
   type Utterance, type OpenParagraph,
 } from "../utils/paragraphs";
 import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
-import { useWindowedCapture, readSttConfig } from "../hooks/useWindowedCapture";
+import { useChunkedCapture, readSttConfig } from "../hooks/useChunkedCapture";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useClickToEditCaret } from "../hooks/useClickToEditCaret";
 import { usePreservedSelection } from "../hooks/usePreservedSelection";
@@ -195,13 +195,12 @@ export default function AudioRecorder({
   // third local copy with its own default.
   const isDiarizationActive = () => readSttConfig().enableDiarization;
 
-  // ONE capture session id for both the mic and the shared tab, so their windows reconcile against
-  // the same speaker registry — the same person heard on both must not become two speakers. It is
-  // deliberately NOT App's orchestrator sessionId, which is nulled between runs and would reset the
-  // registry mid-conversation.
+  // ONE capture session id for both the mic and the shared tab, so a two-speaker exchange heard on
+  // either one latches the session for both. It is deliberately NOT App's orchestrator sessionId,
+  // which is nulled between runs and would drop the latch mid-conversation.
   const captureSessionRef = useRef(`cap-${Date.now()}`);
 
-  const micCapture = useWindowedCapture({
+  const micCapture = useChunkedCapture({
     source: "stt",
     sourceTag: "mic",
     onChunk: ({ utterances }) => {

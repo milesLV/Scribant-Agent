@@ -15,7 +15,7 @@
     "create:memory-bank": "tsx --env-file-if-exists=.env scripts/create-memory-bank.ts",
     "setup:env": "tsx scripts/setup-env.ts",
     "check:openapi": "tsx -e \"import { getOpenApiSpec } from './openapi'; const spec = getOpenApiSpec(); console.log('OpenAPI spec generated with', Object.keys(spec.paths).length, 'paths');\"",
-    "check": "tsc --noEmit && tsx openapi.ts && tsx skills.ts && tsx transcriber.ts && tsx cloud-stt.ts && tsx speaker-registry.ts && tsx server-utils.ts && tsx workspace-tools.ts && tsx agents.ts && tsx orchestrator.ts && tsx memory.ts && tsx adk-events.ts && tsx token-telemetry.ts && tsx src/utils/transcript.ts && tsx src/utils/paragraphs.ts && tsx src/utils/audio-window.ts && tsx src/utils/selection.ts && tsx src/utils/autonomy.ts && tsx src/utils/outline.ts && tsx evals/run.ts --selfcheck"
+    "check": "tsc --noEmit && tsx openapi.ts && tsx skills.ts && tsx transcriber.ts && tsx cloud-stt.ts && tsx speaker-registry.ts && tsx server-utils.ts && tsx workspace-tools.ts && tsx agents.ts && tsx orchestrator.ts && tsx memory.ts && tsx adk-events.ts && tsx token-telemetry.ts && tsx src/utils/transcript.ts && tsx src/utils/paragraphs.ts && tsx src/utils/selection.ts && tsx src/utils/autonomy.ts && tsx src/utils/outline.ts && tsx evals/run.ts --selfcheck"
   },
   "dependencies": {
     "@google/adk": "^1.3.0",
