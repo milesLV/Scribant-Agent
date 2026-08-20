@@ -20,6 +20,17 @@ import assert from "node:assert/strict";
 /** Chunks holding 2+ speakers needed before the session is treated as multi-speaker. */
 export const CORROBORATION = 2;
 
+/**
+ * Sessions retained before the oldest is evicted. A capture session is keyed by page load and
+ * nothing ever tells the server one ended, so without a bound this map grows for the process
+ * lifetime. Map preserves insertion order, which is all the LRU this needs.
+ *
+ * ponytail: evicting the oldest can un-latch a session that has been idle through 500 others.
+ * It re-latches after two more multi-speaker chunks. Upgrade path: have the client signal
+ * capture-stopped, or stamp entries and evict by age.
+ */
+export const MAX_SESSIONS = 500;
+
 interface SessionState {
   multiTagChunks: number;
 }
@@ -42,7 +53,10 @@ export function noteChunk(sessionId: string | undefined, distinctSpeakersInChunk
   if (!sessionId) return false;
   const state = sessions.get(sessionId) ?? { multiTagChunks: 0 };
   if (distinctSpeakersInChunk > 1) state.multiTagChunks++;
+  // Re-insert so this session counts as most-recently-used, then trim the oldest.
+  sessions.delete(sessionId);
   sessions.set(sessionId, state);
+  while (sessions.size > MAX_SESSIONS) sessions.delete(sessions.keys().next().value as string);
   return state.multiTagChunks >= CORROBORATION;
 }
 
@@ -100,6 +114,14 @@ if (import.meta.url && process.argv[1]?.endsWith("speaker-registry.ts")) {
   // Reset clears.
   resetRegistry("a");
   assert.equal(isMultiSpeaker("a"), false, "reset opens a fresh session");
+
+  // The map is bounded: a long-lived server must not accumulate one entry per page load forever.
+  resetRegistry();
+  noteChunk("keep-me", 2); noteChunk("keep-me", 2);
+  assert.equal(isMultiSpeaker("keep-me"), true);
+  for (let i = 0; i < MAX_SESSIONS; i++) noteChunk(`filler-${i}`, 1);
+  assert.equal(isMultiSpeaker("keep-me"), false, "the oldest session is evicted once the cap is passed");
+  resetRegistry();
 
   console.log("speaker-registry self-check ✓");
 }

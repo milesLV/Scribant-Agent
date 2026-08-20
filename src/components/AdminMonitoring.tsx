@@ -588,6 +588,14 @@ export default function AdminMonitoring({
                   </div>
                 </div>
 
+                {/* Live capture sends the upper bound only. Saying so matters: this control used to
+                    write a lower bound of 2 into localStorage, and a floor above 1 is what makes the
+                    recognizer split one voice into two. */}
+                <p className="text-[10px] text-stone-500 leading-snug font-sans">
+                  Upper bound only — live capture always sends a lower bound of 1. Forcing a floor
+                  makes the recognizer split a single voice into two speakers.
+                </p>
+
                 {/* One timeline for both modes: a shared track carrying a tick per whole number, the
                     selected span, one or two thumbs, and the numbers underneath. Everything is
                     placed with speakerOffset so a tick, its label and its thumb share a centre. */}

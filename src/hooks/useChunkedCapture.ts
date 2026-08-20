@@ -37,22 +37,30 @@ function pickMimeType(): string {
   return candidates.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
-export interface SttSettings { enableDiarization: boolean; minSpeakers: number; maxSpeakers: number }
+export interface SttSettings { enableDiarization: boolean; maxSpeakers: number }
 
-/** Diarization settings, read fresh each chunk so a change in Admin takes effect without a restart. */
+/**
+ * Diarization settings, read fresh each chunk so a change in Admin takes effect without a restart.
+ *
+ * Deliberately does NOT read `minSpeakers`. A floor above 1 MANDATES that many clusters, so the
+ * recognizer splits a single voice at an arbitrary pause and one person alternates between
+ * Speaker 1 and Speaker 2 — the reported bug. The Admin control is an upper bound only.
+ *
+ * Reading it is not merely unnecessary, it is unsafe: the reverted diarization toggle used to
+ * write `minSpeakers: 2` into localStorage, so every browser that switched diarization on while
+ * that shipped still carries a 2. Honouring persisted state would reproduce the bug on exactly
+ * the machines that hit it the first time.
+ */
 export function readSttConfig(): SttSettings {
   // ONE default for every caller. The mic path used to default this to true and the tab path to
   // false, so the same session diarized or didn't depending on which capture started it.
-  // minSpeakers defaults to 1: forcing a floor of 2 makes the recognizer split a single speaker
-  // into two, which is the exact bug this replaced. See cloud-stt.ts buildV1Config.
-  const fallback = { enableDiarization: false, minSpeakers: 1, maxSpeakers: 5 };
+  const fallback = { enableDiarization: false, maxSpeakers: 5 };
   try {
     const saved = localStorage.getItem("scribant_stt_config");
     if (!saved) return fallback;
     const parsed = JSON.parse(saved);
     return {
       enableDiarization: Boolean(parsed.enableDiarization),
-      minSpeakers: Number(parsed.minSpeakers) || fallback.minSpeakers,
       maxSpeakers: Number(parsed.maxSpeakers) || fallback.maxSpeakers,
     };
   } catch {
@@ -91,7 +99,8 @@ export function useChunkedCapture({ source, sourceTag, onChunk, onDegraded }: Op
           mimeType: blob.type || "audio/webm",
           source: sourceTag,
           enableDiarization: cfg.enableDiarization,
-          minSpeakers: cfg.minSpeakers,
+          // Always 1 — see readSttConfig. maxSpeakers is a cap and is safe to pass through.
+          minSpeakers: 1,
           maxSpeakers: cfg.maxSpeakers,
           // Only carries the multi-speaker latch; labels themselves stay chunk-local.
           sessionId: sessionIdRef.current,
@@ -129,7 +138,7 @@ export function useChunkedCapture({ source, sourceTag, onChunk, onDegraded }: Op
     recorderRef.current = rec;
     rec.start();
     setTimeout(() => { if (rec.state === "recording") rec.stop(); }, CHUNK_MS);
-  }, [send, sourceTag]);
+  }, [send]);
 
   const start = useCallback((stream: MediaStream, sessionId: string) => {
     streamRef.current = stream;
