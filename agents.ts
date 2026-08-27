@@ -31,7 +31,7 @@ import { getMemoryService, autoMemoryIngestCallback, memoryBankBeforeModelCallba
 import { emitAdkEvent } from "./adk-events";
 import { recordTokenUsage } from "./token-telemetry";
 
-export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.6-flash";
+export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.7-flash";
 
 if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
   process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;

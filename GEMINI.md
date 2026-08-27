@@ -24,7 +24,7 @@ Welcome to Scribant! Scribant is an intelligent thought-partner agent that liste
 - **Port**: `3000` (Express serves API routes and integrates Vite middleware in development; serves built assets in production).
 - **Core AI Framework**: Google ADK TypeScript (`@google/adk`).
 - **Models & Execution**:
-  - Model: Defaults to `gemini-3.6-flash` (configurable via `GEMINI_MODEL` or `MODEL`).
+  - Model: Defaults to `gemini-3.7-flash` (configurable via `GEMINI_MODEL` or `MODEL`).
   - Auth: **Vertex AI only.** `agents.ts` forces `GOOGLE_GENAI_USE_VERTEXAI=true` (also settable as `GOOGLE_GENAI_USE_ENTERPRISE`) and deletes `GEMINI_API_KEY` / `GOOGLE_GENAI_API_KEY` / `GOOGLE_API_KEY` from the environment at import. There is no API-key path and no key rotation — credentials come from Google Cloud ADC / IAM.
   - Rate limits: a 429 or 503 backs off and retries twice (15s, then 30s), honoring the model's own `retryDelay` when it sends one. See `nextAttempt` in `agents.ts`.
 
