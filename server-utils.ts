@@ -181,6 +181,21 @@ export function computeCompaction(rawText: string, summaryText: string): Compact
   return { rawTokens, compactedTokens, savedTokens, ratioPercent };
 }
 
+/**
+ * Strips the "Speaker N:" prefixes the Gemini transcriber prompt asks for.
+ *
+ * Used only on the degraded path — diarization was requested, Cloud STT failed, and Gemini
+ * transcribed instead. Its labels are prompt-derived, not acoustic: no timestamps, not stable
+ * between chunks, observed alternating for a single speaker. Dropping `turns` does not remove
+ * them because they are also inside the text.
+ *
+ * ponytail: numbered labels only. A model-inferred name ("Alice:") survives — a looser regex
+ * would eat real sentence openers like "Note:" or "Tomorrow:".
+ */
+export function stripSpeakerLabels(text: string): string {
+  return text.replace(/^[ \t]*Speaker\s*\d+\s*:[ \t]*/gim, "").trim();
+}
+
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   // Token estimation & Compaction self-check
   assert.equal(estimateTokens(""), 0);
@@ -253,6 +268,12 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(hourBucket(new Date(Date.UTC(2026, 10, 30, 23))), path.join("2026", "11", "30", "23"));
 
 
+  // Degraded-path label strip: numbered labels go, real sentence openers stay.
+  assert.equal(stripSpeakerLabels("Speaker 1: hi\nSpeaker 2: bye"), "hi\nbye");
+  assert.equal(stripSpeakerLabels("speaker 12:  spaced out"), "spaced out");
+  assert.equal(stripSpeakerLabels("Note: buy milk\nTomorrow: ship it"), "Note: buy milk\nTomorrow: ship it");
+  assert.equal(stripSpeakerLabels("Alice: named labels survive"), "Alice: named labels survive");
+  assert.equal(stripSpeakerLabels("ask Speaker 1: mid-line stays"), "ask Speaker 1: mid-line stays");
 
   console.log("server-utils self-check ✓");
 })();

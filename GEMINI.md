@@ -40,6 +40,8 @@ Scribant-Agent/
 ├── adk-events.ts          # Append-only immutable ADK Event Stream & disk persistence
 ├── workspace-tools.ts     # Google Workspace tools registry (Calendar, Tasks, Drive)
 ├── transcriber.ts         # Audio chunking & transcription utilities
+├── cloud-stt.ts           # Cloud STT sync requests (V2; diarization always routes to V1)
+├── stt-stream.ts          # Cloud STT streamingRecognize — one long-lived diarized recognition
 ├── openapi.ts             # Single source of truth Zod schemas & OpenAPI 3.0.3 spec
 ├── server.ts              # Express API endpoints & SSE streaming handlers
 ├── server-utils.ts        # Server helpers & validation wrappers
@@ -118,7 +120,7 @@ Agents should simply run `make` (or `make help`) in the terminal to inspect all 
 
 1. **Schema-First API Changes**: When adding or updating an API endpoint, **always** update [`openapi.ts`](file:///Users/luissala/development/agent-clinic-103/Scribant-Agent/openapi.ts) first, export the schema, and validate request/response in `server.ts` with `validatePayload`.
 2. **Immutable ADK Events**: Do NOT mutate existing ADK `Event` objects or fabricate synthetic LLM tool-call events outside the runner. ADK events are strictly immutable, point-in-time facts.
-3. **Preserve Self-Check Tests**: Every core module (`openapi.ts`, `agents.ts`, `orchestrator.ts`, `memory.ts`, `adk-events.ts`, `server-utils.ts`, `workspace-tools.ts`, `transcriber.ts`) includes an `if (import.meta.url === ...)` self-check suite. When modifying a module, ensure its self-check passes during `npm run check`.
+3. **Preserve Self-Check Tests**: Every core module (`openapi.ts`, `agents.ts`, `orchestrator.ts`, `memory.ts`, `adk-events.ts`, `server-utils.ts`, `workspace-tools.ts`, `transcriber.ts`, `cloud-stt.ts`, `stt-stream.ts`, `speaker-registry.ts`) includes an `if (import.meta.url === ...)` self-check suite. When modifying a module, ensure its self-check passes during `npm run check`.
 4. **Light-Mode Warm Stone UI Theme**: UI components in `src/` follow Scribant's warm stone aesthetic (`bg-stone-50`, `border-stone-200`, `text-stone-800`, `amber-600` accents). Avoid dark-mode purple/violet clichés.
 
 ---

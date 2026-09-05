@@ -304,9 +304,20 @@ export function foldUtterances(
   let current = open;
 
   for (const u of utterances) {
-    const text = u.text.trim();
+    let text = u.text.trim();
     if (!text) continue;
     const { kind, open: next } = absorb(current, u, opts);
+    // `toUtterances` bakes the "Speaker N: " prefix into the text, because that is what the editor
+    // and the downstream agents read. When this utterance CONTINUES the open paragraph it is by
+    // definition the same speaker (break rule 2), so re-stating the label mid-paragraph would
+    // render "Speaker 2: hey Speaker 2: still me" — one label per 8s chunk, forever. A label that
+    // opens a NEW paragraph is kept: a length-capped monologue should name its speaker again.
+    // `current.words > 0` matters: the FIRST utterance also reports "none" (there is nothing to
+    // break away from), and stripping there would leave the opening paragraph unattributed.
+    if (kind === "none" && current.words > 0 && u.speaker) {
+      const prefix = `${u.speaker}: `;
+      if (text.startsWith(prefix)) text = text.slice(prefix.length);
+    }
     addition += SEPARATORS[kind] + text;
     current = next;
   }
@@ -346,6 +357,8 @@ export interface TranscribeResponse {
   text: string;
   speakerCount?: number;
   turns?: TranscribeTurn[];
+  /** Server-side latch: true once THIS SESSION has ever held 2+ speakers. See speaker-registry.ts. */
+  multiSpeaker?: boolean;
 }
 
 /**
@@ -357,9 +370,20 @@ export interface TranscribeResponse {
  * `"Speaker "` anywhere. That sniff is what made breaks sticky: once any chunk mentioned a speaker,
  * every later chunk matched too, so every append broke forever after.
  *
- * A speaker label is attached ONLY when the chunk actually holds more than one — a solo recording
+ * A speaker label is attached ONLY when the SESSION holds more than one speaker — a solo recording
  * returns `undefined`, which reads as narration and lets consecutive chunks flow together. Labelling
  * a lone speaker would break the transcript between every chunk.
+ *
+ * "Session", not "chunk", is load-bearing and was the original bug. Deciding per chunk means a
+ * window in which only one of two people happened to speak comes back unlabelled, and `speakerKey`
+ * maps every absent label to "" — so two CONSECUTIVE unlabelled windows share a key and merge into
+ * one paragraph, running two different people together. (An unlabelled window after a labelled one
+ * does break.) The server latches the fact once two voices are confirmed across chunks and sends it
+ * as `multiSpeaker`.
+ *
+ * Speaker labels themselves are CHUNK-LOCAL — "Speaker 1" in consecutive chunks is not guaranteed
+ * to be the same person. Acoustic re-identification across requests was tried and measurably made
+ * things worse; see speaker-registry.ts.
  */
 export function toUtterances(res: TranscribeResponse, source: UtteranceSource): Utterance[] {
   const scene = (text: string) => (text.trimStart().startsWith("[Meeting") ? true : undefined);
@@ -367,7 +391,18 @@ export function toUtterances(res: TranscribeResponse, source: UtteranceSource): 
   const turns = res.turns ?? [];
   if (turns.length) {
     const distinct = new Set(turns.map(t => (t.speaker ?? "").trim()).filter(Boolean));
-    const multi = distinct.size > 1 || (res.speakerCount ?? 0) > 1;
+    // Label when THIS chunk shows two voices, or when the session has been latched multi-speaker.
+    // Both halves are load-bearing.
+    //
+    // Without the first, the chunk that actually catches two people goes unlabelled — the latch
+    // needs corroboration across chunks, so it is still false on that very chunk.
+    //
+    // Without the second, consecutive chunks in which only ONE of two people speaks all come back
+    // unlabelled. `speakerKey` maps every absent label to "", so those chunks share a key and MERGE
+    // into one paragraph — two different people run together with no break. (An unlabelled chunk
+    // following a LABELLED one does break; "" and "speaker 2" differ. It is unlabelled-next-to-
+    // unlabelled that collapses, which is exactly what a solo chunk in a two-person session is.)
+    const multi = (res.multiSpeaker ?? false) || distinct.size > 1;
 
     return turns
       .filter(t => t.text?.trim())
@@ -396,6 +431,7 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
   const eq = (a: unknown, b: unknown, m: string) => {
     if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
   };
+  const ok = (cond: boolean, m: string) => { if (!cond) throw new Error(m); };
   const say = (text: string, extra: Partial<Utterance> = {}): Utterance =>
     ({ text, source: "stt", ...extra });
   // n words of filler, unpunctuated unless asked — the caps are the only rule that reads length.
@@ -514,6 +550,68 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
     "a meeting header opens a scene");
   eq(toUtterances({ text: "x", speakerCount: 2, turns: [{ speaker: "Speaker 1", text: "  " }] }, "stt"),
     [], "blank turns are dropped rather than emitted as empty paragraphs");
+
+  // --- the latch: a session that has met two people keeps labelling, even on a solo window ------
+  // This is the regression that folded one speaker's whole window into the other's paragraph.
+  const latchedSolo = {
+    text: "still just me",
+    speakerCount: 2,
+    multiSpeaker: true,
+    turns: [{ speaker: "Speaker 2", text: "still just me" }],
+  };
+  eq(toUtterances(latchedSolo, "stt"),
+    [{ text: "Speaker 2: still just me", speaker: "Speaker 2", source: "stt", startsScene: undefined }],
+    "a latched session labels a window holding only one voice");
+  eq(joinUtterances([...toUtterances(twoSpeakers, "stt"), ...toUtterances(latchedSolo, "stt")]),
+    "Speaker 1: morning\n\nSpeaker 2: hey still just me",
+    "...and that label keeps Speaker 2's window out of Speaker 1's paragraph");
+  // The label is stated ONCE per paragraph. Every chunk arrives prefixed, so without the strip in
+  // foldUtterances a single speaker renders "Speaker 2: hey Speaker 2: still just me" and gains a
+  // label every 8 seconds for as long as they keep talking.
+  ok(!joinUtterances([...toUtterances(twoSpeakers, "stt"), ...toUtterances(latchedSolo, "stt")])
+    .includes("hey Speaker 2:"), "a continued speaker does not re-state their label mid-paragraph");
+  // ...but a paragraph the length cap forces open DOES re-state it, so the new block is attributed.
+  eq(joinUtterances([
+      { text: `Speaker 1: ${filler(HARD_CAP_WORDS)}`, speaker: "Speaker 1", source: "stt" },
+      { text: "Speaker 1: and then some more", speaker: "Speaker 1", source: "stt" }])
+      .split("\n\n").length, 2, "a length-capped break opens a new paragraph");
+  ok(joinUtterances([
+      { text: `Speaker 1: ${filler(HARD_CAP_WORDS)}`, speaker: "Speaker 1", source: "stt" },
+      { text: "Speaker 1: and then some more", speaker: "Speaker 1", source: "stt" }])
+      .endsWith("Speaker 1: and then some more"), "...and it keeps the label at the top of it");
+
+  eq(toUtterances({ ...solo, multiSpeaker: false }, "stt"),
+    [{ text: "just me talking", speaker: undefined, source: "stt", startsScene: undefined }],
+    "an explicit false latch still leaves solo dictation unlabelled");
+  eq(toUtterances({ text: "x", speakerCount: 2, multiSpeaker: false, turns: [{ speaker: "Speaker 1", text: "hi" }] }, "stt")[0].speaker,
+    undefined, "the server's latch outranks a stale per-chunk speakerCount");
+
+  // The fold-in the latch exists to prevent: two consecutive chunks, each holding one voice but a
+  // DIFFERENT one, both unlabelled. Their speakerKeys are both "" so they merge into one paragraph
+  // and two people are run together. With the latch they carry labels and break apart.
+  eq(joinUtterances([...toUtterances({ text: "Sam says one thing" }, "stt"),
+                     ...toUtterances({ text: "Manuela says another" }, "stt")]),
+    "Sam says one thing Manuela says another",
+    "unlabelled + unlabelled merges — this is the bug, shown here so the fix below has a baseline");
+  eq(joinUtterances([
+      ...toUtterances({ text: "x", multiSpeaker: true, turns: [{ speaker: "Speaker 1", text: "Sam says one thing" }] }, "stt"),
+      ...toUtterances({ text: "x", multiSpeaker: true, turns: [{ speaker: "Speaker 2", text: "Manuela says another" }] }, "stt")]),
+    "Speaker 1: Sam says one thing\n\nSpeaker 2: Manuela says another",
+    "...and the latch keeps two one-voice chunks in separate paragraphs");
+  // An unlabelled chunk after a labelled one still breaks — the Gemini fallback returns no turns,
+  // and it must not be absorbed into the last speaker's paragraph.
+  eq(joinUtterances([
+      ...toUtterances({ text: "x", multiSpeaker: true, turns: [{ speaker: "Speaker 2", text: "hey there" }] }, "stt"),
+      ...toUtterances({ text: "fallback text, no turns" }, "stt")]),
+    "Speaker 2: hey there\n\nfallback text, no turns",
+    "an unlabelled fallback chunk is never attributed to the previous speaker");
+
+  // The FIRST chunk to catch two people is always unlatched — corroboration takes two chunks — so
+  // the chunk's own evidence has to be enough on its own, or that exchange goes out unlabelled.
+  eq(toUtterances({ text: "x", multiSpeaker: false, turns: [
+      { speaker: "Speaker 1", text: "morning" }, { speaker: "Speaker 2", text: "hey" }] }, "stt")
+      .map(u => u.speaker),
+    ["Speaker 1", "Speaker 2"], "a chunk holding two voices is labelled before the latch corroborates");
 
   // --- classifyMode: the opening words decide, after markers and filler are peeled off ---
   eq(classifyMode("I need to call the plumber"), "intent", "explicit commitment");

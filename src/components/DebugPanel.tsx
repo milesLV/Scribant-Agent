@@ -84,7 +84,7 @@ export function classifyEvent(event: AdkEvent): {
       label: "stt:transcribe",
       isMemory: false,
       status: "success",
-      summaryText: `Cloud STT V2: ${wordCount} words, ${speakerCount} speaker(s)${textVal ? ` — "${textVal.slice(0, 70)}"` : ""}`,
+      summaryText: `Cloud STT: ${wordCount} words, ${speakerCount} speaker(s) this chunk${textVal ? ` — "${textVal.slice(0, 70)}"` : ""}`,
     };
   }
 

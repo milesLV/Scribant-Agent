@@ -249,31 +249,69 @@ export const SearchResponseSchema = z.object({
 });
 
 export const TranscribeAudioRequestSchema = z.object({
-  audio: z.string().describe("Base64-encoded audio chunk data (e.g., 8-10s Opus)."),
+  audio: z.string().describe("Base64-encoded audio for ONE self-contained chunk."),
   mimeType: z.string().optional().describe("Audio MIME type (default: audio/webm)."),
   source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
-  enableDiarization: z.boolean().optional().describe("Whether to use Google Cloud STT V2 speaker diarization."),
-  minSpeakers: z.number().min(1).max(8).optional().describe("Minimum expected speakers (default: 1)."),
+  enableDiarization: z.boolean().optional().describe("Whether to use Google Cloud STT speaker diarization."),
+  minSpeakers: z.number().min(1).max(8).optional().describe("Minimum expected speakers (default: 1 — let the recognizer decide; see cloud-stt.ts)."),
   maxSpeakers: z.number().min(1).max(8).optional().describe("Maximum expected speakers (default: 5)."),
+  sessionId: z.string().optional().describe("Session key for the multi-speaker latch. Without it each chunk decides labelling alone."),
 });
 
 export const TranscribeAudioResponseSchema = z.object({
   text: z.string().describe("Verbatim or diarized transcribed text."),
   source: z.enum(["mic", "tab"]).describe("Audio capture source tag."),
-  provider: z.enum(["gemini", "google_cloud_stt"]).optional().describe("STT engine used."),
-  speakerCount: z.number().optional().describe("Number of distinct detected speakers."),
+  // Required: a silent fall back to Gemini flattens diarization, and the client can only surface
+  // that degradation if it is always told which engine answered.
+  provider: z.enum(["gemini", "google_cloud_stt"]).describe("STT engine that produced this result."),
+  speakerCount: z.number().optional().describe("Distinct speakers in THIS chunk (labels are chunk-local — see speaker-registry.ts)."),
   turns: z
     .array(
       z.object({
-        speaker: z.string(),
+        speaker: z.string().describe("Chunk-local speaker label, e.g. \"Speaker 1\"."),
         text: z.string(),
-        startMs: z.number().optional(),
+        startMs: z.number().optional().describe("Chunk-relative start time."),
         endMs: z.number().optional(),
       })
     )
     .optional()
-    .describe("Diarized speaker dialogue turns."),
+    .describe("Diarized speaker dialogue turns for this chunk. Absent when diarization was off or degraded."),
+  multiSpeaker: z.boolean().optional().describe("Latched: true once the session has seen 2+ speakers in 2+ chunks. Keeps labels on solo chunks."),
+  degraded: z.boolean().optional().describe("True when diarization was requested but could not be produced (Cloud STT failed, Gemini answered)."),
 });
+
+/* --- /api/stt/stream (WebSocket) ---------------------------------------------------------------
+ * Not a REST path, so it has no OpenAPI entry — but its messages are payloads crossing a trust
+ * boundary, so they are defined here with the rest and validated with validatePayload, same as
+ * every other endpoint. The client opens the socket, sends ONE start message, then raw binary
+ * audio frames; `segment` cuts a fresh recognition before Google's 305s streaming limit.
+ */
+export const SttStreamStartSchema = z.object({
+  type: z.literal("start"),
+  sessionId: z.string().optional().describe("Capture session key, for telemetry correlation."),
+  source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
+  maxSpeakers: z.number().min(1).max(8).optional().describe("Upper bound on speakers (default: 5). The lower bound is always 1."),
+  mimeType: z.string().optional().describe("MediaRecorder container, e.g. 'audio/webm;codecs=opus'. Selects WEBM_OPUS vs OGG_OPUS."),
+});
+
+export const SttStreamControlSchema = z.discriminatedUnion("type", [
+  SttStreamStartSchema,
+  z.object({ type: z.literal("segment") }).describe("Close the current recognition and open a new one. Speaker numbering restarts."),
+  z.object({ type: z.literal("stop") }).describe("Close the recognition and the socket."),
+]);
+
+export const SttStreamMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("interim"), text: z.string() })
+    .describe("Non-final preview text. Never appended to the transcript."),
+  z.object({
+    type: z.literal("final"),
+    turns: z.array(z.object({ speaker: z.string(), text: z.string(), startMs: z.number().optional(), endMs: z.number().optional() })),
+    speakers: z.number().describe("Distinct speakers seen in this recognition so far. Stream-wide, not per-turn."),
+  }).describe("Committed turns. Append-only: previously sent turns are never revised."),
+  z.object({ type: z.literal("segment_due") })
+    .describe("The open recognition is nearing Google's 305s limit. The client must cut its recorder and reply with `segment`."),
+  z.object({ type: z.literal("error"), message: z.string() }),
+]);
 
 export const SttStatusResponseSchema = z.object({
   available: z.boolean().describe("Whether Google Cloud STT V2 is available."),

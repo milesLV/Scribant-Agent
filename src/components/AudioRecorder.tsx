@@ -8,6 +8,8 @@ import {
   type Utterance, type OpenParagraph,
 } from "../utils/paragraphs";
 import { useTabAudioCapture } from "../hooks/useTabAudioCapture";
+import { readSttConfig } from "../hooks/useChunkedCapture";
+import { useLiveCapture } from "../hooks/useLiveCapture";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useClickToEditCaret } from "../hooks/useClickToEditCaret";
 import { usePreservedSelection } from "../hooks/usePreservedSelection";
@@ -131,23 +133,6 @@ function caretOffsetFromPoint(x: number, y: number, container: Node): number | n
   return total;
 }
 
-function pickMimeType(): string {
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
-  return candidates.find((t) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) || "";
-}
-
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = reader.result as string;
-      resolve(result.slice(result.indexOf(",") + 1));
-    };
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
-
 // Maps speaker label strings to distinct badge color styles
 function getSpeakerBadgeColor(label: string): string {
   const clean = label.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -207,81 +192,37 @@ export default function AudioRecorder({
   const [useKeyboard, setUseKeyboard] = useState(false);
   const [tabAudioError, setTabAudioError] = useState<string | null>(null);
 
-  // Mic MediaRecorder refs for Cloud STT Diarization mode
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const micRecorderRef = useRef<MediaRecorder | null>(null);
-  const micStoppingRef = useRef(false);
+  // One reader for the diarization toggle, shared with both capture paths — this used to be a
+  // third local copy with its own default.
+  const isDiarizationActive = () => readSttConfig().enableDiarization;
 
-  // Helper to check if Diarization is toggled on in settings
-  const isDiarizationActive = () => {
-    try {
-      const saved = localStorage.getItem("scribant_stt_config");
-      if (saved) return Boolean(JSON.parse(saved).enableDiarization);
-    } catch {}
-    return false;
-  };
+  // Whether THIS listening session is diarizing, latched when the mic starts.
+  //
+  // Reading localStorage live in onresult instead was a silent data-loss bug: flipping the Admin
+  // toggle mid-session changed which branch onresult took without starting or stopping the Cloud
+  // STT capture that branch assumes. Switching ON mid-session suppressed every Web Speech final
+  // while no chunk capture was running, so the transcript simply stopped growing; switching OFF
+  // left both running and appended everything twice. The session now keeps whatever it started
+  // with until the user stops and starts again.
+  const diarizingRef = useRef(false);
 
-  // Uploads a mic audio chunk directly to Cloud STT /api/transcribe-audio
-  const uploadMicChunk = async (blob: Blob) => {
-    if (blob.size === 0) return;
-    try {
-      const base64 = await blobToBase64(blob);
-      let enableDiarization = true;
-      let minSpeakers = 1;
-      let maxSpeakers = 5;
-      try {
-        const saved = localStorage.getItem("scribant_stt_config");
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          enableDiarization = Boolean(parsed.enableDiarization);
-          if (parsed.minSpeakers) minSpeakers = Number(parsed.minSpeakers);
-          if (parsed.maxSpeakers) maxSpeakers = Number(parsed.maxSpeakers);
-        }
-      } catch {}
+  // ONE capture session id for both the mic and the shared tab, so a two-speaker exchange heard on
+  // either one latches the session for both. It is deliberately NOT App's orchestrator sessionId,
+  // which is nulled between runs and would drop the latch mid-conversation.
+  const captureSessionRef = useRef(`cap-${Date.now()}`);
 
-      const res = await fetch("/api/transcribe-audio", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          audio: base64,
-          mimeType: blob.type || "audio/webm",
-          source: "mic",
-          enableDiarization,
-          minSpeakers,
-          maxSpeakers,
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const utterances = toUtterances(data, "stt");
-      if (utterances.length) {
-        appendUtterances(utterances);
-        setInterimTranscript("");
-      }
-    } catch (err) {
-      console.warn("[mic-chunk] diarization chunk transcription failed:", err);
-    }
-  };
-
-  // Loops recording chunks while mic is active in diarization mode
-  const recordNextMicChunk = () => {
-    const stream = micStreamRef.current;
-    if (!stream || micStoppingRef.current) return;
-    const rec = new MediaRecorder(stream, { mimeType: pickMimeType() });
-    const parts: Blob[] = [];
-    rec.ondataavailable = (e) => {
-      if (e.data.size > 0) parts.push(e.data);
-    };
-    rec.onstop = () => {
-      uploadMicChunk(new Blob(parts, { type: rec.mimeType }));
-      recordNextMicChunk();
-    };
-    micRecorderRef.current = rec;
-    rec.start();
-    setTimeout(() => {
-      if (rec.state === "recording") rec.stop();
-    }, 8000);
-  };
+  const micCapture = useLiveCapture({
+    source: "stt",
+    sourceTag: "mic",
+    onChunk: ({ utterances }) => {
+      appendUtterances(utterances);
+      setInterimTranscript("");
+    },
+    // Cloud STT's own preview while streaming. It replaces Web Speech's, which is suppressed in
+    // diarization mode, so the box is never blank while someone is mid-sentence.
+    onInterim: text => setInterimTranscript(text),
+    onNotice: msg => setTabAudioError(msg),
+  });
 
   // Ref to block recognition results after a clear signal
   const ignoreSpeechResultsRef = useRef(false);
@@ -324,7 +265,7 @@ export default function AudioRecorder({
   // Shared-tab capture is entirely separate from the mic's Web Speech pipeline above — its own
   // record/upload/transcribe loop (see the hook) — and only ever APPENDS finished chunks onto the
   // same transcript the mic is building, tagged so they read as a distinct source. Chunks land
-  // roughly in completion order (~9s apart), not precisely interleaved by timestamp against
+  // roughly in completion order (one CHUNK_MS apart), not precisely interleaved by timestamp against
   // concurrent mic speech — good enough for an MVP; true chronological interleaving would need the
   // transcript to be a list of tagged segments instead of one flat string. Chunks now arrive AS
   // tagged segments (see toUtterances), but they are still flattened on append, so ordering is
@@ -332,6 +273,7 @@ export default function AudioRecorder({
   const { isSharing: isSharingTab, start: startTabAudio, stop: stopTabAudio } = useTabAudioCapture({
     onChunk: ({ utterances }) => appendUtterances(utterances),
     onError: (msg) => setTabAudioError(msg),
+    sessionId: captureSessionRef.current,
   });
 
   // Read during the proofResult effect, which must see CURRENT values without re-running every time
@@ -488,11 +430,14 @@ export default function AudioRecorder({
         }
       }
 
-      if (isDiarizationActive()) {
-        // In Diarization mode: Web Speech provides instant live typing preview,
-        // while Cloud STT V2 provides authoritative diarized turns into transcript.
-        const preview = (finalStr + " " + interimStr).replace(/\s+/g, " ").trim();
-        setInterimTranscript(preview);
+      if (diarizingRef.current) {
+        // In Diarization mode Cloud STT (V1 — V2 cannot diarize at all) owns the transcript. Web
+        // Speech is only a preview here, and ONLY while the chunked transport is running: the
+        // streaming transport sends its own interim results, and two writers on one preview box
+        // overwrite each other every few hundred milliseconds.
+        if (micCapture.mode() !== "streaming") {
+          setInterimTranscript((finalStr + " " + interimStr).replace(/\s+/g, " ").trim());
+        }
         return;
       }
 
@@ -570,11 +515,7 @@ export default function AudioRecorder({
       } catch {
         try { recognitionRef.current?.stop(); } catch {}
       }
-      // Stop mic MediaRecorder if running in diarization mode
-      micStoppingRef.current = true;
-      if (micRecorderRef.current?.state === "recording") micRecorderRef.current.stop();
-      micStreamRef.current?.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
+      micCapture.stop();
     } else {
       shouldListenRef.current = true;
       ignoreSpeechResultsRef.current = false;
@@ -582,15 +523,18 @@ export default function AudioRecorder({
       setIsEditingTranscript(false);
       setIsListening(true);
 
-      // Start Cloud STT chunking loop if Diarization mode is active
-      if (isDiarizationActive()) {
+      // Start the chunked Cloud STT capture if Diarization mode is active. Latched for the whole
+      // session so onresult and the capture loop can never disagree about which one owns the text.
+      diarizingRef.current = isDiarizationActive();
+      if (diarizingRef.current) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          micStreamRef.current = stream;
-          micStoppingRef.current = false;
-          recordNextMicChunk();
+          micCapture.start(stream, captureSessionRef.current);
         } catch (err: any) {
-          console.warn("[mic-chunk] Failed to get mic stream for diarization:", err);
+          // No mic stream means no Cloud STT chunks. Unlatch so Web Speech finals keep landing in
+          // the transcript instead of being suppressed in favour of a capture that never started.
+          diarizingRef.current = false;
+          console.warn("[mic-capture] Failed to get mic stream for diarization:", err);
         }
       }
 

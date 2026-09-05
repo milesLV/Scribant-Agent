@@ -1,4 +1,6 @@
-// Google Cloud Speech-to-Text V2 provider with acoustic speaker diarization.
+// Google Cloud Speech-to-Text provider with acoustic speaker diarization.
+// Recognition prefers V2; DIARIZATION always routes to V1 — V2's sync Recognize rejects
+// diarizationConfig outright (HTTP 400, every model and location).
 // Uses Google Cloud Application Default Credentials (ADC) to call speech.googleapis.com.
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
@@ -246,6 +248,37 @@ export async function transcribeWithCloudStt(
   };
 }
 
+// The V1 `config` block, split out from the request so it can be asserted without a network call.
+//
+// ponytail: the speaker floor stays at 1 — do NOT "help" the clusterer by raising it.
+//
+// Measured against the live V1 API, minSpeakerCount is ADVISORY, not the hard k>=N constraint the
+// name suggests, and every effect observed from raising it was harmful:
+//   - Real speech ignores it. On Google's own two-speaker sample (commercial_mono.wav), min=1 and
+//     min=2 gave byte-identical output on every 8s chunk, and a genuinely single-speaker span
+//     stayed at 1 speaker for min=1, min=2 AND min=3. Raising it buys nothing on clean audio.
+//   - It only bites when the clusterer is UNCERTAIN, and then it fabricates: on low-confidence
+//     audio a floor of 2 split one continuous speaker at an arbitrary pause, which is what a
+//     noisy shared-room mic looks like to the recognizer.
+// Zero measured benefit, non-zero measured harm. The live capture path pins this at 1 and the
+// Admin control sets the upper bound only. Raising the floor shipped once, in bce2bd7.
+//
+// Nothing else belongs here either: `model` (video/phone_call/latest_long) and `useEnhanced` were
+// measured to give byte-identical diarization, so they are cost without effect.
+export function buildV1Config(options: CloudSttOptions) {
+  const enableDiarization = options.enableDiarization !== false;
+  const minSpeakerCount = Math.max(1, options.minSpeakers ?? 1);
+  const maxSpeakerCount = Math.max(minSpeakerCount, options.maxSpeakers ?? 5);
+  return {
+    languageCode: options.languageCode || "en-US",
+    enableAutomaticPunctuation: true,
+    enableWordTimeOffsets: true,
+    diarizationConfig: enableDiarization
+      ? { enableSpeakerDiarization: true, minSpeakerCount, maxSpeakerCount }
+      : undefined,
+  };
+}
+
 // Transcribe using Google Cloud STT V1 API (native support for synchronous speaker diarization)
 async function transcribeWithCloudSttV1(
   cleanAudio: string,
@@ -253,29 +286,8 @@ async function transcribeWithCloudSttV1(
   projectId: string,
   options: CloudSttOptions
 ): Promise<CloudSttResult> {
-  const languageCode = options.languageCode || "en-US";
-  const minSpeakers = Math.max(1, options.minSpeakers ?? 1);
-  const maxSpeakers = Math.max(minSpeakers, options.maxSpeakers ?? 5);
-  const enableDiarization = options.enableDiarization !== false;
-
   const url = "https://speech.googleapis.com/v1/speech:recognize";
-  const requestBody = {
-    config: {
-      languageCode,
-      enableAutomaticPunctuation: true,
-      enableWordTimeOffsets: true,
-      diarizationConfig: enableDiarization
-        ? {
-            enableSpeakerDiarization: true,
-            minSpeakerCount: minSpeakers,
-            maxSpeakerCount: maxSpeakers,
-          }
-        : undefined,
-    },
-    audio: {
-      content: cleanAudio,
-    },
-  };
+  const requestBody = { config: buildV1Config(options), audio: { content: cleanAudio } };
 
   const response = await fetch(url, {
     method: "POST",
@@ -424,6 +436,20 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   const singleGrouped = groupWordsIntoSpeakerTurns(singleSpeakerWords);
   assert.equal(singleGrouped.turns.length, 1);
   assert.equal(singleGrouped.text, "Schedule a dentist appointment");
+
+  // 5. Diarization config: the floor must stay at 1. A floor of 2 forces the recognizer to
+  // manufacture a second speaker out of solo audio — the bug bce2bd7 shipped and this reverts.
+  const autoCfg = buildV1Config({ enableDiarization: true });
+  assert.equal(autoCfg.diarizationConfig?.minSpeakerCount, 1, "diarization must auto-detect, never floor at 2");
+  assert.equal(autoCfg.diarizationConfig?.maxSpeakerCount, 5);
+  // An explicit caller override is still honoured, and max is never allowed below min.
+  const forced = buildV1Config({ enableDiarization: true, minSpeakers: 3, maxSpeakers: 2 });
+  assert.equal(forced.diarizationConfig?.minSpeakerCount, 3);
+  assert.equal(forced.diarizationConfig?.maxSpeakerCount, 3, "max is raised to meet min");
+  // Diarization off means no diarizationConfig at all.
+  assert.equal(buildV1Config({ enableDiarization: false }).diarizationConfig, undefined);
+  // These were measured as no-ops for diarization; keep them out of the request.
+  assert.ok(!("model" in autoCfg) && !("useEnhanced" in autoCfg), "no model/useEnhanced cargo cult");
 
   console.log("cloud-stt self-check ✓");
 })();
