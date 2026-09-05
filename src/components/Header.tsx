@@ -230,7 +230,7 @@ export default function Header({
                   onChange={(e) => onSetAllowUncertain(e.target.checked)}
                   className="accent-amber-600"
                 />
-                <span className="text-[12.5px] font-semibold text-stone-600 font-sans">Include uncertain items</span>
+                <span className="text-[12.5px] font-semibold text-stone-600 font-sans">Include draft items</span>
               </label>
             )}
             {/* Lives here rather than above the live notes so that panel's header can hold the

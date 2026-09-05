@@ -378,6 +378,9 @@ export default function AudioRecorder({
   // Keyed on length, not content: only growth matters, and a number compares in O(1).
   const transcriptScrollRef = useStickToBottom<HTMLDivElement>(transcript.length + interimTranscript.length);
   const summaryScrollRef = useStickToBottom<HTMLDivElement>(liveSummary.length);
+  // The edit-mode interim strip is height-capped, so it needs its own pin: without it the cap
+  // would show the head of a long utterance and hide the newest words behind the fold.
+  const interimScrollRef = useStickToBottom<HTMLDivElement>(interimTranscript.length);
 
   // Main Ideas slides out over the summary panel. It is absolutely positioned inside that panel so
   // it can be sized against it (85% of its width, its exact height), which rules out the native
@@ -897,7 +900,10 @@ export default function AudioRecorder({
                 {/* Read-only, not inside the textarea: in there interim words would be editable
                     and would get committed as real text before the recognizer finalized them. */}
                 {isListening && interimTranscript && (
-                  <div className="shrink-0 pt-1 text-[11px] text-amber-500 italic animate-pulse truncate">
+                  <div
+                    ref={interimScrollRef}
+                    className="shrink-0 pt-1 max-h-20 overflow-y-auto text-[11px] text-amber-500 italic animate-pulse"
+                  >
                     {interimTranscript}
                   </div>
                 )}
@@ -917,10 +923,16 @@ export default function AudioRecorder({
                 {(transcript || interimTranscript) ? (
                   <div className="leading-relaxed font-sans text-stone-750">
                     {renderSpeakerText(transcript)}
+                    {/* Deliberately uncapped: the whole in-flight utterance stays readable and
+                        useStickToBottom on the scroll container follows it down as it wraps.
+                        ponytail: in diarization mode interimTranscript is finalStr + interimStr
+                        and grows until Cloud STT's authoritative turn lands, so a long preview
+                        can push the finalized transcript out of view. Cap it like the edit-mode
+                        strip (max-h + overflow-y-auto) if that becomes annoying. */}
                     {interimTranscript && (
-                      <div className="mt-2 text-[11px] text-amber-600 italic font-medium animate-pulse flex items-center gap-1.5 bg-amber-50/70 p-1.5 rounded-lg border border-amber-200/60">
-                        <Radio className="w-3 h-3 text-amber-500 animate-spin shrink-0" />
-                        <span className="line-clamp-1">{interimTranscript}...</span>
+                      <div className="mt-2 text-[11px] text-amber-600 italic font-medium animate-pulse flex items-start gap-1.5 bg-amber-50/70 p-1.5 rounded-lg border border-amber-200/60">
+                        <Radio className="w-3 h-3 mt-0.5 text-amber-500 animate-spin shrink-0" />
+                        <span>{interimTranscript}...</span>
                       </div>
                     )}
                   </div>

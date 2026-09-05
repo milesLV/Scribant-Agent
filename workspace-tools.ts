@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 interface EventInput { title: string; description?: string; start: string; end?: string; allDay?: boolean; timeZone?: string; }
 interface TaskInput { title: string; notes?: string; dueDate?: string; }
 
-async function googleFetch(method: "GET" | "POST", url: string, token: string, body?: unknown): Promise<any> {
+async function googleFetch(method: "GET" | "POST" | "PATCH", url: string, token: string, body?: unknown): Promise<any> {
   const res = await fetch(url, {
     method,
     headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
@@ -27,6 +27,9 @@ async function googleFetch(method: "GET" | "POST", url: string, token: string, b
 }
 const googlePost = (url: string, token: string, body: unknown) => googleFetch("POST", url, token, body);
 const googleGet = (url: string, token: string) => googleFetch("GET", url, token);
+// PATCH, not PUT: Google treats PUT as a full replace, so any field we omit would be wiped. The
+// planner only ever re-states the fields it knows about, so a merge-update is the correct verb.
+const googlePatch = (url: string, token: string, body: unknown) => googleFetch("PATCH", url, token, body);
 
 // All-day events use {date} (end exclusive per Google); timed events use {dateTime, timeZone}.
 // Exported for the self-check — the end-date bump is the branchy bit worth pinning.
@@ -56,6 +59,18 @@ export async function gcalCreateEvent(token: string, event: EventInput): Promise
   return data.id;
 }
 
+const gcalEventUrl = (eventId: string) =>
+  `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`;
+
+// Edit an event already on the calendar rather than booking a second one. The live planner keeps
+// refining the same appointment as the speaker adds a time, a place or a duration.
+export async function gcalUpdateEvent(token: string, eventId: string, event: EventInput): Promise<string> {
+  const { start, end } = toGcalDates(event);
+  const data = await googlePatch(gcalEventUrl(eventId), token,
+    { summary: event.title, description: event.description, start, end });
+  return data.id;
+}
+
 // Tasks has no "@default" alias on the tasklist path the way Calendar has "primary" — the id has to
 // be looked up, and an account that has never opened Tasks owns no list at all. Both cases surface
 // as a bare 404 "Not Found". The first list is the account's default one.
@@ -75,6 +90,12 @@ export async function gtasksCreateTask(token: string, task: TaskInput): Promise<
     token,
     { title: task.title, notes: task.notes, ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {}) },
   );
+  return data.id;
+}
+
+export async function gtasksUpdateTask(token: string, taskId: string, task: TaskInput): Promise<string> {
+  const data = await googlePatch(tasksUrl(await resolveTaskListId(token), taskId), token,
+    { title: task.title, notes: task.notes, ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {}) });
   return data.id;
 }
 
@@ -176,6 +197,29 @@ export const WORKSPACE_ACTIONS: Record<string, WorkspaceAction> = {
       dueDate: z.string().optional().describe("Deadline as ISO date YYYY-MM-DD, or empty string if open-ended"),
     }),
     run: async (token, task) => ({ taskId: await gtasksCreateTask(token, task) }),
+  },
+  update_calendar_event: {
+    description: "Update an event already on the user's Google Calendar, in place. Use when details of an event you previously created have changed — never create a second event for the same appointment.",
+    parameters: z.object({
+      id: z.string().min(1).describe("The eventId returned when this event was created"),
+      title: z.string().min(1).describe("Event summary/title"),
+      description: z.string().optional().describe("Event description/context; empty string if none"),
+      start: z.string().min(1).describe("Start as ISO-8601 local datetime, e.g. 2026-07-10T15:00:00"),
+      end: z.string().optional().describe("End as ISO-8601 local datetime; 30 minutes after start if no duration implied"),
+      allDay: z.boolean().optional().describe("True if it spans whole day(s) with no specific clock time"),
+      timeZone: z.string().optional().describe("IANA time zone identifier, e.g. America/Los_Angeles"),
+    }),
+    run: async (token, { id, ...event }) => ({ eventId: await gcalUpdateEvent(token, id, event) }),
+  },
+  update_task: {
+    description: "Update a todo already in the user's Google Tasks list, in place. Use when a task you previously created gains a deadline or better wording.",
+    parameters: z.object({
+      id: z.string().min(1).describe("The taskId returned when this task was created"),
+      title: z.string().min(1).describe("Compact title of the task"),
+      notes: z.string().optional().describe("Descriptions, sub-items, or context; empty string if none"),
+      dueDate: z.string().optional().describe("Deadline as ISO date YYYY-MM-DD, or empty string if open-ended"),
+    }),
+    run: async (token, { id, ...task }) => ({ taskId: await gtasksUpdateTask(token, id, task) }),
   },
   create_drive_folder: {
     description: "Create (or reuse) an organized folder in Google Drive for this session's documents.",
@@ -320,6 +364,27 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
     assert.ok(calls[1].startsWith("PATCH ") && calls[1].includes("uploadType=media"));
     assert.equal(uploaded, "# Hi");
 
+    // Update = PATCH the existing resource by id, NOT a second POST. This is the whole point of the
+    // action: the live planner refines one appointment across many ticks.
+    let patched = "";
+    let patchBody: any = null;
+    globalThis.fetch = (async (url: any, init: any) => {
+      patched = `${init.method} ${url}`;
+      patchBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ id: "evt 1" }), { status: 200 });
+    }) as any;
+    assert.equal(await gcalUpdateEvent("tok", "evt 1", { title: "Dentist", start: "2026-08-22T09:00:00" }), "evt 1");
+    assert.ok(patched.startsWith("PATCH "), `update must PATCH, got ${patched}`);
+    assert.ok(patched.includes("events/evt%201"), "event id must be URL-encoded");
+    assert.equal(patchBody.summary, "Dentist");
+
+    globalThis.fetch = withList((url, init) => {
+      patched = `${init.method} ${url}`;
+      return new Response(JSON.stringify({ id: "t9" }), { status: 200 });
+    });
+    assert.equal(await gtasksUpdateTask("tok", "t9", { title: "Sweep", dueDate: "2026-08-22" }), "t9");
+    assert.ok(patched.startsWith("PATCH ") && patched.includes("lists/list-abc/tasks/t9"), patched);
+
     // A failed upload must not report success just because the metadata call worked.
     globalThis.fetch = (async (url: any) =>
       String(url).includes("uploadType=media")
@@ -333,7 +398,8 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   // The registry: every capability /api/execute can dispatch to.
   assert.deepEqual(
     Object.keys(WORKSPACE_ACTIONS),
-    ["create_calendar_event", "create_task", "create_drive_folder", "create_drive_doc", "create_google_doc", "create_google_sheet"],
+    ["create_calendar_event", "create_task", "update_calendar_event", "update_task",
+     "create_drive_folder", "create_drive_doc", "create_google_doc", "create_google_sheet"],
   );
 
   // The schemas are what /api/execute validates with, so the rejections matter as much as the shapes.
@@ -341,6 +407,9 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.throws(() => WORKSPACE_ACTIONS.create_calendar_event.parameters.parse({ title: "x" }));                   // no start
   assert.throws(() => WORKSPACE_ACTIONS.create_task.parameters.parse({ notes: "x" }));                             // no title
   assert.throws(() => WORKSPACE_ACTIONS.create_drive_doc.parameters.parse({ fileName: "x.md" }));                  // no content
+  // An update without the created id would silently become a no-op instead of an error.
+  assert.throws(() => WORKSPACE_ACTIONS.update_calendar_event.parameters.parse({ title: "x", start: "2026-01-01T09:00:00" }));
+  assert.throws(() => WORKSPACE_ACTIONS.update_task.parameters.parse({ title: "x" }));
   assert.deepEqual(
     WORKSPACE_ACTIONS.create_task.parameters.parse({ title: "Buy milk", notes: "", dueDate: "2026-07-11" }),
     { title: "Buy milk", notes: "", dueDate: "2026-07-11" },

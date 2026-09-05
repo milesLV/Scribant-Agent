@@ -269,9 +269,9 @@ export default function ActiveSession({
                     subtitle={item.description}
                     onSubtitle={v => onUpdateCalendar(idx, { ...item, description: v })}
                     subtitlePlaceholder="Configure description..."
-                    chip={<UndoChip label="Hooked" color="emerald" onUndo={() => onUndoCalendar(idx)} />}
+                    chip={<UndoChip label="Scheduled" color="emerald" onUndo={() => onUndoCalendar(idx)} />}
                     button={<ActionButton busy={executing.calendar === idx} disabled={executing.calendar !== null}
-                      onClick={() => runOnRow("calendar", idx, () => onExecuteCalendar(idx))} icon={Calendar} label="Add Event" />}
+                      onClick={() => runOnRow("calendar", idx, () => onExecuteCalendar(idx))} icon={Calendar} label="Add to Calendar" />}
                   >
                     <div className="grid grid-cols-2 gap-2 text-[10px] font-sans pt-1 w-full">
                       {(["start", "end"] as const).map(field => (
@@ -313,9 +313,9 @@ export default function ActiveSession({
                   subtitle={item.notes}
                   onSubtitle={v => onUpdateTask(idx, { ...item, notes: v })}
                   subtitlePlaceholder="Add notes..."
-                  chip={<UndoChip label="Logged" color="purple" onUndo={() => onUndoTask(idx)} />}
+                  chip={<UndoChip label="Added" color="purple" onUndo={() => onUndoTask(idx)} />}
                   button={<ActionButton busy={executing.task === idx} disabled={executing.task !== null}
-                    onClick={() => runOnRow("task", idx, () => onExecuteTask(idx))} icon={CheckSquare} label="Log To-Do" />}
+                    onClick={() => runOnRow("task", idx, () => onExecuteTask(idx))} icon={CheckSquare} label="Add To-Do" />}
                 >
                   <div className="flex flex-wrap items-center gap-1.5 mt-1">
                     {item.assignee && (

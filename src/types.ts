@@ -20,6 +20,8 @@ export interface CalendarEvent {
   timeZone?: string; // IANA time zone identifier (e.g. America/Los_Angeles)
   status: 'pending' | 'scheduled' | 'failed';
   eventId?: string;
+  // Fingerprint of the field values last written to Google. Drift means the remote copy is stale.
+  synced?: string;
   error?: string;
   uncertain?: boolean;
   explicitCommand?: boolean; // speaker directly instructed this action -> eligible for auto-execute
@@ -33,6 +35,8 @@ export interface TaskItem {
   dueDate?: string; // ISO date (YYYY-MM-DD) deadline, if the action is time-bounded
   status: 'pending' | 'created' | 'failed';
   taskId?: string;
+  // Fingerprint of the field values last written to Google. Drift means the remote copy is stale.
+  synced?: string;
   error?: string;
   uncertain?: boolean;
   explicitCommand?: boolean;

@@ -8,7 +8,9 @@ import ApiDocsView from "./components/ApiDocsView";
 import { StreamRun, AnalysisResult, ProofResult, AutonomyMode, CalendarEvent, TaskItem, SearchQueryItem } from "./types";
 import {
   createCalendarEvent,
+  updateCalendarEvent,
   createGoogleTask,
+  updateGoogleTask,
   createDriveFolder,
   uploadDriveFile,
   deleteCreatedItem,
@@ -16,6 +18,8 @@ import {
 } from "./utils/google-workspace";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { isAutoExecutable } from "./utils/autonomy";
+import { isSameEvent, isSameTask, isSameQuery } from "./utils/item-match";
+
 
 // New characters of speech required before the expensive classifier stage re-runs.
 // Set to 15 so short single-sentence requests trigger extraction immediately.
@@ -102,25 +106,14 @@ export default function App() {
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
+  // Keys of live-draft items whose auto-write is in flight. The live pipeline re-plans every
+  // tick and keeps re-offering an item as `pending` until its status flips, so without this the
+  // same event would be created once per tick until the first create returned.
+  const autoFiringRef = useRef<Set<string>>(new Set());
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
   };
-  // Normalize string for fuzzy comparison (strip punctuation, extra spaces, casing)
-  const normalizeText = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9\s]/gi, "").replace(/\s+/g, " ").trim();
-  const isTextMatch = (t1: string, t2: string, threshold = 0.55): boolean => {
-    const n1 = normalizeText(t1);
-    const n2 = normalizeText(t2);
-    if (!n1 || !n2) return false;
-    if (n1 === n2) return true;
-    if (n1.includes(n2) || n2.includes(n1)) return true;
-    const words1 = new Set(n1.split(" "));
-    const words2 = new Set(n2.split(" "));
-    const intersection = [...words1].filter(w => words2.has(w)).length;
-    const union = new Set([...words1, ...words2]).size;
-    return union > 0 && (intersection / union) >= threshold;
-  };
-  const isQueryMatch = (q1: string, q2: string) => isTextMatch(q1, q2, 0.7);
 
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage),
   // merging with previous live draft state to retain all discovered tasks, calendar events, and search queries.
@@ -131,10 +124,7 @@ export default function App() {
     const searchQueries: SearchQueryItem[] = prevSearches.map(ps => ({ ...ps }));
 
     for (const q of incomingSearches) {
-      const matchIndex = searchQueries.findIndex(existing =>
-        isQueryMatch(existing.query, q.query) ||
-        (q.sourceText && existing.sourceText && existing.sourceText === q.sourceText)
-      );
+      const matchIndex = searchQueries.findIndex(existing => isSameQuery(existing, q));
 
       if (matchIndex >= 0) {
         const existing = searchQueries[matchIndex];
@@ -152,16 +142,19 @@ export default function App() {
     const calendarEvents: CalendarEvent[] = prevEvents.map(pe => ({ ...pe }));
 
     for (const evt of incomingEvents) {
-      const matchIndex = calendarEvents.findIndex(existing =>
-        (isTextMatch(existing.title, evt.title, 0.5) && (existing.start === evt.start || !evt.start)) ||
-        (evt.sourceText && existing.sourceText && existing.sourceText === evt.sourceText)
-      );
+      const matchIndex = calendarEvents.findIndex(existing => isSameEvent(existing, evt));
 
       if (matchIndex >= 0) {
         const existing = calendarEvents[matchIndex];
-        calendarEvents[matchIndex] = existing.status === "scheduled" || existing.status === "failed"
+        // An ALREADY-SCHEDULED event still takes the newer field values — the speaker adding a time
+        // or a place is refining one appointment, not describing a second. `evt` carries no status
+        // or eventId (the classifier doesn't emit them), so spreading it last keeps the booking
+        // intact while the details move; the autonomy effect notices the drift and PATCHes Google.
+        // A failed write stays failed: re-arming it would retry on every tick forever.
+        calendarEvents[matchIndex] = existing.status === "failed"
           ? { ...evt, ...existing }
-          : { ...existing, ...evt, status: "pending", uncertain: !!evt.uncertain, allDay: !!evt.allDay };
+          : { ...existing, ...evt, status: existing.status === "scheduled" ? "scheduled" : "pending",
+              uncertain: !!evt.uncertain, allDay: !!evt.allDay };
       } else {
         calendarEvents.push({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay });
       }
@@ -173,16 +166,16 @@ export default function App() {
     const tasks: TaskItem[] = prevTasks.map(pt => ({ ...pt }));
 
     for (const t of incomingTasks) {
-      const matchIndex = tasks.findIndex(existing =>
-        isTextMatch(existing.title, t.title, 0.55) ||
-        (t.sourceText && existing.sourceText && existing.sourceText === t.sourceText)
-      );
+      const matchIndex = tasks.findIndex(existing => isSameTask(existing, t));
 
       if (matchIndex >= 0) {
         const existing = tasks[matchIndex];
-        tasks[matchIndex] = existing.status === "created" || existing.status === "failed"
+        // Same rule as calendar above: a created task keeps its taskId but takes the newer wording
+        // and due date, so "actually it's due Friday" edits the task instead of adding a second one.
+        tasks[matchIndex] = existing.status === "failed"
           ? { ...t, ...existing }
-          : { ...existing, ...t, status: "pending", uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || existing.dueDate };
+          : { ...existing, ...t, status: existing.status === "created" ? "created" : "pending",
+              uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || existing.dueDate };
       } else {
         tasks.push({ ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined });
       }
@@ -480,10 +473,18 @@ export default function App() {
   // One row per executable item kind: which analysis list it lives in, how to run it, and what to
   // say afterwards. The approve buttons and the autonomy pass both read this table, so a manual
   // execution and an automatic one can never drift apart.
+  // Exactly the field values a write sends to Google. Stamped onto the item after every successful
+  // write; if it no longer matches, the speaker refined the item and the remote copy is stale.
+  const eventFingerprint = (e: any) => JSON.stringify([e.title, e.description, e.start, e.end, e.allDay]);
+  const taskFingerprint = (t: any) => JSON.stringify([t.title, t.notes, t.dueDate]);
+
   const KINDS = {
     calendar: {
       list: "calendarEvents",
-      exec: async (e: any) => ({ status: "scheduled", eventId: await createCalendarEvent(token, e) }),
+      idKey: "eventId" as const,
+      fingerprint: eventFingerprint,
+      update: async (e: any) => ({ synced: eventFingerprint(e), eventId: await updateCalendarEvent(token, e.eventId, e) }),
+      exec: async (e: any) => ({ status: "scheduled", synced: eventFingerprint(e), eventId: await createCalendarEvent(token, e) }),
       done: (e: any) => `Successfully scheduled "${e.title}" on Google Calendar!`,
       auto: (e: any) => `Auto-scheduled "${e.title}" on Google Calendar, as requested.`,
       failed: (msg: string) => `Calendar Integration Failed: ${msg}`,
@@ -491,14 +492,21 @@ export default function App() {
     },
     task: {
       list: "tasks",
-      exec: async (t: any) => ({ status: "created", taskId: await createGoogleTask(token, t) }),
-      done: (t: any) => `Successfully logged task "${t.title}" to Google Tasks list!`,
+      idKey: "taskId" as const,
+      fingerprint: taskFingerprint,
+      update: async (t: any) => ({ synced: taskFingerprint(t), taskId: await updateGoogleTask(token, t.taskId, t) }),
+      exec: async (t: any) => ({ status: "created", synced: taskFingerprint(t), taskId: await createGoogleTask(token, t) }),
+      done: (t: any) => `Successfully added task "${t.title}" to Google Tasks list!`,
       auto: (t: any) => `Auto-logged "${t.title}" to Google Tasks, as requested.`,
       failed: (msg: string) => `Tasks Integration Failed: ${msg}`,
       undo: { idKey: "taskId", where: "Google Tasks", action: "create_task" },
     },
     search: {
       list: "searchQueries",
+      // A finished search has no remote resource to keep in sync — the answer is already on screen.
+      idKey: null,
+      fingerprint: null,
+      update: null,
       exec: async (q: any) => ({ status: "completed", ...(await runSearch(q.query)) }),
       done: (q: any) => `Researced facts retrieved for query: "${q.query}"`,
       auto: (q: any) => `Auto-searched "${q.query}", as requested.`,
@@ -549,6 +557,54 @@ export default function App() {
       }
     }
   };
+
+  // Fully Autonomous / On Your Command, applied to the LIVE draft: the moment the planner surfaces
+  // an item the gate allows, it is written to the user's account without waiting for a button. The
+  // gate is the same isAutoExecutable used at finalize, so the consent rules are pinned in one place.
+  //
+  // Re-firing is blocked by two things working together: exec() flips the item off "pending" (and
+  // toAnalysisResult preserves a scheduled/created/completed/failed status across re-plans), which
+  // covers everything after the write lands, and autoFiringRef covers the window before it does.
+  // Index is a stable key here because toAnalysisResult merges matched items in place and only ever
+  // appends new ones.
+  useEffect(() => {
+    if (!liveDraft || autonomyMode === "manual") return;
+    for (const { list, exec, auto, update, fingerprint, idKey } of Object.values(KINDS)) {
+      const items: any[] = (liveDraft as any)[list] ?? [];
+      items.forEach((item, index) => {
+        const key = `${list}:${index}`;
+        if (autoFiringRef.current.has(key)) return;
+
+        // Two jobs behind one guard. Writing something never written is gated by the consent rules;
+        // RE-writing something already on the user's calendar is not a new decision, it is keeping a
+        // promise already made — the mode check above is the brake. Without this, refining an
+        // appointment mid-sentence left Google holding the first, half-specified version forever.
+        const stale = !!update && !!idKey && !!item[idKey] && !!item.synced && fingerprint(item) !== item.synced;
+        const run = stale ? update : isAutoExecutable(item, autonomyMode, allowUncertain) ? exec : null;
+        if (!run) return;
+
+        autoFiringRef.current.add(key);
+        (async () => {
+          try {
+            const patch = await run(item);
+            setLiveDraft(a => (a ? patchAt(a, list, index, { ...(a as any)[list][index], ...patch }) : a));
+            showToast(stale ? `Updated "${item.title}" — you added details while talking.` : auto(item));
+          } catch (err: any) {
+            console.error(err);
+            // A failed re-sync must not mark the item failed — the event IS on the calendar, only
+            // the edit didn't land. Stamp the fingerprint anyway, or a permanently failing update
+            // (revoked scope, event deleted in Google) would retry on every single live tick.
+            setLiveDraft(a => (a ? patchAt(a, list, index, stale
+              ? { ...(a as any)[list][index], synced: fingerprint(item), error: err.message }
+              : { ...(a as any)[list][index], status: "failed", error: err.message }) : a));
+          } finally {
+            // Safe to release: the item is no longer "pending", so the gate above blocks it now.
+            autoFiringRef.current.delete(key);
+          }
+        })();
+      });
+    }
+  }, [liveDraft, autonomyMode, allowUncertain]);
 
   // Save a markdown report into this session's Drive folder (created on first save, reused after).
   // Two tool calls behind one approval — the button IS the consent, same as every other write here.

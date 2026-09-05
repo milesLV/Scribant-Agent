@@ -74,6 +74,21 @@ export async function createCalendarEvent(token: string | null, event: Omit<Cale
   return executeOnServer("create_calendar_event", { title, description, start, end, allDay, timeZone }, token);
 }
 
+// Edit the event already on the calendar. The live planner keeps refining one appointment as the
+// speaker adds a time or a place, and re-creating it would leave the earlier version behind.
+export async function updateCalendarEvent(token: string | null, eventId: string, event: Omit<CalendarEvent, "status">): Promise<string> {
+  const timeZone = event.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const { title, description, start, end, allDay } = event;
+  if (!token) {
+    const state = getSandboxState();
+    state.events = state.events.map(e => (e.eventId === eventId ? { ...e, ...event, timeZone } : e));
+    saveSandboxState(state);
+    executeOnServer("update_calendar_event", { id: eventId, title, description, start, end, allDay, timeZone }, "sandbox").catch(() => {});
+    return eventId;
+  }
+  return executeOnServer("update_calendar_event", { id: eventId, title, description, start, end, allDay, timeZone }, token);
+}
+
 // ==========================================
 // GOOGLE TASKS SERVICE
 // ==========================================
@@ -86,6 +101,18 @@ export async function createGoogleTask(token: string | null, task: Omit<TaskItem
   }
   const { title, notes, dueDate } = task;
   return executeOnServer("create_task", { title, notes, dueDate }, token);
+}
+
+export async function updateGoogleTask(token: string | null, taskId: string, task: Omit<TaskItem, "status">): Promise<string> {
+  const { title, notes, dueDate } = task;
+  if (!token) {
+    const state = getSandboxState();
+    state.tasks = state.tasks.map(t => (t.taskId === taskId ? { ...t, ...task } : t));
+    saveSandboxState(state);
+    executeOnServer("update_task", { id: taskId, title, notes, dueDate }, "sandbox").catch(() => {});
+    return taskId;
+  }
+  return executeOnServer("update_task", { id: taskId, title, notes, dueDate }, token);
 }
 
 // ==========================================
