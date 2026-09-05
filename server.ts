@@ -551,14 +551,29 @@ app.post("/api/transcribe-audio", async (req, res) => {
     const {
       audio, mimeType, source, enableDiarization, minSpeakers, maxSpeakers, sessionId,
     } = v.data;
-    const cleanAudio = audio.replace(/^data:audio\/[^;]+;base64,/, "");
+    const cleanAudio = audio.replace(/^data:audio\/[^;]+;base64,/, "").trim();
+    if (!cleanAudio || cleanAudio.length < 50) {
+      res.json({
+        text: "",
+        source: source === "tab" ? "tab" : "mic",
+        provider: "none",
+        speakerCount: 0,
+        turns: [],
+      });
+      return;
+    }
+
+    // Gemini and STT reject container/codec parameters like ";codecs=opus" with 400 Invalid
+    // Argument, so reduce to the canonical type ("audio/webm", "audio/ogg", "audio/wav").
+    const rawMime = typeof mimeType === "string" && mimeType ? mimeType : "audio/webm";
+    const cleanMime = rawMime.split(";")[0].trim().toLowerCase() || "audio/webm";
 
     // Check if Cloud STT diarization is requested
     if (enableDiarization) {
       try {
-        console.log(`[CloudSTT] Transcribing chunk (${source || "mic"}, ${mimeType || "audio/webm"}) with diarization (speakers: ${minSpeakers ?? 1}-${maxSpeakers ?? 5})...`);
+        console.log(`[CloudSTT] Transcribing chunk (${source || "mic"}, ${cleanMime}) with diarization (speakers: ${minSpeakers ?? 1}-${maxSpeakers ?? 5})...`);
         const cloudResult = await transcribeWithCloudStt(cleanAudio, {
-          mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm",
+          mimeType: cleanMime,
           enableDiarization: true,
           minSpeakers: minSpeakers ?? 1,
           maxSpeakers: maxSpeakers ?? 5,
@@ -640,7 +655,7 @@ app.post("/api/transcribe-audio", async (req, res) => {
     console.log(`[STT] Transcribing audio chunk (${source || "mic"}) via Gemini multimodal audio transcriber...`);
     const { text } = await askAgentParts(
       audioTranscriber,
-      [{ inlineData: { mimeType: typeof mimeType === "string" && mimeType ? mimeType : "audio/webm", data: cleanAudio } }],
+      [{ inlineData: { mimeType: cleanMime, data: cleanAudio } }],
       {
         diarizationEnabled: Boolean(enableDiarization),
         source: source === "tab" ? "tab" : "mic",

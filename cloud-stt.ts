@@ -269,10 +269,21 @@ export function buildV1Config(options: CloudSttOptions) {
   const enableDiarization = options.enableDiarization !== false;
   const minSpeakerCount = Math.max(1, options.minSpeakers ?? 1);
   const maxSpeakerCount = Math.max(minSpeakerCount, options.maxSpeakers ?? 5);
+  // V1 recognize auto-detects badly on container formats, so pin encoding (and the rate Opus
+  // always uses) when the MIME type is one we recognise; anything else falls back to auto-detect.
+  const mime = (options.mimeType || "").toLowerCase();
+  let encoding: string | undefined;
+  let sampleRateHertz: number | undefined;
+  if (mime.includes("webm")) { encoding = "WEBM_OPUS"; sampleRateHertz = 48000; }
+  else if (mime.includes("ogg") || mime.includes("opus")) { encoding = "OGG_OPUS"; sampleRateHertz = 48000; }
+  else if (mime.includes("wav") || mime.includes("linear16")) { encoding = "LINEAR16"; }
+  else if (mime.includes("mp3")) { encoding = "MP3"; }
+  else if (mime.includes("flac")) { encoding = "FLAC"; }
   return {
     languageCode: options.languageCode || "en-US",
     enableAutomaticPunctuation: true,
     enableWordTimeOffsets: true,
+    ...(encoding ? { encoding, sampleRateHertz } : {}),
     diarizationConfig: enableDiarization
       ? { enableSpeakerDiarization: true, minSpeakerCount, maxSpeakerCount }
       : undefined,
