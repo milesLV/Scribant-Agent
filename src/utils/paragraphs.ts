@@ -359,6 +359,12 @@ export interface TranscribeResponse {
   turns?: TranscribeTurn[];
   /** Server-side latch: true once THIS SESSION has ever held 2+ speakers. See speaker-registry.ts. */
   multiSpeaker?: boolean;
+  /**
+   * The user configured more than one expected speaker, so label from the very first word rather
+   * than waiting for a second voice to actually show up. Set by the caller from the STT config, not
+   * by the server — it is a statement of intent, not of observation.
+   */
+  alwaysLabel?: boolean;
 }
 
 /**
@@ -402,7 +408,14 @@ export function toUtterances(res: TranscribeResponse, source: UtteranceSource): 
     // into one paragraph — two different people run together with no break. (An unlabelled chunk
     // following a LABELLED one does break; "" and "speaker 2" differ. It is unlabelled-next-to-
     // unlabelled that collapses, which is exactly what a solo chunk in a two-person session is.)
-    const multi = (res.multiSpeaker ?? false) || distinct.size > 1;
+    //
+    // `alwaysLabel` short-circuits both: the detection-based halves can only ever act AFTER a
+    // second voice has been heard, so the opening stretch of a two-person recording — everything
+    // said before the other person first speaks — is committed unlabelled and stays that way.
+    // Nothing can retro-label it without rewriting committed text, which the proofreader's
+    // character offsets forbid. Asking the user instead ("max speakers > 1") is the only signal
+    // available at word one.
+    const multi = (res.alwaysLabel ?? false) || (res.multiSpeaker ?? false) || distinct.size > 1;
 
     return turns
       .filter(t => t.text?.trim())
@@ -579,6 +592,16 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("paragraphs.ts")
       { text: `Speaker 1: ${filler(HARD_CAP_WORDS)}`, speaker: "Speaker 1", source: "stt" },
       { text: "Speaker 1: and then some more", speaker: "Speaker 1", source: "stt" }])
       .endsWith("Speaker 1: and then some more"), "...and it keeps the label at the top of it");
+
+  // alwaysLabel: the user said to expect more than one speaker, so a solo opening is still labelled.
+  eq(toUtterances({ ...solo, multiSpeaker: false, alwaysLabel: true, turns: [{ speaker: "Speaker 1", text: "just me talking" }] }, "stt"),
+    [{ text: "Speaker 1: just me talking", speaker: "Speaker 1", source: "stt", startsScene: undefined }],
+    "alwaysLabel labels a solo turn from word one");
+  // ...and consecutive same-speaker turns still share a speakerKey, so they do NOT break apart.
+  eq(joinUtterances([
+      ...toUtterances({ text: "x", alwaysLabel: true, turns: [{ speaker: "Speaker 1", text: "opening thought" }] }, "stt"),
+      ...toUtterances({ text: "x", alwaysLabel: true, turns: [{ speaker: "Speaker 1", text: "and the rest of it" }] }, "stt")])
+      .split("\n\n").length, 1, "alwaysLabel does not break a solo speaker between chunks");
 
   eq(toUtterances({ ...solo, multiSpeaker: false }, "stt"),
     [{ text: "just me talking", speaker: undefined, source: "stt", startsScene: undefined }],

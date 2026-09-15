@@ -40,6 +40,13 @@ function pickMimeType(): string {
 export interface SttSettings { enableDiarization: boolean; maxSpeakers: number }
 
 /**
+ * Upper bound for a session that has never touched the Admin slider. The browser mirror of
+ * DEFAULT_MAX_SPEAKERS in cloud-stt.ts, which cannot be imported here — it pulls in node:assert.
+ * Change both together.
+ */
+export const DEFAULT_MAX_SPEAKERS = 1;
+
+/**
  * Diarization settings, read fresh each chunk so a change in Admin takes effect without a restart.
  *
  * Deliberately does NOT read `minSpeakers`. The floor is advisory, not binding — measured, it
@@ -55,7 +62,7 @@ export interface SttSettings { enableDiarization: boolean; maxSpeakers: number }
 export function readSttConfig(): SttSettings {
   // ONE default for every caller. The mic path used to default this to true and the tab path to
   // false, so the same session diarized or didn't depending on which capture started it.
-  const fallback = { enableDiarization: false, maxSpeakers: 5 };
+  const fallback = { enableDiarization: false, maxSpeakers: DEFAULT_MAX_SPEAKERS };
   try {
     const saved = localStorage.getItem("scribant_stt_config");
     if (!saved) return fallback;
@@ -111,7 +118,9 @@ export function useChunkedCapture({ source, sourceTag, onChunk, onDegraded }: Op
       const data = await res.json();
       if (cfg.enableDiarization && data.degraded) onDegraded?.(data.provider);
 
-      const utterances = toUtterances(data, source);
+      // Same rule as the streaming path: if the user said to expect more than one speaker, label
+      // from the first word instead of waiting for the latch to catch a second voice.
+      const utterances = toUtterances({ ...data, alwaysLabel: cfg.maxSpeakers > 1 }, source);
       if (utterances.length) onChunk({ utterances, startedAt });
     } catch (err) {
       // One lost chunk (network blip, transient 429) shouldn't end the capture — just skip it and

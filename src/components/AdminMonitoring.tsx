@@ -24,6 +24,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { AdkEvent, SttConfig, SttStatus } from "../types";
+import { DEFAULT_MAX_SPEAKERS } from "../hooks/useChunkedCapture";
 import TokenVisualizer from "./TokenVisualizer";
 import { classifyEvent, EventFilterCategory, StatusFilterType } from "./DebugPanel";
 
@@ -86,15 +87,15 @@ export default function AdminMonitoring({
           // A pre-existing config may carry minSpeakers and speakerRangeMode from when this was a
           // two-bound control. Both are ignored: the lower bound is now always 1. An old EXACT-count
           // config stored its number in minSpeakers with maxSpeakers equal to it, so falling back to
-          // minSpeakers keeps that number meaning "up to N" rather than silently resetting to 5.
-          maxSpeakers: clampSpeaker(Number(parsed.maxSpeakers || parsed.minSpeakers || 5)),
+          // minSpeakers keeps that number meaning "up to N" rather than silently resetting.
+          maxSpeakers: clampSpeaker(Number(parsed.maxSpeakers || parsed.minSpeakers || DEFAULT_MAX_SPEAKERS)),
           provider: parsed.enableDiarization ? "google_cloud_stt" : "gemini",
         };
       }
     } catch {}
     return {
       enableDiarization: false,
-      maxSpeakers: 5,
+      maxSpeakers: DEFAULT_MAX_SPEAKERS,
       provider: "gemini",
     };
   });

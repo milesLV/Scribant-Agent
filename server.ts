@@ -22,7 +22,7 @@ import {
 import { WORKSPACE_ACTIONS, gcalDeleteEvent, gtasksDeleteTask } from "./workspace-tools";
 import { MODEL, askAgent, askAgentParts, groundedSearcher, audioTranscriber, memoryAnswerer } from "./agents";
 import { runOrchestrator, type Stage } from "./orchestrator";
-import { transcribeWithCloudStt, checkCloudSttStatus } from "./cloud-stt";
+import { transcribeWithCloudStt, checkCloudSttStatus, DEFAULT_MAX_SPEAKERS } from "./cloud-stt";
 import { noteChunk } from "./speaker-registry";
 import { openSttStream, SEGMENT_MS, type SttStream } from "./stt-stream";
 import { emitAdkEvent, createEvent, createEventActions } from "./adk-events";
@@ -571,12 +571,12 @@ app.post("/api/transcribe-audio", async (req, res) => {
     // Check if Cloud STT diarization is requested
     if (enableDiarization) {
       try {
-        console.log(`[CloudSTT] Transcribing chunk (${source || "mic"}, ${cleanMime}) with diarization (speakers: ${minSpeakers ?? 1}-${maxSpeakers ?? 5})...`);
+        console.log(`[CloudSTT] Transcribing chunk (${source || "mic"}, ${cleanMime}) with diarization (speakers: ${minSpeakers ?? 1}-${maxSpeakers ?? DEFAULT_MAX_SPEAKERS})...`);
         const cloudResult = await transcribeWithCloudStt(cleanAudio, {
           mimeType: cleanMime,
           enableDiarization: true,
           minSpeakers: minSpeakers ?? 1,
-          maxSpeakers: maxSpeakers ?? 5,
+          maxSpeakers: maxSpeakers ?? DEFAULT_MAX_SPEAKERS,
         });
 
         // Labels stay exactly as this chunk produced them — nothing is remapped. The only session
@@ -625,7 +625,7 @@ app.post("/api/transcribe-audio", async (req, res) => {
             wordCount: cloudResult.words.length,
             turnCount: cloudResult.speakerTurns.length,
             minSpeakers: minSpeakers ?? 1,
-            maxSpeakers: maxSpeakers ?? 5,
+            maxSpeakers: maxSpeakers ?? DEFAULT_MAX_SPEAKERS,
           },
           promptTokensFallback: Math.ceil(cloudResult.words.length * 1.6),
           candidatesTokensFallback: Math.ceil(cloudResult.words.length * 1.3),
@@ -702,7 +702,7 @@ app.get("/api/stt/status", async (_req, res) => {
       // pinned at 1 on every request — advertising 2 here contradicted both the transport and
       // this endpoint's own published schema (openapi.ts describes it as "(1)").
       defaultMinSpeakers: 1,
-      defaultMaxSpeakers: 5,
+      defaultMaxSpeakers: DEFAULT_MAX_SPEAKERS,
       // chirp_2 is the V2 non-diarizing path only; diarization always runs V1, whose model field
       // is left at the default. See transcribeWithCloudStt.
       supportedModels: ["chirp_2", "latest_long", "default"],
@@ -992,7 +992,7 @@ function registerSttStream(server: import("http").Server) {
       switch (v.data.type) {
         case "start":
           cfg = { sessionId: v.data.sessionId, source: v.data.source, maxSpeakers: v.data.maxSpeakers, mimeType: v.data.mimeType };
-          console.log(`[stt-stream] open (${cfg.source || "mic"}, max ${cfg.maxSpeakers ?? 5} speakers)`);
+          console.log(`[stt-stream] open (${cfg.source || "mic"}, max ${cfg.maxSpeakers ?? DEFAULT_MAX_SPEAKERS} speakers)`);
           await openSegment();
           break;
         case "segment":
