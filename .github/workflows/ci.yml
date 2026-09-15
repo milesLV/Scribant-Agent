@@ -11,6 +11,8 @@ jobs:
   # server-utils, eval graders). No API key, no network, ~seconds.
   check:
     runs-on: ubuntu-latest
+    env:
+      GOOGLE_CLOUD_PROJECT: ci-placeholder # ponytail: agents/orchestrator self-checks build models but never call them
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
