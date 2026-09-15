@@ -5,7 +5,7 @@ import ActiveSession from "./components/ActiveSession";
 import SessionHistory from "./components/SessionHistory";
 import AdminMonitoring from "./components/AdminMonitoring";
 import ApiDocsView from "./components/ApiDocsView";
-import { StreamRun, AnalysisResult, ProofResult, AutonomyMode, CalendarEvent, TaskItem, SearchQueryItem } from "./types";
+import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
 import {
   createCalendarEvent,
   updateCalendarEvent,
@@ -18,7 +18,7 @@ import {
 } from "./utils/google-workspace";
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { isAutoExecutable } from "./utils/autonomy";
-import { isSameEvent, isSameTask, isSameQuery } from "./utils/item-match";
+import { mergeList, isSameItem, PlanList } from "./utils/plan-merge";
 
 
 // New characters of speech required before the expensive classifier stage re-runs.
@@ -106,89 +106,34 @@ export default function App() {
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
-  // Keys of live-draft items whose auto-write is in flight. The live pipeline re-plans every
-  // tick and keeps re-offering an item as `pending` until its status flips, so without this the
-  // same event would be created once per tick until the first create returned.
-  const autoFiringRef = useRef<Set<string>>(new Set());
+  // Live-draft items whose auto-write is in flight. The live pipeline re-plans every tick and keeps
+  // re-offering an item as `pending` until its status flips, so without this the same event would be
+  // created once per tick until the first create returned. Matched by identity, not index: a re-plan
+  // can reorder the list while the write is out.
+  const autoFiringRef = useRef<{ list: PlanList; item: any }[]>([]);
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
   };
 
   // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage),
-  // merging with previous live draft state to retain all discovered tasks, calendar events, and search queries.
-  const toAnalysisResult = (rawRes: any, rawText: string, prev?: AnalysisResult | null): AnalysisResult => {
-    // ---- Retain & Merge Search Queries ----
-    const prevSearches = prev?.searchQueries || [];
-    const incomingSearches = (rawRes.searchQueries || []).filter((q: any) => q && q.query && q.query.trim() !== "");
-    const searchQueries: SearchQueryItem[] = prevSearches.map(ps => ({ ...ps }));
-
-    for (const q of incomingSearches) {
-      const matchIndex = searchQueries.findIndex(existing => isSameQuery(existing, q));
-
-      if (matchIndex >= 0) {
-        const existing = searchQueries[matchIndex];
-        searchQueries[matchIndex] = existing.status === "completed" || existing.status === "failed"
-          ? { ...q, ...existing }
-          : { ...existing, ...q, status: "pending" };
-      } else {
-        searchQueries.push({ ...q, status: "pending" as const });
-      }
-    }
-
-    // ---- Retain & Merge Calendar Events ----
-    const prevEvents = prev?.calendarEvents || [];
-    const incomingEvents = (rawRes.calendarEvents || []).filter((e: any) => e && e.title && e.title.trim() !== "");
-    const calendarEvents: CalendarEvent[] = prevEvents.map(pe => ({ ...pe }));
-
-    for (const evt of incomingEvents) {
-      const matchIndex = calendarEvents.findIndex(existing => isSameEvent(existing, evt));
-
-      if (matchIndex >= 0) {
-        const existing = calendarEvents[matchIndex];
-        // An ALREADY-SCHEDULED event still takes the newer field values — the speaker adding a time
-        // or a place is refining one appointment, not describing a second. `evt` carries no status
-        // or eventId (the classifier doesn't emit them), so spreading it last keeps the booking
-        // intact while the details move; the autonomy effect notices the drift and PATCHes Google.
-        // A failed write stays failed: re-arming it would retry on every tick forever.
-        calendarEvents[matchIndex] = existing.status === "failed"
-          ? { ...evt, ...existing }
-          : { ...existing, ...evt, status: existing.status === "scheduled" ? "scheduled" : "pending",
-              uncertain: !!evt.uncertain, allDay: !!evt.allDay };
-      } else {
-        calendarEvents.push({ ...evt, status: "pending" as const, uncertain: !!evt.uncertain, allDay: !!evt.allDay });
-      }
-    }
-
-    // ---- Retain & Merge Tasks ----
-    const prevTasks = prev?.tasks || [];
-    const incomingTasks = (rawRes.tasks || []).filter((item: any) => item && item.title && item.title.trim() !== "");
-    const tasks: TaskItem[] = prevTasks.map(pt => ({ ...pt }));
-
-    for (const t of incomingTasks) {
-      const matchIndex = tasks.findIndex(existing => isSameTask(existing, t));
-
-      if (matchIndex >= 0) {
-        const existing = tasks[matchIndex];
-        // Same rule as calendar above: a created task keeps its taskId but takes the newer wording
-        // and due date, so "actually it's due Friday" edits the task instead of adding a second one.
-        tasks[matchIndex] = existing.status === "failed"
-          ? { ...t, ...existing }
-          : { ...existing, ...t, status: existing.status === "created" ? "created" : "pending",
-              uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || existing.dueDate };
-      } else {
-        tasks.push({ ...t, status: "pending" as const, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined });
-      }
-    }
-
-    return {
-      summary: rawRes.ideasSummary || prev?.summary || "",
-      rawText,
-      calendarEvents,
-      tasks,
-      searchQueries,
-    };
-  };
+  // merged over the draft it replaces so settled rows keep their status, ids and answers while
+  // scheduled/created rows still take refined details (rules and self-check in plan-merge.ts).
+  const toAnalysisResult = (rawRes: any, rawText: string, prev?: AnalysisResult | null): AnalysisResult => ({
+    summary: rawRes.ideasSummary || prev?.summary || "",
+    rawText,
+    calendarEvents: mergeList("calendarEvents", (rawRes.calendarEvents || [])
+      .filter((evt: any) => evt && evt.title && evt.title.trim() !== "")
+      .map((evt: any) => ({ ...evt, uncertain: !!evt.uncertain, allDay: !!evt.allDay })),
+      prev?.calendarEvents || []),
+    tasks: mergeList("tasks", (rawRes.tasks || [])
+      .filter((t: any) => t && t.title && t.title.trim() !== "")
+      .map((t: any) => ({ ...t, uncertain: !!t.uncertain, dueDate: t.dueDate?.trim() || undefined })),
+      prev?.tasks || []),
+    searchQueries: mergeList("searchQueries", (rawRes.searchQueries || [])
+      .filter((q: any) => q && q.query && q.query.trim() !== ""),
+      prev?.searchQueries || []),
+  });
 
   // Apply an updater to whichever analysis is selected (live draft or an archived run).
   const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) => {
@@ -516,11 +461,18 @@ export default function App() {
   } as const;
   type Kind = keyof typeof KINDS;
 
-  // Replace one item in one of the analysis lists, leaving everything else untouched.
-  const patchAt = (a: AnalysisResult, list: string, index: number, value: any): AnalysisResult => {
-    const next = [...(a as any)[list]];
-    next[index] = value;
-    return { ...a, [list]: next };
+  // Replace one item in one of the analysis lists, leaving everything else untouched. The row is
+  // found by identity rather than by the index the click came from: a live re-plan can land while the
+  // write is in flight and reorder the list under it, which would otherwise stamp a freshly created
+  // event id onto somebody else's row. `update` receives the row as it is NOW, not as it was clicked.
+  const patchItem = (a: AnalysisResult, list: PlanList, original: any, update: (row: any) => any): AnalysisResult => {
+    if (!original) return a;
+    const rows = [...(a as any)[list]];
+    let at = rows.indexOf(original);
+    if (at < 0) at = rows.findIndex(x => isSameItem(list, x, original));
+    // Re-planned away mid-write — keep the result anyway rather than lose the id it just created.
+    if (at < 0) rows.push(update(original)); else rows[at] = update(rows[at]);
+    return { ...a, [list]: rows };
   };
 
   // Execute ONE reviewed item, then fold the result — or the failure — back into what's on screen.
@@ -530,11 +482,11 @@ export default function App() {
     if (!item) return;
     try {
       const patch = await exec(item);
-      updateActiveAnalysis(a => patchAt(a, list, index, { ...item, ...patch }));
+      updateActiveAnalysis(a => patchItem(a, list, item, row => ({ ...row, ...patch })));
       showToast(done(item));
     } catch (err: any) {
       console.error(err);
-      updateActiveAnalysis(a => patchAt(a, list, index, { ...item, status: "failed", error: err.message }));
+      updateActiveAnalysis(a => patchItem(a, list, item, row => ({ ...row, status: "failed", error: err.message })));
       showToast(failed(err.message));
     }
   };
@@ -565,15 +517,12 @@ export default function App() {
   // Re-firing is blocked by two things working together: exec() flips the item off "pending" (and
   // toAnalysisResult preserves a scheduled/created/completed/failed status across re-plans), which
   // covers everything after the write lands, and autoFiringRef covers the window before it does.
-  // Index is a stable key here because toAnalysisResult merges matched items in place and only ever
-  // appends new ones.
   useEffect(() => {
     if (!liveDraft || autonomyMode === "manual") return;
     for (const { list, exec, auto, update, fingerprint, idKey } of Object.values(KINDS)) {
       const items: any[] = (liveDraft as any)[list] ?? [];
-      items.forEach((item, index) => {
-        const key = `${list}:${index}`;
-        if (autoFiringRef.current.has(key)) return;
+      items.forEach(item => {
+        if (autoFiringRef.current.some(f => f.list === list && isSameItem(list, f.item, item))) return;
 
         // Two jobs behind one guard. Writing something never written is gated by the consent rules;
         // RE-writing something already on the user's calendar is not a new decision, it is keeping a
@@ -583,23 +532,24 @@ export default function App() {
         const run = stale ? update : isAutoExecutable(item, autonomyMode, allowUncertain) ? exec : null;
         if (!run) return;
 
-        autoFiringRef.current.add(key);
+        const inFlight = { list, item };
+        autoFiringRef.current.push(inFlight);
         (async () => {
           try {
             const patch = await run(item);
-            setLiveDraft(a => (a ? patchAt(a, list, index, { ...(a as any)[list][index], ...patch }) : a));
+            setLiveDraft(a => (a ? patchItem(a, list, item, row => ({ ...row, ...patch })) : a));
             showToast(stale ? `Updated "${item.title}" — you added details while talking.` : auto(item));
           } catch (err: any) {
             console.error(err);
             // A failed re-sync must not mark the item failed — the event IS on the calendar, only
             // the edit didn't land. Stamp the fingerprint anyway, or a permanently failing update
             // (revoked scope, event deleted in Google) would retry on every single live tick.
-            setLiveDraft(a => (a ? patchAt(a, list, index, stale
-              ? { ...(a as any)[list][index], synced: fingerprint(item), error: err.message }
-              : { ...(a as any)[list][index], status: "failed", error: err.message }) : a));
+            setLiveDraft(a => (a ? patchItem(a, list, item, row => stale
+              ? { ...row, synced: fingerprint(item), error: err.message }
+              : { ...row, status: "failed", error: err.message }) : a));
           } finally {
             // Safe to release: the item is no longer "pending", so the gate above blocks it now.
-            autoFiringRef.current.delete(key);
+            autoFiringRef.current = autoFiringRef.current.filter(f => f !== inFlight);
           }
         })();
       });
@@ -644,7 +594,7 @@ export default function App() {
     if (!item?.[undo.idKey]) return;
     try {
       await deleteCreatedItem(token, undo.action, item[undo.idKey]);
-      updateActiveAnalysis(a => patchAt(a, list, index, { ...item, status: "pending", [undo.idKey]: undefined }));
+      updateActiveAnalysis(a => patchItem(a, list, item, row => ({ ...row, status: "pending", [undo.idKey]: undefined })));
       showToast(`Removed "${item.title}" from ${undo.where}.`);
     } catch (err: any) {
       console.error(err);
@@ -781,8 +731,8 @@ export default function App() {
               onExecuteSearch={i => executeItem("search", i)}
               onUndoCalendar={i => handleUndo("calendar", i)}
               onUndoTask={i => handleUndo("task", i)}
-              onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchAt(a, "calendarEvents", i, u))}
-              onUpdateTask={(i, u) => updateActiveAnalysis(a => patchAt(a, "tasks", i, u))}
+              onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchItem(a, "calendarEvents", activeAnalysis?.calendarEvents[i], () => u))}
+              onUpdateTask={(i, u) => updateActiveAnalysis(a => patchItem(a, "tasks", activeAnalysis?.tasks[i], () => u))}
               isLiveAnalyzing={busy.plan}
             />
           </div>
