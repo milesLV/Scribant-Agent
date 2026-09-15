@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GOOGLE_CLOUD_PROJECT: ci-placeholder # ponytail: agents/orchestrator self-checks build models but never call them
+      GOOGLE_CLOUD_LOCATION: global
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
