@@ -10,7 +10,7 @@
 // which is why @google-cloud/speech is a dependency here and cloud-stt.ts hand-rolls fetch.
 import assert from "node:assert/strict";
 import { fileURLToPath } from "url";
-import { formatSpeakerTag, groupWordsIntoSpeakerTurns, parseOffsetMs, type DiarizedWord, type SpeakerTurn } from "./cloud-stt";
+import { DEFAULT_MAX_SPEAKERS, formatSpeakerTag, resolveProjectId, groupWordsIntoSpeakerTurns, parseOffsetMs, smoothSpeakerFlickers, type DiarizedWord, type SpeakerTurn } from "./cloud-stt";
 
 /**
  * Google closes a V1 streaming recognition at 305s. The client cuts a fresh segment before that,
@@ -50,7 +50,7 @@ export function buildStreamingConfig(cfg: StreamConfig = {}) {
   // minSpeakerCount is pinned at 1 for the same measured reason as the chunked path: the floor is
   // advisory, it changes nothing on clean audio, and on low-confidence audio it pushes the
   // recognizer into splitting one voice in two. See cloud-stt.ts buildV1Config.
-  const maxSpeakerCount = Math.max(1, Math.min(8, cfg.maxSpeakers ?? 5));
+  const maxSpeakerCount = Math.max(1, Math.min(8, cfg.maxSpeakers ?? DEFAULT_MAX_SPEAKERS));
   return {
     config: {
       encoding: encodingForMimeType(cfg.mimeType),
@@ -119,15 +119,20 @@ export interface StreamTurnsResult {
 
 /** A final result -> the turns to append, plus the new commit cursor. Pure; the self-check drives it. */
 export function turnsFromFinal(cumulative: DiarizedWord[], committed: number): StreamTurnsResult {
-  const tail = uncommittedTail(cumulative, committed);
+  // Smoothed over the whole cumulative list before the tail is cut, for two reasons: a tail can
+  // begin part-way through a flicker and lose the left-hand neighbour the rule needs, and the
+  // speaker count below has to agree with the tags the turns actually carry. Smoothing never
+  // changes the length, so `committed` stays a valid index into it.
+  const smoothed = smoothSpeakerFlickers(cumulative);
+  const tail = uncommittedTail(smoothed, committed);
   const { turns } = groupWordsIntoSpeakerTurns(tail, { alwaysPrefixSpeaker: true });
   return {
     turns,
-    committed: Math.max(committed, cumulative.length),
-    // Distinct speakers over the WHOLE stream so far, not just this tail — this is what the client
-    // needs to decide whether to render labels, and unlike the chunked path it is a real count
-    // rather than a latch, because one stream is one clustering space.
-    speakers: new Set(cumulative.map(w => w.speaker).filter(Boolean)).size,
+    committed: Math.max(committed, smoothed.length),
+    // Distinct speakers over this whole RECOGNITION so far, not just the tail. One recognition is
+    // one clustering space, so this is a real count rather than the chunked path's latch — but it
+    // resets at a segment cut (openSegment in server.ts), because that opens a new recognition.
+    speakers: new Set(smoothed.map(w => w.speaker).filter(Boolean)).size,
   };
 }
 
@@ -160,7 +165,26 @@ export interface SttStream {
  */
 export async function openSttStream(cfg: StreamConfig, events: SttStreamEvents): Promise<SttStream> {
   const { SpeechClient } = await import("@google-cloud/speech");
-  const client = new SpeechClient();
+  const projectId = await resolveProjectId();
+
+  // The gRPC client needs a QUOTA project, and being logged in does not supply one:
+  // `gcloud auth application-default login` writes a credential file with no `quota_project_id`,
+  // and Speech rejects every call made with a bare user credential and no quota project
+  // (PERMISSION_DENIED, "requires a quota project, which is not set by default"). The REST path in
+  // cloud-stt.ts never hit this because it sets the `x-goog-user-project` header by hand on every
+  // fetch — which is why chunked transcription worked while streaming died on open.
+  //
+  // This env var is the ONLY knob that works, verified against the live API. Neither a
+  // `quotaProjectId` client option nor a hand-built GoogleAuth with `quota_project_id` in
+  // clientOptions has any effect: google-auth-library reads the quota project from the ADC file's
+  // snake_case `quota_project_id` or from here (see #prepareAndCacheClient in googleauth.js), and
+  // from nowhere else.
+  //
+  // `??=` so an operator who set it deliberately, or ran
+  // `gcloud auth application-default set-quota-project`, still wins.
+  process.env.GOOGLE_CLOUD_QUOTA_PROJECT ??= projectId;
+
+  const client = new SpeechClient({ projectId });
   let committed = 0;
   let closed = false;
 
@@ -206,8 +230,9 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   // 1. Config: the floor stays at 1 whatever the caller asks for, and the ceiling is bounded.
   const c = buildStreamingConfig({}).config;
   assert.equal(c.diarizationConfig.minSpeakerCount, 1);
-  assert.equal(c.diarizationConfig.maxSpeakerCount, 5);
-  assert.equal(buildStreamingConfig({ maxSpeakers: 2 }).config.diarizationConfig.maxSpeakerCount, 2);
+  assert.equal(c.diarizationConfig.maxSpeakerCount, DEFAULT_MAX_SPEAKERS);
+  // 3, not 2 — an override has to differ from the default to prove anything.
+  assert.equal(buildStreamingConfig({ maxSpeakers: 3 }).config.diarizationConfig.maxSpeakerCount, 3);
   assert.equal(buildStreamingConfig({ maxSpeakers: 99 }).config.diarizationConfig.maxSpeakerCount, 8);
   assert.equal(buildStreamingConfig({ maxSpeakers: 0 }).config.diarizationConfig.maxSpeakerCount, 1);
   assert.equal(c.sampleRateHertz, 48000, "opus requires an explicit rate — the API rejects 0");

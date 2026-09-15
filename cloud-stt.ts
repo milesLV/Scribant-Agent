@@ -21,6 +21,19 @@ export interface SpeakerTurn {
   words: DiarizedWord[];
 }
 
+/**
+ * Upper bound used when a caller names none. Two, because that is what a diarized session almost
+ * always is — one other person in the room — and the cap is not free: it is the ceiling the
+ * recognizer is allowed to cluster up to, so a loose one lets a noisy mic split one voice across
+ * several phantom speakers. Raise it per-request for a genuine group.
+ *
+ * The lower bound is NOT configurable and is always 1; see buildV1Config.
+ *
+ * The browser has its own copy in useChunkedCapture.ts — this module imports node:assert and
+ * cannot be pulled into the client bundle. Change both together.
+ */
+export const DEFAULT_MAX_SPEAKERS = 1;
+
 export interface CloudSttOptions {
   mimeType?: string;
   enableDiarization?: boolean;
@@ -51,14 +64,82 @@ export function parseOffsetMs(offset?: string | number): number | undefined {
   return undefined;
 }
 
+// Acoustic diarization flickers: inside one person's continuous speech it will occasionally hand
+// one or two words to the other speaker and then hand them straight back, which surfaces as a
+// spurious "Speaker 2: yeah" paragraph mid-sentence. A real floor exchange leaves a pause; a
+// flicker does not. So a short run is rewritten to its neighbours' speaker only when ALL of:
+//   - both neighbouring runs are the same speaker (there is something to hand it back to)
+//   - the run is at most FLICKER_MAX_WORDS long
+//   - it is butted up against the speech on both sides (gap <= FLICKER_MAX_GAP_MS)
+// Timings are optional in DiarizedWord; with no timings there is no pause evidence, so nothing is
+// smoothed rather than guessing. Both transports route through groupWordsIntoSpeakerTurns, so the
+// streaming path (stt-stream.ts) gets this too.
+// ponytail: fixed thresholds, picked from synthetic cases and not yet tuned on real room audio. If
+// a real backchannel ("yeah", "right") ever gets absorbed, gate on word confidence rather than
+// loosening the gap — the gap is the only thing separating a flicker from a short real turn.
+const FLICKER_MAX_WORDS = 2;
+const FLICKER_MAX_GAP_MS = 200;
+
+export function smoothSpeakerFlickers(words: DiarizedWord[]): DiarizedWord[] {
+  if (!words || words.length < 3) return words;
+
+  // Contiguous same-speaker runs as [from, to) index pairs.
+  const runs: { speaker: string; from: number; to: number }[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const speaker = words[i].speaker || "Speaker 1";
+    const last = runs[runs.length - 1];
+    if (last && last.speaker === speaker) last.to = i + 1;
+    else runs.push({ speaker, from: i, to: i + 1 });
+  }
+
+  let out: DiarizedWord[] | null = null;
+  for (let r = 1; r < runs.length - 1; r++) {
+    const run = runs[r];
+    // The PREVIOUS run's speaker after any rewrite it already received, not the tag it arrived
+    // with. Reading the original here is wrong on alternating flickers (1 1 2 1 2 1): once the
+    // first `2` has been absorbed into `1`, the correct `1` that follows it looks like a lone `1`
+    // between two `2`s and gets flipped — moving the flicker onto a good word instead of removing
+    // it. Measured: 112121 came out as 111211.
+    const prevSpeaker = runs[r - 1].speaker;
+    const next = runs[r + 1];
+    if (prevSpeaker !== next.speaker) continue;
+    if (run.to - run.from > FLICKER_MAX_WORDS) continue;
+
+    const gapBefore = gapMs(words[run.from - 1], words[run.from]);
+    const gapAfter = gapMs(words[run.to - 1], words[run.to]);
+    if (gapBefore === undefined || gapAfter === undefined) continue;
+    if (gapBefore > FLICKER_MAX_GAP_MS || gapAfter > FLICKER_MAX_GAP_MS) continue;
+
+    out ??= words.slice();
+    for (let i = run.from; i < run.to; i++) out[i] = { ...out[i], speaker: prevSpeaker };
+    run.speaker = prevSpeaker; // so the next iteration reads the rewrite, not the original tag
+  }
+
+  return out ?? words;
+}
+
+// Silence between the end of `a` and the start of `b`, or undefined if either offset is missing.
+function gapMs(a: DiarizedWord, b: DiarizedWord): number | undefined {
+  const end = a?.endMs ?? a?.startMs;
+  const start = b?.startMs;
+  if (end === undefined || start === undefined) return undefined;
+  return Math.max(0, start - end);
+}
+
 // Groups word-level diarization tokens into structured dialogue turns
 export function groupWordsIntoSpeakerTurns(
   words: DiarizedWord[],
   options?: { alwaysPrefixSpeaker?: boolean }
-): { text: string; turns: SpeakerTurn[] } {
+  // `words` comes back SMOOTHED. Callers must count distinct speakers off this and not off the
+  // array they passed in: smoothing can collapse a two-tag chunk to one, and a caller re-deriving
+  // the count from its own copy reports a speaker the turns no longer contain. That count feeds
+  // the multi-speaker latch, so a flicker would otherwise corroborate exactly what corroboration
+  // exists to reject.
+): { text: string; turns: SpeakerTurn[]; words: DiarizedWord[] } {
   if (!words || words.length === 0) {
-    return { text: "", turns: [] };
+    return { text: "", turns: [], words: [] };
   }
+  words = smoothSpeakerFlickers(words);
 
   const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
   const isMultiSpeaker = distinctSpeakers.size > 1 || Boolean(options?.alwaysPrefixSpeaker);
@@ -112,7 +193,7 @@ export function groupWordsIntoSpeakerTurns(
     fullText = turns.map((t) => t.text).join(" ").trim();
   }
 
-  return { text: fullText, turns };
+  return { text: fullText, turns, words };
 }
 
 // Normalizes raw speaker label numbers ("1", "2") to friendly names ("Speaker 1", "Speaker 2")
@@ -126,6 +207,33 @@ export function formatSpeakerTag(rawLabel?: string | number): string {
 }
 
 // Helper to obtain Google Cloud access token and project ID using google-auth-library
+/**
+ * The project speech.googleapis.com should bill and rate-limit against.
+ *
+ * Required, not optional. `gcloud auth application-default login` writes a credential file with no
+ * `quota_project_id` in it, and every Speech API call made with a bare user credential and no quota
+ * project is rejected outright: PERMISSION_DENIED, "requires a quota project, which is not set by
+ * default". Being signed in is not enough — authentication and quota attribution are separate
+ * things, and only the second one is missing.
+ *
+ * REST sends it as the `x-goog-user-project` header; the gRPC client takes it as `quotaProjectId`.
+ * Both callers resolve it here so they cannot drift, which is exactly how the streaming path
+ * shipped broken while the REST path worked.
+ */
+export async function resolveProjectId(): Promise<string> {
+  const fromEnv = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT;
+  if (fromEnv) return fromEnv;
+
+  const { GoogleAuth } = await import("google-auth-library");
+  const projectId = await new GoogleAuth({
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+  }).getProjectId();
+  if (!projectId) {
+    throw new Error("GCP Project ID not found. Set GOOGLE_CLOUD_PROJECT in your environment or .env file.");
+  }
+  return projectId;
+}
+
 async function getGoogleAuthClient(): Promise<{ token: string; projectId: string }> {
   const { GoogleAuth } = await import("google-auth-library");
   const auth = new GoogleAuth({
@@ -139,15 +247,7 @@ async function getGoogleAuthClient(): Promise<{ token: string; projectId: string
     throw new Error("Failed to obtain GCP access token. Ensure Application Default Credentials (ADC) are configured via `gcloud auth application-default login`.");
   }
 
-  let projectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT;
-  if (!projectId) {
-    projectId = (await auth.getProjectId()) || undefined;
-  }
-  if (!projectId) {
-    throw new Error("GCP Project ID not found. Set GOOGLE_CLOUD_PROJECT in your environment or .env file.");
-  }
-
-  return { token, projectId };
+  return { token, projectId: await resolveProjectId() };
 }
 
 // Transcribe audio using Google Cloud Speech-to-Text API with speaker diarization
@@ -236,13 +336,13 @@ export async function transcribeWithCloudStt(
     };
   }
 
-  const { text, turns } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
-  const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
+  const { text, turns, words: diarized } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
+  const distinctSpeakers = new Set(diarized.map((w) => w.speaker).filter(Boolean));
 
   return {
     text,
     speakerTurns: turns,
-    words,
+    words: diarized,
     speakerCount: distinctSpeakers.size,
     provider: "google_cloud_stt",
   };
@@ -268,7 +368,7 @@ export async function transcribeWithCloudStt(
 export function buildV1Config(options: CloudSttOptions) {
   const enableDiarization = options.enableDiarization !== false;
   const minSpeakerCount = Math.max(1, options.minSpeakers ?? 1);
-  const maxSpeakerCount = Math.max(minSpeakerCount, options.maxSpeakers ?? 5);
+  const maxSpeakerCount = Math.max(minSpeakerCount, options.maxSpeakers ?? DEFAULT_MAX_SPEAKERS);
   // V1 recognize auto-detects badly on container formats, so pin encoding (and the rate Opus
   // always uses) when the MIME type is one we recognise; anything else falls back to auto-detect.
   const mime = (options.mimeType || "").toLowerCase();
@@ -365,13 +465,13 @@ async function transcribeWithCloudSttV1(
     };
   }
 
-  const { text, turns } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
-  const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
+  const { text, turns, words: diarized } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
+  const distinctSpeakers = new Set(diarized.map((w) => w.speaker).filter(Boolean));
 
   return {
     text,
     speakerTurns: turns,
-    words,
+    words: diarized,
     speakerCount: distinctSpeakers.size,
     provider: "google_cloud_stt",
   };
@@ -452,7 +552,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   // manufacture a second speaker out of solo audio — the bug bce2bd7 shipped and this reverts.
   const autoCfg = buildV1Config({ enableDiarization: true });
   assert.equal(autoCfg.diarizationConfig?.minSpeakerCount, 1, "diarization must auto-detect, never floor at 2");
-  assert.equal(autoCfg.diarizationConfig?.maxSpeakerCount, 5);
+  assert.equal(autoCfg.diarizationConfig?.maxSpeakerCount, DEFAULT_MAX_SPEAKERS);
   // An explicit caller override is still honoured, and max is never allowed below min.
   const forced = buildV1Config({ enableDiarization: true, minSpeakers: 3, maxSpeakers: 2 });
   assert.equal(forced.diarizationConfig?.minSpeakerCount, 3);
@@ -461,6 +561,58 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(buildV1Config({ enableDiarization: false }).diarizationConfig, undefined);
   // These were measured as no-ops for diarization; keep them out of the request.
   assert.ok(!("model" in autoCfg) && !("useEnhanced" in autoCfg), "no model/useEnhanced cargo cult");
+
+  // 6. Flicker smoothing: a 1-word hand-off with no pause on either side is absorbed...
+  const flicker: DiarizedWord[] = [
+    { word: "so", speaker: "Speaker 1", startMs: 0, endMs: 300 },
+    { word: "then", speaker: "Speaker 1", startMs: 350, endMs: 600 },
+    { word: "we", speaker: "Speaker 2", startMs: 650, endMs: 800 },
+    { word: "ship", speaker: "Speaker 1", startMs: 850, endMs: 1200 },
+    { word: "it", speaker: "Speaker 1", startMs: 1250, endMs: 1400 },
+  ];
+  const smoothed = groupWordsIntoSpeakerTurns(flicker);
+  assert.equal(smoothed.turns.length, 1, "one-word flicker should be absorbed");
+  assert.equal(smoothed.text, "so then we ship it");
+
+  // ...but a genuine short turn with real pauses around it survives, as does case 3 above.
+  const realTurn = flicker.map((w, i) =>
+    i === 2 ? { ...w, startMs: 1400, endMs: 1600 } : i > 2 ? { ...w, startMs: w.startMs! + 1600, endMs: w.endMs! + 1600 } : w
+  );
+  assert.equal(groupWordsIntoSpeakerTurns(realTurn).turns.length, 3, "paused interjection is a real turn");
+
+  // A long run is never absorbed however tight the timing.
+  const longRun = [
+    ...flicker.slice(0, 2),
+    { word: "no", speaker: "Speaker 2", startMs: 650, endMs: 750 },
+    { word: "wait", speaker: "Speaker 2", startMs: 760, endMs: 900 },
+    { word: "hold", speaker: "Speaker 2", startMs: 910, endMs: 1050 },
+    { word: "on", speaker: "Speaker 1", startMs: 1060, endMs: 1200 },
+  ];
+  assert.equal(groupWordsIntoSpeakerTurns(longRun).turns.length, 3, "3-word run is not a flicker");
+
+  // Words without timings carry no pause evidence, so nothing is smoothed.
+  const untimed = flicker.map(({ word, speaker }) => ({ word, speaker }));
+  assert.deepEqual(smoothSpeakerFlickers(untimed), untimed);
+
+  // 7. Alternating flickers must not CASCADE. Reading the previous run's original tag instead of
+  // its rewritten one turned 1-1-2-1-2-1 into 1-1-1-2-1-1: the third word's correct Speaker 1 was
+  // flipped to Speaker 2, moving the flicker onto a good word rather than removing it.
+  const tag = (n: number, t: number) => ({ word: `w${t}`, speaker: `Speaker ${n}`, startMs: t, endMs: t + 100 });
+  const alternating = [tag(1, 0), tag(1, 150), tag(2, 300), tag(1, 450), tag(2, 600), tag(1, 750)];
+  assert.deepEqual(
+    smoothSpeakerFlickers(alternating).map(w => w.speaker),
+    Array(6).fill("Speaker 1"),
+    "alternating flickers all collapse to the surrounding speaker, none are moved"
+  );
+
+  // 8. The returned word list is the SMOOTHED one, and it is what a caller must count speakers
+  // from. Counting the input array instead reports a speaker the turns no longer contain, and that
+  // count feeds the multi-speaker latch.
+  const collapsed = groupWordsIntoSpeakerTurns(flicker, { alwaysPrefixSpeaker: true });
+  assert.equal(new Set(flicker.map(w => w.speaker)).size, 2, "the INPUT genuinely carries two tags");
+  assert.equal(collapsed.turns.length, 1, "...which smoothing collapses to one turn...");
+  assert.equal(new Set(collapsed.words.map(w => w.speaker)).size, 1,
+    "...so the returned words must carry one tag, or speakerCount contradicts the turns");
 
   console.log("cloud-stt self-check ✓");
 })();

@@ -254,7 +254,7 @@ export const TranscribeAudioRequestSchema = z.object({
   source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
   enableDiarization: z.boolean().optional().describe("Whether to use Google Cloud STT speaker diarization."),
   minSpeakers: z.number().min(1).max(8).optional().describe("Minimum expected speakers (default: 1 — let the recognizer decide; see cloud-stt.ts)."),
-  maxSpeakers: z.number().min(1).max(8).optional().describe("Maximum expected speakers (default: 5)."),
+  maxSpeakers: z.number().min(1).max(8).optional().describe("Maximum expected speakers (default: 1)."),
   sessionId: z.string().optional().describe("Session key for the multi-speaker latch. Without it each chunk decides labelling alone."),
 });
 
@@ -290,7 +290,7 @@ export const SttStreamStartSchema = z.object({
   type: z.literal("start"),
   sessionId: z.string().optional().describe("Capture session key, for telemetry correlation."),
   source: z.enum(["mic", "tab"]).optional().describe("Audio capture source."),
-  maxSpeakers: z.number().min(1).max(8).optional().describe("Upper bound on speakers (default: 5). The lower bound is always 1."),
+  maxSpeakers: z.number().min(1).max(8).optional().describe("Upper bound on speakers (default: 1). The lower bound is always 1."),
   mimeType: z.string().optional().describe("MediaRecorder container, e.g. 'audio/webm;codecs=opus'. Selects WEBM_OPUS vs OGG_OPUS."),
 });
 
@@ -318,7 +318,7 @@ export const SttStatusResponseSchema = z.object({
   authenticated: z.boolean().describe("Whether Google Cloud ADC authentication is active."),
   projectId: z.string().optional().describe("GCP Project ID in use."),
   defaultMinSpeakers: z.number().describe("Default minimum speaker count (1)."),
-  defaultMaxSpeakers: z.number().describe("Default maximum speaker count (5)."),
+  defaultMaxSpeakers: z.number().describe("Default maximum speaker count (2)."),
   supportedModels: z.array(z.string()).describe("Supported STT models."),
   error: z.string().optional().describe("Authentication or configuration error message."),
 });
@@ -625,7 +625,7 @@ export function getOpenApiSpec() {
                       authenticated: { type: "boolean", example: true },
                       projectId: { type: "string", example: "agentclinicep04" },
                       defaultMinSpeakers: { type: "number", example: 1 },
-                      defaultMaxSpeakers: { type: "number", example: 5 },
+                      defaultMaxSpeakers: { type: "number", example: 2 },
                       supportedModels: { type: "array", items: { type: "string" }, example: ["chirp_2", "latest_long", "default"] },
                       error: { type: "string" },
                     },

@@ -38,6 +38,8 @@ function pickMimeType(): string {
 }
 
 export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onError }: Options) {
+  // Set once at stream open from the STT config; see the `alwaysLabel` note on the final handler.
+  const alwaysLabelRef = useRef(false);
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -101,10 +103,13 @@ export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onE
 
     sock.onopen = () => {
       // maxSpeakers is read here rather than per-frame: one recognition, one config, and the
-      // recognizer cannot be reconfigured mid-stream anyway.
+      // recognizer cannot be reconfigured mid-stream anyway. Held for the life of the stream so
+      // every final labels on the same rule the stream opened with.
+      const cfg = readSttConfig();
+      alwaysLabelRef.current = cfg.maxSpeakers > 1;
       sock.send(JSON.stringify({
         type: "start", sessionId, source: sourceTag,
-        maxSpeakers: readSttConfig().maxSpeakers,
+        maxSpeakers: cfg.maxSpeakers,
         // The recognizer has to be told which container it is about to receive; pickMimeType may
         // hand back ogg where webm is unavailable.
         mimeType: pickMimeType(),
@@ -123,7 +128,14 @@ export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onE
         // stream-wide count, not the corroborated latch the chunked path needs — one recognition
         // is one clustering space, so a count of 2 is a fact rather than an inference.
         const utterances = toUtterances(
-          { text: "", turns: msg.turns ?? [], speakerCount: msg.speakers, multiSpeaker: msg.speakers > 1 },
+          {
+            text: "", turns: msg.turns ?? [], speakerCount: msg.speakers,
+            multiSpeaker: msg.speakers > 1,
+            // Detection can only label once the second person has actually spoken, which leaves the
+            // whole opening stretch unlabelled and uncorrectable. If the user said to expect more
+            // than one, label from the first word.
+            alwaysLabel: alwaysLabelRef.current,
+          },
           source,
         );
         if (utterances.length) {
