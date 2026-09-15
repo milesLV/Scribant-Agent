@@ -43,6 +43,8 @@ export interface CloudSttOptions {
   projectId?: string;
   location?: string;
   model?: string;
+  /** Channels in the audio. Required once encoding is pinned — see opusChannelCount. */
+  audioChannelCount?: number;
 }
 
 export interface CloudSttResult {
@@ -365,6 +367,17 @@ export async function transcribeWithCloudStt(
 //
 // Nothing else belongs here either: `model` (video/phone_call/latest_long) and `useEnhanced` were
 // measured to give byte-identical diarization, so they are cost without effect.
+// Channel count from the Opus ID header ("OpusHead", count at byte 9). Pinning WEBM_OPUS makes V1
+// assume mono, but Chrome records a shared tab in stereo, so every tab chunk was rejected
+// ("audio_channel_count `1` ... must match ... `2`") and fell back to Gemini with no speakers.
+// Stereo + diarization then 500s unless per-channel recognition is on (measured live, 2026-09-14).
+// ponytail: the LAST result's diarized words are one channel's — fine for a tab's identical mix; a
+// true two-mic stereo source would need the channels merged by channelTag.
+export function opusChannelCount(audio: Buffer): number | undefined {
+  const at = audio.indexOf("OpusHead");
+  return at < 0 ? undefined : audio[at + 9];
+}
+
 export function buildV1Config(options: CloudSttOptions) {
   const enableDiarization = options.enableDiarization !== false;
   const minSpeakerCount = Math.max(1, options.minSpeakers ?? 1);
@@ -384,6 +397,7 @@ export function buildV1Config(options: CloudSttOptions) {
     enableAutomaticPunctuation: true,
     enableWordTimeOffsets: true,
     ...(encoding ? { encoding, sampleRateHertz } : {}),
+    ...((options.audioChannelCount ?? 1) > 1 ? { audioChannelCount: options.audioChannelCount, ...(enableDiarization ? { enableSeparateRecognitionPerChannel: true } : {}) } : {}),
     diarizationConfig: enableDiarization
       ? { enableSpeakerDiarization: true, minSpeakerCount, maxSpeakerCount }
       : undefined,
@@ -398,7 +412,7 @@ async function transcribeWithCloudSttV1(
   options: CloudSttOptions
 ): Promise<CloudSttResult> {
   const url = "https://speech.googleapis.com/v1/speech:recognize";
-  const requestBody = { config: buildV1Config(options), audio: { content: cleanAudio } };
+  const requestBody = { config: buildV1Config({ ...options, audioChannelCount: opusChannelCount(Buffer.from(cleanAudio, "base64")) }), audio: { content: cleanAudio } };
 
   const response = await fetch(url, {
     method: "POST",
@@ -561,6 +575,16 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   assert.equal(buildV1Config({ enableDiarization: false }).diarizationConfig, undefined);
   // These were measured as no-ops for diarization; keep them out of the request.
   assert.ok(!("model" in autoCfg) && !("useEnhanced" in autoCfg), "no model/useEnhanced cargo cult");
+  // Channel count: read from the Opus header, passed through only when known.
+  const head = (ch: number) => Buffer.concat([Buffer.alloc(229), Buffer.from("OpusHead"), Buffer.from([1, ch, 0x38, 0x01])]);
+  assert.equal(opusChannelCount(head(2)), 2, "stereo tab audio");
+  assert.equal(opusChannelCount(head(1)), 1, "mono mic audio");
+  assert.equal(opusChannelCount(Buffer.from("RIFF....WAVE")), undefined, "non-Opus audio has no header");
+  const stereoCfg = buildV1Config({ mimeType: "audio/webm", audioChannelCount: 2 });
+  assert.equal(stereoCfg.audioChannelCount, 2);
+  assert.equal(stereoCfg.enableSeparateRecognitionPerChannel, true, "stereo + diarization 500s without per-channel");
+  assert.ok(!("audioChannelCount" in buildV1Config({ mimeType: "audio/webm", audioChannelCount: 1 })), "mono stays unspecified, as it always worked");
+  assert.ok(!("audioChannelCount" in autoCfg), "unknown channel count stays unspecified");
 
   // 6. Flicker smoothing: a 1-word hand-off with no pause on either side is absorbed...
   const flicker: DiarizedWord[] = [

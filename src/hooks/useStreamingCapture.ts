@@ -146,12 +146,15 @@ export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onE
       }
 
       if (msg.type === "segment_due") {
-        // Cut the container and the recognition together. Ordering matters: stop the recorder
-        // first so its last cluster reaches the OLD stream, then ask the server to reopen, then
-        // start a fresh recorder whose first blob carries the header the new stream needs.
-        if (recorderRef.current?.state === "recording") recorderRef.current.stop();
-        if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "segment" }));
-        startRecorder();
+        // Cut the container and the recognition together. rec.stop() is async and the tail blob fires
+        // before onstop, so reopen from onstop (as in stop() above). Reopening immediately sent the
+        // headerless tail into the NEW recognition first, and it decoded nothing (measured live).
+        const rec = recorderRef.current;
+        const reopen = () => {
+          if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "segment" }));
+          startRecorder();
+        };
+        if (rec?.state === "recording") { rec.onstop = reopen; rec.stop(); } else reopen();
         return;
       }
 

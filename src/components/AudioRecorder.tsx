@@ -493,7 +493,12 @@ export default function AudioRecorder({
   // Unmounting (recorderKey bump on Clear All, in App.tsx) must tear down the shared-tab capture the
   // same way the mic recognizer does above — otherwise the browser keeps recording/uploading a tab
   // that's no longer wired to anything on screen.
-  useEffect(() => () => stopTabAudio(), [stopTabAudio]);
+  // Through a ref with [] deps: stopTabAudio is a new function every render (the capture hooks close
+  // over inline callbacks), so depending on it ran this cleanup on EVERY render — the re-render from
+  // setIsSharing(true) stopped the tab capture the instant it started.
+  const stopTabAudioRef = useRef(stopTabAudio);
+  stopTabAudioRef.current = stopTabAudio;
+  useEffect(() => () => stopTabAudioRef.current(), []);
 
   const handleToggleTabAudio = () => {
     setTabAudioError(null);
