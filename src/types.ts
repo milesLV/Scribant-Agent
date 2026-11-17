@@ -18,7 +18,7 @@ export interface CalendarEvent {
   end: string; // ISO string
   allDay?: boolean; // spans whole day(s) with no clock time (trip, birthday, OOO)
   timeZone?: string; // IANA time zone identifier (e.g. America/Los_Angeles)
-  status: 'pending' | 'scheduled' | 'failed';
+  status: 'pending' | 'scheduled' | 'failed' | 'undone';
   eventId?: string;
   // Fingerprint of the field values last written to Google. Drift means the remote copy is stale.
   synced?: string;
@@ -33,7 +33,7 @@ export interface TaskItem {
   title: string;
   notes: string;
   dueDate?: string; // ISO date (YYYY-MM-DD) deadline, if the action is time-bounded
-  status: 'pending' | 'created' | 'failed';
+  status: 'pending' | 'created' | 'failed' | 'undone';
   taskId?: string;
   // Fingerprint of the field values last written to Google. Drift means the remote copy is stale.
   synced?: string;
@@ -134,15 +134,6 @@ export interface AdkEvent {
   [key: string]: any;
 }
 
-export type MemoryEventType = "memory:insert" | "memory:retrieve" | "memory:sync";
-export type MemoryEventStatus = "success" | "error" | "pending";
-
-export interface RetrievedMemoryItem {
-  text: string;
-  author: string;
-  timestamp: string;
-}
-
 export interface CompactionMetrics {
   rawTokens: number;
   compactedTokens: number;
@@ -174,74 +165,8 @@ export interface TokenStatsResponse {
   efficiency: MemoryEfficiencyReport;
 }
 
-export interface TokenMetricRecord {
-  id: string;
-  timestamp: string;
-  timestampMs: number;
-  model: string;
-  agent: string;
-  stage: string;
-  modality: "audio" | "text" | "multimodal";
-  userId: string;
-  sessionId: string;
-  status: "success" | "error";
-  errorCode?: string;
-  promptTokens: number;
-  candidatesTokens: number;
-  thoughtsTokens: number;
-  cachedTokens: number;
-  totalTokens: number;
-  audioInputTokens: number;
-  textInputTokens: number;
-  durationMs: number;
-  costEstimateUsd: number;
-
-  // Invocation Metadata & Telemetry Tags
-  diarizationEnabled?: boolean;
-  provider?: "gemini" | "google_cloud_stt" | string;
-  source?: "mic" | "tab" | "upload" | "pipeline" | string;
-  metadata?: Record<string, any>;
-}
-
-export interface TimeSeriesPoint {
-  timestamp: number;
-  timeLabel: string;
-  promptTokens: number;
-  candidatesTokens: number;
-  thoughtsTokens: number;
-  audioTokens: number;
-  totalTokens: number;
-  requestCount: number;
-  avgDurationMs: number;
-  costUsd: number;
-}
-
-export interface AggregateDimensionStats {
-  tokens: number;
-  percent: number;
-  requests: number;
-  costUsd: number;
-}
-
-export interface TokenAggregateStats {
-  ok: boolean;
-  totalTokens: number;
-  totalPromptTokens: number;
-  totalCandidatesTokens: number;
-  totalThoughtsTokens: number;
-  totalAudioTokens: number;
-  totalCostUsd: number;
-  requestCount: number;
-  avgLatencyMs: number;
-  byAgent: Record<string, AggregateDimensionStats>;
-  byModel: Record<string, AggregateDimensionStats>;
-  byModality: Record<string, AggregateDimensionStats>;
-  byStage: Record<string, AggregateDimensionStats>;
-  byDiarization?: Record<string, AggregateDimensionStats>;
-  byProvider?: Record<string, AggregateDimensionStats>;
-}
-
-export type MemoryEvent = AdkEvent;
+// Server-owned shapes; type-only, so nothing from the server module reaches the bundle.
+export type { TokenMetricRecord, TimeSeriesPoint, AggregateDimensionStats, TokenAggregateStats } from "../token-telemetry";
 
 export type TimeRangePreset = "10m" | "30m" | "1h" | "4h" | "24h" | "7d" | "custom";
 

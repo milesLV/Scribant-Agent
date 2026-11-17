@@ -1,37 +1,20 @@
 import { useLayoutEffect, useRef, useCallback, type RefObject } from "react";
 
-/** What a click on the read-only view told us about where to resume editing. */
-interface PendingClick {
-  /** Character offset into the transcript, or null if the browser couldn't map the point. */
-  offset: number | null;
-  /** The click's Y offset from the container's top edge, so the clicked line lands back under it. */
-  clickY: number;
-}
-
 /**
- * Click-to-edit hand-off for the transcript panel: the read-only div is swapped for a
- * textarea, and this lands both the caret AND the scroll position where the user clicked.
- *
- * Scroll position is derived from the caret rather than copied from the div. The two elements
- * are deliberately kept on the same type scale and line height so the text doesn't reflow on
- * click, but they still don't render the same CONTENT — the div carries interim text and inline
- * correction chips the textarea has no equivalent for, so its scrollHeight differs and a raw
- * scrollTop copy would drift. Measuring the caret in the textarea's own layout is immune to
- * that, and anchoring on the click's Y offset puts the clicked line back under the pointer.
- *
- * ponytail: two forced layouts per click (prefix height, then full height) is the floor for
- * this technique, and it only runs on a discrete user gesture — not worth a mirror-div rewrite.
- * The deeper fix is rendering ONE element instead of a div and a textarea that must be
- * reconciled on every mode switch; that's blocked on the div's chips/coloring.
+ * Click-to-edit hand-off: when the read-only div becomes a textarea, put the caret AND the scroll
+ * position where the user clicked. Scroll is derived from the caret in the textarea's own layout,
+ * not copied from the div — the div also renders interim text and correction chips, so its
+ * scrollHeight differs and a scrollTop copy would drift.
+ * ponytail: two forced layouts per click; fine for a discrete gesture. The real fix is one element
+ * instead of a div/textarea pair, blocked on the div's chips.
  */
 export function useClickToEditCaret(
   ref: RefObject<HTMLTextAreaElement | null>,
   active: boolean,
-  // Injected rather than imported: it lives next to the JSX whose DOM shape it depends on, and
-  // that file is being rewritten on several branches — keep this hook out of the blast radius.
   caretOffsetFromPoint: (x: number, y: number, container: Node) => number | null
 ) {
-  const pendingRef = useRef<PendingClick | null>(null);
+  // offset: char offset (null if the browser couldn't map the point); clickY: px from the top.
+  const pendingRef = useRef<{ offset: number | null; clickY: number } | null>(null);
 
   /** Call from the read-only div's onClick, BEFORE flipping into edit mode. */
   const captureClick = useCallback(

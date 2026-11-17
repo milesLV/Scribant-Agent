@@ -21,17 +21,9 @@ export interface SpeakerTurn {
   words: DiarizedWord[];
 }
 
-/**
- * Upper bound used when a caller names none. Two, because that is what a diarized session almost
- * always is — one other person in the room — and the cap is not free: it is the ceiling the
- * recognizer is allowed to cluster up to, so a loose one lets a noisy mic split one voice across
- * several phantom speakers. Raise it per-request for a genuine group.
- *
- * The lower bound is NOT configurable and is always 1; see buildV1Config.
- *
- * The browser has its own copy in useChunkedCapture.ts — this module imports node:assert and
- * cannot be pulled into the client bundle. Change both together.
- */
+// Upper bound when a caller names none. Kept at 1: a loose cap lets a noisy mic split one voice into
+// phantom speakers; raise it per-request for a real group. The floor is always 1 (see buildV1Config).
+// useChunkedCapture.ts keeps a copy (this module imports node:assert) — change both together.
 export const DEFAULT_MAX_SPEAKERS = 1;
 
 export interface CloudSttOptions {
@@ -40,9 +32,6 @@ export interface CloudSttOptions {
   minSpeakers?: number;
   maxSpeakers?: number;
   languageCode?: string;
-  projectId?: string;
-  location?: string;
-  model?: string;
   /** Channels in the audio. Required once encoding is pinned — see opusChannelCount. */
   audioChannelCount?: number;
 }
@@ -55,30 +44,19 @@ export interface CloudSttResult {
   provider: "google_cloud_stt";
 }
 
-// Parses string offsets like "1.200s" or "2s" into milliseconds
+// "1.200s" | "2s" | 1.5 → ms
 export function parseOffsetMs(offset?: string | number): number | undefined {
-  if (offset === undefined || offset === null) return undefined;
   if (typeof offset === "number") return Math.round(offset * 1000);
-  const match = String(offset).match(/^([\d.]+)\s*s?$/);
-  if (match) {
-    return Math.round(parseFloat(match[1]) * 1000);
-  }
-  return undefined;
+  const match = offset?.match(/^([\d.]+)\s*s?$/);
+  return match ? Math.round(parseFloat(match[1]) * 1000) : undefined;
 }
 
-// Acoustic diarization flickers: inside one person's continuous speech it will occasionally hand
-// one or two words to the other speaker and then hand them straight back, which surfaces as a
-// spurious "Speaker 2: yeah" paragraph mid-sentence. A real floor exchange leaves a pause; a
-// flicker does not. So a short run is rewritten to its neighbours' speaker only when ALL of:
-//   - both neighbouring runs are the same speaker (there is something to hand it back to)
-//   - the run is at most FLICKER_MAX_WORDS long
-//   - it is butted up against the speech on both sides (gap <= FLICKER_MAX_GAP_MS)
-// Timings are optional in DiarizedWord; with no timings there is no pause evidence, so nothing is
-// smoothed rather than guessing. Both transports route through groupWordsIntoSpeakerTurns, so the
-// streaming path (stt-stream.ts) gets this too.
-// ponytail: fixed thresholds, picked from synthetic cases and not yet tuned on real room audio. If
-// a real backchannel ("yeah", "right") ever gets absorbed, gate on word confidence rather than
-// loosening the gap — the gap is the only thing separating a flicker from a short real turn.
+// Diarization flickers: mid-sentence it hands 1-2 words to the other speaker and straight back. A
+// real floor exchange leaves a pause; a flicker does not. So a run is rewritten to its neighbours'
+// speaker only when both neighbours match, it is <= FLICKER_MAX_WORDS, and both gaps are
+// <= FLICKER_MAX_GAP_MS. No timings = no pause evidence = left alone.
+// ponytail: thresholds picked from synthetic cases, untuned on room audio. If a real backchannel
+// ("yeah") gets absorbed, gate on word confidence rather than loosening the gap.
 const FLICKER_MAX_WORDS = 2;
 const FLICKER_MAX_GAP_MS = 200;
 
@@ -97,11 +75,8 @@ export function smoothSpeakerFlickers(words: DiarizedWord[]): DiarizedWord[] {
   let out: DiarizedWord[] | null = null;
   for (let r = 1; r < runs.length - 1; r++) {
     const run = runs[r];
-    // The PREVIOUS run's speaker after any rewrite it already received, not the tag it arrived
-    // with. Reading the original here is wrong on alternating flickers (1 1 2 1 2 1): once the
-    // first `2` has been absorbed into `1`, the correct `1` that follows it looks like a lone `1`
-    // between two `2`s and gets flipped — moving the flicker onto a good word instead of removing
-    // it. Measured: 112121 came out as 111211.
+    // The previous run's speaker AFTER its rewrite: reading the original tag cascades alternating
+    // flickers (112121 came out 111211).
     const prevSpeaker = runs[r - 1].speaker;
     const next = runs[r + 1];
     if (prevSpeaker !== next.speaker) continue;
@@ -122,276 +97,152 @@ export function smoothSpeakerFlickers(words: DiarizedWord[]): DiarizedWord[] {
 
 // Silence between the end of `a` and the start of `b`, or undefined if either offset is missing.
 function gapMs(a: DiarizedWord, b: DiarizedWord): number | undefined {
-  const end = a?.endMs ?? a?.startMs;
-  const start = b?.startMs;
-  if (end === undefined || start === undefined) return undefined;
-  return Math.max(0, start - end);
+  const end = a?.endMs ?? a?.startMs, start = b?.startMs;
+  return end === undefined || start === undefined ? undefined : Math.max(0, start - end);
 }
 
-// Groups word-level diarization tokens into structured dialogue turns
+// Word-level tags → turns. The returned `words` are SMOOTHED: count speakers from them, not the
+// input, or speakerCount reports a flicker the turns no longer contain.
 export function groupWordsIntoSpeakerTurns(
   words: DiarizedWord[],
   options?: { alwaysPrefixSpeaker?: boolean }
-  // `words` comes back SMOOTHED. Callers must count distinct speakers off this and not off the
-  // array they passed in: smoothing can collapse a two-tag chunk to one, and a caller re-deriving
-  // the count from its own copy reports a speaker the turns no longer contain. That count feeds
-  // the multi-speaker latch, so a flicker would otherwise corroborate exactly what corroboration
-  // exists to reject.
 ): { text: string; turns: SpeakerTurn[]; words: DiarizedWord[] } {
-  if (!words || words.length === 0) {
-    return { text: "", turns: [], words: [] };
-  }
+  if (!words?.length) return { text: "", turns: [], words: [] };
   words = smoothSpeakerFlickers(words);
 
-  const distinctSpeakers = new Set(words.map((w) => w.speaker).filter(Boolean));
-  const isMultiSpeaker = distinctSpeakers.size > 1 || Boolean(options?.alwaysPrefixSpeaker);
-
   const turns: SpeakerTurn[] = [];
-  let currentSpeaker = words[0].speaker || "Speaker 1";
-  let currentWords: DiarizedWord[] = [];
-  let turnStartMs = words[0].startMs;
-
   for (const w of words) {
     const speaker = w.speaker || "Speaker 1";
-    if (speaker !== currentSpeaker && currentWords.length > 0) {
-      const turnText = currentWords.map((cw) => cw.word).join(" ").trim();
-      const lastWord = currentWords[currentWords.length - 1];
-      turns.push({
-        speaker: currentSpeaker,
-        text: turnText,
-        startMs: turnStartMs,
-        endMs: lastWord?.endMs ?? lastWord?.startMs,
-        words: currentWords,
-      });
-      currentSpeaker = speaker;
-      currentWords = [w];
-      turnStartMs = w.startMs;
-    } else {
-      currentWords.push(w);
-    }
+    const last = turns[turns.length - 1];
+    if (last?.speaker === speaker) last.words.push(w);
+    else turns.push({ speaker, text: "", startMs: w.startMs, words: [w] });
+  }
+  for (const t of turns) {
+    const end = t.words[t.words.length - 1];
+    t.text = t.words.map((w) => w.word).join(" ").trim();
+    t.endMs = end.endMs ?? end.startMs;
   }
 
-  if (currentWords.length > 0) {
-    const turnText = currentWords.map((cw) => cw.word).join(" ").trim();
-    const lastWord = currentWords[currentWords.length - 1];
-    turns.push({
-      speaker: currentSpeaker,
-      text: turnText,
-      startMs: turnStartMs,
-      endMs: lastWord?.endMs ?? lastWord?.startMs,
-      words: currentWords,
-    });
-  }
-
-  // Format full transcript text:
-  // If multi-speaker or alwaysPrefixSpeaker, prefix turns with "Speaker N: <text>"
-  // If single-speaker, return continuous flowing text
-  let fullText = "";
-  if (isMultiSpeaker) {
-    fullText = turns
-      .map((t) => `${t.speaker}: ${t.text}`)
-      .join("\n\n");
-  } else {
-    fullText = turns.map((t) => t.text).join(" ").trim();
-  }
-
-  return { text: fullText, turns, words };
+  const multi = turns.length > 1 && new Set(turns.map((t) => t.speaker)).size > 1;
+  const text = multi || options?.alwaysPrefixSpeaker
+    ? turns.map((t) => `${t.speaker}: ${t.text}`).join("\n\n")
+    : turns.map((t) => t.text).join(" ").trim();
+  return { text, turns, words };
 }
 
-// Normalizes raw speaker label numbers ("1", "2") to friendly names ("Speaker 1", "Speaker 2")
+// "1" | 2 → "Speaker N"; names pass through; empty → "Speaker 1".
 export function formatSpeakerTag(rawLabel?: string | number): string {
-  if (rawLabel === undefined || rawLabel === null || rawLabel === "") return "Speaker 1";
-  const str = String(rawLabel).trim();
-  if (/^\d+$/.test(str)) {
-    return `Speaker ${str}`;
-  }
-  return str;
+  const str = String(rawLabel ?? "").trim();
+  return !str ? "Speaker 1" : /^\d+$/.test(str) ? `Speaker ${str}` : str;
 }
 
-// Helper to obtain Google Cloud access token and project ID using google-auth-library
-/**
- * The project speech.googleapis.com should bill and rate-limit against.
- *
- * Required, not optional. `gcloud auth application-default login` writes a credential file with no
- * `quota_project_id` in it, and every Speech API call made with a bare user credential and no quota
- * project is rejected outright: PERMISSION_DENIED, "requires a quota project, which is not set by
- * default". Being signed in is not enough — authentication and quota attribution are separate
- * things, and only the second one is missing.
- *
- * REST sends it as the `x-goog-user-project` header; the gRPC client takes it as `quotaProjectId`.
- * Both callers resolve it here so they cannot drift, which is exactly how the streaming path
- * shipped broken while the REST path worked.
- */
+const googleAuth = async () =>
+  new (await import("google-auth-library")).GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+
+// The project Speech bills against — REQUIRED: ADC user credentials carry no quota_project_id, and
+// Speech rejects them without one (PERMISSION_DENIED "requires a quota project"). REST sends it as
+// x-goog-user-project, gRPC as quotaProjectId; both resolve it here so they cannot drift.
 export async function resolveProjectId(): Promise<string> {
   const fromEnv = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT;
   if (fromEnv) return fromEnv;
-
-  const { GoogleAuth } = await import("google-auth-library");
-  const projectId = await new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-  }).getProjectId();
-  if (!projectId) {
-    throw new Error("GCP Project ID not found. Set GOOGLE_CLOUD_PROJECT in your environment or .env file.");
-  }
+  const projectId = await (await googleAuth()).getProjectId();
+  if (!projectId) throw new Error("GCP Project ID not found. Set GOOGLE_CLOUD_PROJECT in your environment or .env file.");
   return projectId;
 }
 
 async function getGoogleAuthClient(): Promise<{ token: string; projectId: string }> {
-  const { GoogleAuth } = await import("google-auth-library");
-  const auth = new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-  });
-
-  const client = await auth.getClient();
-  const tokenResponse = await client.getAccessToken();
-  const token = typeof tokenResponse === "string" ? tokenResponse : tokenResponse.token;
-  if (!token) {
-    throw new Error("Failed to obtain GCP access token. Ensure Application Default Credentials (ADC) are configured via `gcloud auth application-default login`.");
-  }
-
+  const res = await (await (await googleAuth()).getClient()).getAccessToken();
+  const token = typeof res === "string" ? res : res.token;
+  if (!token) throw new Error("Failed to obtain GCP access token. Ensure Application Default Credentials (ADC) are configured via `gcloud auth application-default login`.");
   return { token, projectId: await resolveProjectId() };
 }
 
-// Transcribe audio using Google Cloud Speech-to-Text API with speaker diarization
-export async function transcribeWithCloudStt(
-  audioBase64: string,
-  options: CloudSttOptions = {}
-): Promise<CloudSttResult> {
-  const { token, projectId } = await getGoogleAuthClient();
-  const enableDiarization = options.enableDiarization !== false;
-
-  // Clean base64 payload if it includes data URL prefix
-  const cleanAudio = audioBase64.replace(/^data:audio\/[^;]+;base64,/, "");
-
-  // When speaker diarization is requested, use Google Cloud STT V1 which natively
-  // supports real-time synchronous speaker diarization with speakerTag tracking.
-  if (enableDiarization) {
-    return transcribeWithCloudSttV1(cleanAudio, token, projectId, options);
-  }
-
-  // When diarization is not requested, use Google Cloud STT V2 Chirp 2 in us-central1
-  const languageCode = options.languageCode || "en-US";
-  const url = `https://us-central1-speech.googleapis.com/v2/projects/${projectId}/locations/us-central1/recognizers/_:recognize`;
-
-  const requestBody: Record<string, any> = {
-    config: {
-      autoDecodingConfig: {},
-      languageCodes: [languageCode],
-      model: options.model || "chirp_2",
-    },
-    content: cleanAudio,
-  };
-
-  const response = await fetch(url, {
+const speechPost = (url: string, body: unknown, token: string, projectId: string) =>
+  fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      "x-goog-user-project": projectId,
-    },
-    body: JSON.stringify(requestBody),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "x-goog-user-project": projectId },
+    body: JSON.stringify(body),
   });
 
+// Shared V1/V2 response parsing. V1 diarization puts the complete diarized word list in the LAST
+// result; otherwise words are spread across results.
+function toResult(data: any, options: CloudSttOptions, lastHasAll: boolean): CloudSttResult {
+  const results: any[] = data.results || [];
+  const last = results.at(-1)?.alternatives?.[0];
+  const alts = lastHasAll && last?.words?.length ? [last] : results.map((r) => r.alternatives?.[0]).filter(Boolean);
+  const words: DiarizedWord[] = alts.flatMap((a) => (a.words || []).map((w: any) => ({
+    word: w.word,
+    speaker: formatSpeakerTag(w.speakerTag || w.speakerLabel),
+    startMs: parseOffsetMs(w.startTime ?? w.startOffset),
+    endMs: parseOffsetMs(w.endTime ?? w.endOffset),
+    confidence: w.confidence,
+  })));
+  const prefix = Boolean(options.enableDiarization);
+
+  if (!words.length) {
+    const raw = results.map((r) => r.alternatives?.[0]?.transcript).filter(Boolean).join(" ").trim();
+    return {
+      text: prefix && raw ? `Speaker 1: ${raw}` : raw,
+      speakerTurns: raw ? [{ speaker: "Speaker 1", text: raw, words: [] }] : [],
+      words: [],
+      speakerCount: raw ? 1 : 0,
+      provider: "google_cloud_stt",
+    };
+  }
+  const { text, turns, words: diarized } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: prefix });
+  return { text, speakerTurns: turns, words: diarized, speakerCount: new Set(diarized.map((w) => w.speaker)).size, provider: "google_cloud_stt" };
+}
+
+// Diarization routes to V1 (V2 sync rejects diarizationConfig); plain recognition uses V2 chirp_2,
+// falling back to V1 on a 400/404 from the default recognizer.
+export async function transcribeWithCloudStt(audioBase64: string, options: CloudSttOptions = {}): Promise<CloudSttResult> {
+  const { token, projectId } = await getGoogleAuthClient();
+  const cleanAudio = audioBase64.replace(/^data:audio\/[^;]+;base64,/, "");
+  if (options.enableDiarization !== false) return transcribeWithCloudSttV1(cleanAudio, token, projectId, options);
+
+  const response = await speechPost(
+    `https://us-central1-speech.googleapis.com/v2/projects/${projectId}/locations/us-central1/recognizers/_:recognize`,
+    { config: { autoDecodingConfig: {}, languageCodes: [options.languageCode || "en-US"], model: "chirp_2" }, content: cleanAudio },
+    token, projectId,
+  );
   if (!response.ok) {
     const errorText = await response.text();
-    // If V2 default recognizer returns 404/400, attempt V1 fallback
     if (response.status === 404 || response.status === 400) {
       console.warn(`[CloudSTT] V2 request failed (${response.status}), attempting V1 fallback:`, errorText);
       return transcribeWithCloudSttV1(cleanAudio, token, projectId, options);
     }
     throw new Error(`Google Cloud STT V2 API error (${response.status}): ${errorText}`);
   }
-
-  const data = await response.json();
-  const words: DiarizedWord[] = [];
-
-  // Parse V2 results structure
-  for (const result of data.results || []) {
-    const alternative = result.alternatives?.[0];
-    if (!alternative) continue;
-
-    for (const w of alternative.words || []) {
-      const rawSpeaker = w.speakerLabel || w.speakerTag;
-      words.push({
-        word: w.word,
-        speaker: formatSpeakerTag(rawSpeaker),
-        startMs: parseOffsetMs(w.startOffset),
-        endMs: parseOffsetMs(w.endOffset),
-        confidence: w.confidence,
-      });
-    }
-  }
-
-  // If no word-level entries were returned but transcript text exists, fall back to top transcript
-  if (words.length === 0) {
-    const rawTranscript = (data.results || [])
-      .map((r: any) => r.alternatives?.[0]?.transcript)
-      .filter(Boolean)
-      .join(" ");
-    const fallbackText = options.enableDiarization && rawTranscript ? `Speaker 1: ${rawTranscript.trim()}` : rawTranscript.trim();
-    return {
-      text: fallbackText,
-      speakerTurns: rawTranscript ? [{ speaker: "Speaker 1", text: rawTranscript.trim(), words: [] }] : [],
-      words: [],
-      speakerCount: rawTranscript ? 1 : 0,
-      provider: "google_cloud_stt",
-    };
-  }
-
-  const { text, turns, words: diarized } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
-  const distinctSpeakers = new Set(diarized.map((w) => w.speaker).filter(Boolean));
-
-  return {
-    text,
-    speakerTurns: turns,
-    words: diarized,
-    speakerCount: distinctSpeakers.size,
-    provider: "google_cloud_stt",
-  };
+  return toResult(await response.json(), options, false);
 }
 
-// The V1 `config` block, split out from the request so it can be asserted without a network call.
+// ponytail: the speaker floor stays at 1 — do NOT "help" the clusterer by raising it. Measured on the
+// live V1 API, minSpeakerCount is advisory: on clean two-speaker audio min=1/2/3 gave byte-identical
+// output, and on uncertain (noisy-room) audio a floor of 2 split one speaker at an arbitrary pause.
+// No benefit, measured harm (shipped once, in bce2bd7). `model` and `useEnhanced` were likewise
+// byte-identical for diarization, so they stay out too.
 //
-// ponytail: the speaker floor stays at 1 — do NOT "help" the clusterer by raising it.
-//
-// Measured against the live V1 API, minSpeakerCount is ADVISORY, not the hard k>=N constraint the
-// name suggests, and every effect observed from raising it was harmful:
-//   - Real speech ignores it. On Google's own two-speaker sample (commercial_mono.wav), min=1 and
-//     min=2 gave byte-identical output on every 8s chunk, and a genuinely single-speaker span
-//     stayed at 1 speaker for min=1, min=2 AND min=3. Raising it buys nothing on clean audio.
-//   - It only bites when the clusterer is UNCERTAIN, and then it fabricates: on low-confidence
-//     audio a floor of 2 split one continuous speaker at an arbitrary pause, which is what a
-//     noisy shared-room mic looks like to the recognizer.
-// Zero measured benefit, non-zero measured harm. The live capture path pins this at 1 and the
-// Admin control sets the upper bound only. Raising the floor shipped once, in bce2bd7.
-//
-// Nothing else belongs here either: `model` (video/phone_call/latest_long) and `useEnhanced` were
-// measured to give byte-identical diarization, so they are cost without effect.
-// Channel count from the Opus ID header ("OpusHead", count at byte 9). Pinning WEBM_OPUS makes V1
-// assume mono, but Chrome records a shared tab in stereo, so every tab chunk was rejected
-// ("audio_channel_count `1` ... must match ... `2`") and fell back to Gemini with no speakers.
-// Stereo + diarization then 500s unless per-channel recognition is on (measured live, 2026-09-14).
-// ponytail: the LAST result's diarized words are one channel's — fine for a tab's identical mix; a
-// true two-mic stereo source would need the channels merged by channelTag.
+// Channel count comes from the Opus ID header ("OpusHead", count at byte 9): pinning WEBM_OPUS makes
+// V1 assume mono, but Chrome records a shared tab in stereo, and stereo + diarization 500s without
+// per-channel recognition (measured 2026-09-14).
+// ponytail: the last result's diarized words are one channel's — fine for a tab's identical mix; a
+// true two-mic source would need channels merged by channelTag.
 export function opusChannelCount(audio: Buffer): number | undefined {
   const at = audio.indexOf("OpusHead");
   return at < 0 ? undefined : audio[at + 9];
 }
 
+// V1 recognize auto-detects badly on container formats, so pin encoding (and the rate Opus always
+// uses) when the MIME type is one we recognise; anything else falls back to auto-detect.
+const ENCODINGS: [RegExp, string, number?][] = [
+  [/webm/, "WEBM_OPUS", 48000], [/ogg|opus/, "OGG_OPUS", 48000], [/wav|linear16/, "LINEAR16"], [/mp3/, "MP3"], [/flac/, "FLAC"],
+];
+
 export function buildV1Config(options: CloudSttOptions) {
   const enableDiarization = options.enableDiarization !== false;
   const minSpeakerCount = Math.max(1, options.minSpeakers ?? 1);
   const maxSpeakerCount = Math.max(minSpeakerCount, options.maxSpeakers ?? DEFAULT_MAX_SPEAKERS);
-  // V1 recognize auto-detects badly on container formats, so pin encoding (and the rate Opus
-  // always uses) when the MIME type is one we recognise; anything else falls back to auto-detect.
-  const mime = (options.mimeType || "").toLowerCase();
-  let encoding: string | undefined;
-  let sampleRateHertz: number | undefined;
-  if (mime.includes("webm")) { encoding = "WEBM_OPUS"; sampleRateHertz = 48000; }
-  else if (mime.includes("ogg") || mime.includes("opus")) { encoding = "OGG_OPUS"; sampleRateHertz = 48000; }
-  else if (mime.includes("wav") || mime.includes("linear16")) { encoding = "LINEAR16"; }
-  else if (mime.includes("mp3")) { encoding = "MP3"; }
-  else if (mime.includes("flac")) { encoding = "FLAC"; }
+  const [, encoding, sampleRateHertz] = ENCODINGS.find(([re]) => re.test((options.mimeType || "").toLowerCase())) ?? [];
   return {
     languageCode: options.languageCode || "en-US",
     enableAutomaticPunctuation: true,
@@ -404,113 +255,19 @@ export function buildV1Config(options: CloudSttOptions) {
   };
 }
 
-// Transcribe using Google Cloud STT V1 API (native support for synchronous speaker diarization)
-async function transcribeWithCloudSttV1(
-  cleanAudio: string,
-  token: string,
-  projectId: string,
-  options: CloudSttOptions
-): Promise<CloudSttResult> {
-  const url = "https://speech.googleapis.com/v1/speech:recognize";
-  const requestBody = { config: buildV1Config({ ...options, audioChannelCount: opusChannelCount(Buffer.from(cleanAudio, "base64")) }), audio: { content: cleanAudio } };
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      "x-goog-user-project": projectId,
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Google Cloud STT V1 API error (${response.status}): ${errorText}`);
-  }
-
-  const data = await response.json();
-  const words: DiarizedWord[] = [];
-
-  // In V1, the final result in results contains the complete diarized words list
-  const lastResult = (data.results || []).slice(-1)[0];
-  const lastAlternative = lastResult?.alternatives?.[0];
-
-  if (lastAlternative?.words?.length) {
-    for (const w of lastAlternative.words) {
-      const rawSpeaker = w.speakerTag || w.speakerLabel;
-      words.push({
-        word: w.word,
-        speaker: formatSpeakerTag(rawSpeaker),
-        startMs: parseOffsetMs(w.startTime),
-        endMs: parseOffsetMs(w.endTime),
-        confidence: w.confidence,
-      });
-    }
-  } else {
-    // Collect words from all alternatives
-    for (const result of data.results || []) {
-      const alternative = result.alternatives?.[0];
-      if (!alternative) continue;
-      for (const w of alternative.words || []) {
-        words.push({
-          word: w.word,
-          speaker: formatSpeakerTag(w.speakerTag || w.speakerLabel),
-          startMs: parseOffsetMs(w.startTime),
-          endMs: parseOffsetMs(w.endTime),
-          confidence: w.confidence,
-        });
-      }
-    }
-  }
-
-  if (words.length === 0) {
-    const rawTranscript = (data.results || [])
-      .map((r: any) => r.alternatives?.[0]?.transcript)
-      .filter(Boolean)
-      .join(" ");
-    const fallbackText = options.enableDiarization && rawTranscript ? `Speaker 1: ${rawTranscript.trim()}` : rawTranscript.trim();
-    return {
-      text: fallbackText,
-      speakerTurns: rawTranscript ? [{ speaker: "Speaker 1", text: rawTranscript.trim(), words: [] }] : [],
-      words: [],
-      speakerCount: rawTranscript ? 1 : 0,
-      provider: "google_cloud_stt",
-    };
-  }
-
-  const { text, turns, words: diarized } = groupWordsIntoSpeakerTurns(words, { alwaysPrefixSpeaker: Boolean(options.enableDiarization) });
-  const distinctSpeakers = new Set(diarized.map((w) => w.speaker).filter(Boolean));
-
-  return {
-    text,
-    speakerTurns: turns,
-    words: diarized,
-    speakerCount: distinctSpeakers.size,
-    provider: "google_cloud_stt",
-  };
+async function transcribeWithCloudSttV1(cleanAudio: string, token: string, projectId: string, options: CloudSttOptions): Promise<CloudSttResult> {
+  const config = buildV1Config({ ...options, audioChannelCount: opusChannelCount(Buffer.from(cleanAudio, "base64")) });
+  const response = await speechPost("https://speech.googleapis.com/v1/speech:recognize", { config, audio: { content: cleanAudio } }, token, projectId);
+  if (!response.ok) throw new Error(`Google Cloud STT V1 API error (${response.status}): ${await response.text()}`);
+  return toResult(await response.json(), options, true);
 }
 
-// Checks Cloud STT readiness and returns current auth/project status
-export async function checkCloudSttStatus(): Promise<{
-  available: boolean;
-  authenticated: boolean;
-  projectId?: string;
-  error?: string;
-}> {
+export async function checkCloudSttStatus(): Promise<{ available: boolean; authenticated: boolean; projectId?: string; error?: string }> {
   try {
-    const { token, projectId } = await getGoogleAuthClient();
-    return {
-      available: Boolean(token && projectId),
-      authenticated: true,
-      projectId,
-    };
+    const { projectId } = await getGoogleAuthClient();
+    return { available: true, authenticated: true, projectId };
   } catch (err: any) {
-    return {
-      available: false,
-      authenticated: false,
-      error: err.message || "Failed to authenticate with Google Cloud ADC",
-    };
+    return { available: false, authenticated: false, error: err.message || "Failed to authenticate with Google Cloud ADC" };
   }
 }
 

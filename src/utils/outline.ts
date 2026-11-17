@@ -20,9 +20,7 @@ export function parseInline(text: string): Inline[] {
     if (!chunk) continue;
     if (chunk.startsWith("**") && chunk.endsWith("**") && chunk.length > 4) {
       parts.push({ text: chunk.slice(2, -2), bold: true });
-    } else if (chunk.startsWith("*") && chunk.endsWith("*") && chunk.length > 2) {
-      parts.push({ text: chunk.slice(1, -1), italic: true });
-    } else if (chunk.startsWith("_") && chunk.endsWith("_") && chunk.length > 2) {
+    } else if (/^(\*[^*]+\*|_[^_]+_)$/.test(chunk)) {
       parts.push({ text: chunk.slice(1, -1), italic: true });
     } else {
       // Leftover markers belong to an emphasis span the model hasn't finished writing. Drop them

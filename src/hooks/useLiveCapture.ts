@@ -30,12 +30,8 @@ export function useLiveCapture({ source, sourceTag, onChunk, onInterim, onNotice
   const sessionRef = useRef("");
   const modeRef = useRef<"idle" | "streaming" | "chunked">("idle");
 
-  const chunked = useChunkedCapture({
-    source,
-    sourceTag,
-    onChunk,
-    onDegraded: p => onNotice?.(`Diarization unavailable — transcribed with ${p} instead, speakers may be merged.`),
-  });
+  const chunked = useChunkedCapture({ source, sourceTag, onChunk,
+    onDegraded: p => onNotice?.(`Diarization unavailable — transcribed with ${p} instead, speakers may be merged.`) });
 
   // Declared before the streaming hook because the fallback it receives has to be able to stop it.
   const streamingRef = useRef<{ stop: (o?: { keepStream?: boolean }) => void } | null>(null);
@@ -49,13 +45,7 @@ export function useLiveCapture({ source, sourceTag, onChunk, onInterim, onNotice
     if (media) chunked.start(media, sessionRef.current);
   }, [chunked, onNotice]);
 
-  const streaming = useStreamingCapture({
-    source,
-    sourceTag,
-    onChunk,
-    onInterim,
-    onError: fallbackToChunked,
-  });
+  const streaming = useStreamingCapture({ source, sourceTag, onChunk, onInterim, onError: fallbackToChunked });
   streamingRef.current = streaming;
 
   const start = useCallback((media: MediaStream, sessionId: string) => {
@@ -77,11 +67,6 @@ export function useLiveCapture({ source, sourceTag, onChunk, onInterim, onNotice
     mediaRef.current = null;
   }, [chunked, streaming]);
 
-  return {
-    start,
-    stop,
-    isActive: () => modeRef.current !== "idle",
-    /** Which transport is live. Callers use it to decide who owns the interim preview. */
-    mode: () => modeRef.current,
-  };
+  // mode(): which transport is live — decides who owns the interim preview.
+  return { start, stop, mode: () => modeRef.current };
 }

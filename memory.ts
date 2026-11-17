@@ -1,8 +1,5 @@
-// Phase 1 of the memory engine: THE durable local record for a session — raw transcript text plus
-// extracted action items, one file per session, nothing smarter yet. No LLM extraction beyond what
-// the intent classifier already produces, no querying. Phase 2 wires this up to Vertex AI Memory
-// Bank, which does the fact/preference extraction itself once these records are synced to it (see
-// the plan for details). Single-user app, so there's no per-user scoping here.
+// Phase 1: one durable local file per session (transcript + action items). Phase 2: sync to Vertex AI
+// Memory Bank, which does its own fact extraction. Single-user app, so no per-user scoping.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,65 +12,33 @@ import {
   type MemoryEntry,
   type SearchMemoryResponse,
   type SingleBeforeModelCallback,
-  type Context,
   type LlmRequest,
 } from "@google/adk";
-import { safeSeg, hourBucket, estimateTokens, computeCompaction } from "./server-utils";
+import { safeSeg, hourBucket, estimateTokens } from "./server-utils";
+import { createEvent, createEventActions, emitAdkEvent, subscribeToAdkEvents, getAdkEvents, classifyAdkEventType, type AdkEvent } from "./adk-events";
 
-export {
-  VertexAiMemoryBankService,
-  InMemoryMemoryService,
-  type BaseMemoryService,
-  type MemoryEntry,
-  type SingleBeforeModelCallback,
-};
-
-// The three item categories the intent classifier extracts (skills.ts), grouped under one
-// "actionItems" parent for storage. The live classifier's own output/schema stays FLAT
-// ({calendarEvents, tasks, searchQueries} at the top level) — that shape is wired through
-// resolvePlanDates, the client UI's per-skill buckets, and the evals, so reshaping it would ripple
-// far beyond persistence. This nesting only exists in what gets written to disk.
-export interface ActionItems {
-  todos: unknown[];         // renamed from the classifier's "tasks" — matches how the UI/user think of them
-  calendarEvents: unknown[];
-  searchQueries: unknown[];
-}
-
-// One finalized session's captured content, close to ADK's MemoryEntry/Event shape so Phase 2 can
-// forward it to Memory Bank with minimal translation.
-export interface MemoryCapture {
+// Close to ADK's MemoryEntry shape so it forwards to Memory Bank with little translation.
+// actionItems is storage-only: the flat plan nested under one key, with "tasks" renamed "todos".
+interface MemoryCapture {
   timestamp: string;
   sessionId: string;
   content: { role: "user"; parts: [{ text: string }] };
   ideasSummary?: string;
-  actionItems?: ActionItems;
+  actionItems?: { todos: unknown[]; calendarEvents: unknown[]; searchQueries: unknown[] };
 }
 
-// Reshape the classifier's flat plan ({ideasSummary, calendarEvents, tasks, searchQueries}) into
-// the nested {ideasSummary, actionItems: {todos, calendarEvents, searchQueries}} that gets
-// persisted. Tolerant of a missing/malformed plan (autosave ticks that skipped the classifier pass
-// `plan: undefined`) and of arrays being absent — each category always comes out as an array,
-// never undefined, so callers never null-check three different fields.
-function toActionItems(plan: any): { ideasSummary?: string; actionItems: ActionItems } | undefined {
+// Every category always comes out an array; a missing plan (ticks that skipped the classifier) → undefined.
+function toActionItems(plan: any): Pick<MemoryCapture, "ideasSummary" | "actionItems"> | undefined {
   if (!plan || typeof plan !== "object") return undefined;
+  const arr = (v: unknown) => (Array.isArray(v) ? v : []);
   return {
     ...(typeof plan.ideasSummary === "string" ? { ideasSummary: plan.ideasSummary } : {}),
-    actionItems: {
-      todos: Array.isArray(plan.tasks) ? plan.tasks : (Array.isArray(plan.todos) ? plan.todos : []),
-      calendarEvents: Array.isArray(plan.calendarEvents) ? plan.calendarEvents : [],
-      searchQueries: Array.isArray(plan.searchQueries) ? plan.searchQueries : [],
-    },
+    actionItems: { todos: arr(plan.tasks ?? plan.todos), calendarEvents: arr(plan.calendarEvents), searchQueries: arr(plan.searchQueries) },
   };
 }
 
-// The hour bucket is computed from the WRITE instant, not pinned to a session's first write, so a
-// session whose ticks straddle an hour boundary would otherwise land in two different hour
-// directories — reintroducing "more than one file per session" via a different trigger than the
-// append-vs-overwrite bug captureMemoryEvent was built to fix. Bounded backward walk (not a
-// recursive tree scan, which would get slower as the archive grows over months of real usage):
-// check the CURRENT hour bucket first, then step back an hour at a time up to `lookbackHours`,
-// stopping at the first match. A live-dictation session realistically spans minutes, so one hop
-// back covers the normal case; the generous cap is just headroom for an unusually long session.
+// A session spanning an hour boundary would leave its file in the previous hour bucket. Walk back
+// hour by hour (bounded, not a tree scan) to find it.
 function findStaleSessionFile(root: string, filename: string, now: Date, keep: string, lookbackHours = 48): string | null {
   for (let hoursBack = 0; hoursBack <= lookbackHours; hoursBack++) {
     const candidate = path.join(root, hourBucket(new Date(now.getTime() - hoursBack * 3_600_000)), filename);
@@ -82,13 +47,9 @@ function findStaleSessionFile(root: string, filename: string, now: Date, keep: s
   return null;
 }
 
-// Write the latest snapshot of one session's captured content to
-// ./data/memory/{YYYY}/{MM}/{DD}/{HH}/{sessionId}.jsonl. `root` exists so the self-check can write
-// to a temp dir instead of the repo; `now` likewise exists so the self-check can pin the write
-// instant instead of depending on the real clock (see findStaleSessionFile above).
-// ponytail: sync overwrite — one file per session, replaced on every live tick and again at
-// finalize, so it always holds just the latest text/plan instead of growing a near-duplicate line
-// per tick. Move to fs.promises if it ever blocks a request.
+// Overwrite ./data/memory/{YYYY}/{MM}/{DD}/{HH}/{sessionId}.jsonl with the session's latest snapshot.
+// `root` and `now` are injectable for the self-check.
+// ponytail: sync overwrite, one file per session; move to fs.promises if it ever blocks a request.
 export function captureMemoryEvent(
   sessionId: unknown,
   entry: { text: string; plan?: unknown },
@@ -107,265 +68,89 @@ export function captureMemoryEvent(
   };
   fs.writeFileSync(file, JSON.stringify(record) + "\n", "utf8");
 
-  // Bring the session forward: if an earlier tick left this session's file in an older hour
-  // bucket, remove it now that the new bucket holds the up-to-date record — never two files for
-  // one session, even across an hour boundary. Done AFTER the new write succeeds, so a failure
-  // here never loses data that hasn't been captured somewhere yet.
+  // Remove the older-hour copy only after the new write succeeded, so nothing is ever lost.
   const stale = findStaleSessionFile(root, filename, now, file);
   if (stale) {
     fs.rmSync(stale);
-    try { fs.rmdirSync(path.dirname(stale)); } catch { /* not empty (other sessions still in that hour) — fine, leave it */ }
+    try { fs.rmdirSync(path.dirname(stale)); } catch { /* other sessions still in that hour */ }
   }
-
   return file;
 }
 
 // ---- Phase 2: Vertex AI Memory Bank Integration ----------------------------
 
-let memoryServiceInstance: BaseMemoryService | null = null;
+const envProject = () => process.env.GOOGLE_CLOUD_PROJECT ?? process.env.PROJECT_ID;
+const envLocation = () => process.env.VERTEX_AI_LOCATION ?? process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
 
-export interface MemoryServiceConfig {
-  agentEngineId?: string;
-  projectId?: string;
-  location?: string;
-  expressModeApiKey?: string;
-  forceInMemory?: boolean;
-  client?: any;
-}
-
-// Instantiates a strict VertexAiMemoryBankService connecting to Google Cloud.
-// If VERTEX_AI_AGENT_ENGINE_ID is missing, it throws an explicit error rather than falling back to in-memory.
-export function createMemoryBankService(config?: MemoryServiceConfig): BaseMemoryService {
-  if (config?.forceInMemory) {
-    return new InMemoryMemoryService();
-  }
-
-  const agentEngineId = config?.agentEngineId ??
-    process.env.VERTEX_AI_AGENT_ENGINE_ID ??
-    process.env.AGENT_ENGINE_ID ??
-    process.env.MEMORY_BANK_AGENT_ENGINE_ID ??
-    process.env.REASONING_ENGINE_ID;
-
+// Throws when unconfigured rather than silently falling back to in-memory.
+export function createMemoryBankService(config?: { agentEngineId?: string; projectId?: string; location?: string; client?: any }): BaseMemoryService {
+  const agentEngineId = config?.agentEngineId ?? process.env.VERTEX_AI_AGENT_ENGINE_ID ?? process.env.AGENT_ENGINE_ID;
   if (!agentEngineId) {
     throw new Error(
       "VERTEX_AI_AGENT_ENGINE_ID (or AGENT_ENGINE_ID) is required in .env to connect to Vertex AI Memory Bank. Run `npm run create:memory-bank` to create one programmatically on GCP."
     );
   }
-
-  const projectId = config?.projectId ??
-    process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID;
-
-  if (!projectId) {
-    throw new Error(
-      "GOOGLE_CLOUD_PROJECT (or PROJECT_ID) is required in .env to connect to Vertex AI Memory Bank."
-    );
-  }
-
-  const location = config?.location ??
-    process.env.VERTEX_AI_LOCATION ??
-    process.env.GOOGLE_CLOUD_LOCATION ??
-    "us-central1";
-
-  if (projectId && location) {
-    return new VertexAiMemoryBankService({
-      agentEngineId,
-      projectId,
-      location,
-      ...(config?.client ? { client: config.client } : {}),
-    });
-  }
-
-  const expressModeApiKey = config?.expressModeApiKey ??
-    process.env.VERTEX_EXPRESS_MODE_API_KEY;
-
-  return new VertexAiMemoryBankService({
-    agentEngineId,
-    expressModeApiKey,
-    ...(config?.client ? { client: config.client } : {}),
-  });
+  const projectId = config?.projectId ?? envProject();
+  if (!projectId) throw new Error("GOOGLE_CLOUD_PROJECT (or PROJECT_ID) is required in .env to connect to Vertex AI Memory Bank.");
+  const location = config?.location ?? envLocation();
+  return new VertexAiMemoryBankService({ agentEngineId, projectId, location, ...(config?.client && { client: config.client }) });
 }
 
-// Programmatically creates a new Vertex AI Memory Bank resource on Google Cloud.
+// Shared by create/list: ADC token, resolved project/location, and the reasoningEngines collection URL.
+async function reasoningEngines(options: { projectId?: string; location?: string } | undefined, verb: string) {
+  const { GoogleAuth } = await import("google-auth-library");
+  const auth = new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
+  const token = (await (await auth.getClient()).getAccessToken()).token;
+  const projectId = options?.projectId ?? envProject() ?? (await auth.getProjectId().catch(() => null)) ?? undefined;
+  if (!projectId) throw new Error(`GOOGLE_CLOUD_PROJECT is required to ${verb} a Vertex AI Memory Bank.`);
+  const location = options?.location ?? envLocation();
+  const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${location}/reasoningEngines`;
+  return { token, projectId, location, url };
+}
+
 export async function createCloudMemoryBank(options?: {
   projectId?: string;
   location?: string;
   displayName?: string;
   description?: string;
-}): Promise<{
-  resourceName: string;
-  agentEngineId: string;
-  displayName: string;
-  location: string;
-  projectId: string;
-}> {
-  const { GoogleAuth } = await import("google-auth-library");
-  const auth = new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"]
-  });
-  const client = await auth.getClient();
-  const token = await client.getAccessToken();
-
-  let projectId = options?.projectId ??
-    process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID;
-
-  if (!projectId) {
-    try {
-      projectId = (await auth.getProjectId()) || undefined;
-    } catch {}
-  }
-
-  if (!projectId) {
-    throw new Error("GOOGLE_CLOUD_PROJECT is required to create a Vertex AI Memory Bank.");
-  }
-
-  const location = options?.location ??
-    process.env.VERTEX_AI_LOCATION ??
-    process.env.GOOGLE_CLOUD_LOCATION ??
-    "us-central1";
-
+}): Promise<{ resourceName: string; agentEngineId: string; displayName: string; location: string; projectId: string }> {
+  const { token, projectId, location, url } = await reasoningEngines(options, "create");
   const displayName = options?.displayName || "scribant-memory-bank";
-  const description = options?.description || "Memory Bank for Scribant Voice Agent";
-
-  const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${location}/reasoningEngines`;
-
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token.token}`,
-      "Content-Type": "application/json"
-    },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       displayName,
-      description,
-      contextSpec: {
-        memoryBankConfig: {}
-      }
-    })
+      description: options?.description || "Memory Bank for Scribant Voice Agent",
+      contextSpec: { memoryBankConfig: {} },
+    }),
   });
+  if (!res.ok) throw new Error(`Failed to create Vertex AI Memory Bank (${res.status}): ${await res.text()}`);
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Failed to create Vertex AI Memory Bank (${res.status}): ${errText}`);
-  }
-
-  const data = await res.json();
-  const operationName = String(data.name || "");
-  const match = operationName.match(/reasoningEngines\/([^/]+)/);
-  const agentEngineId = match ? match[1] : operationName.split("/").pop()!;
+  const operationName = String((await res.json()).name || "");
+  const agentEngineId = operationName.match(/reasoningEngines\/([^/]+)/)?.[1] ?? operationName.split("/").pop()!;
   const resourceName = `projects/${projectId}/locations/${location}/reasoningEngines/${agentEngineId}`;
-
-  return {
-    resourceName,
-    agentEngineId,
-    displayName,
-    location,
-    projectId,
-  };
+  return { resourceName, agentEngineId, displayName, location, projectId };
 }
 
-// Programmatically lists all Vertex AI Memory Bank resources in the GCP project.
 export async function listCloudMemoryBanks(options?: {
   projectId?: string;
   location?: string;
 }): Promise<Array<{ name: string; displayName?: string; description?: string; createTime?: string }>> {
-  const { GoogleAuth } = await import("google-auth-library");
-  const auth = new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"]
-  });
-  const client = await auth.getClient();
-  const token = await client.getAccessToken();
-
-  let projectId = options?.projectId ??
-    process.env.GOOGLE_CLOUD_PROJECT ??
-    process.env.PROJECT_ID;
-
-  if (!projectId) {
-    try {
-      projectId = (await auth.getProjectId()) || undefined;
-    } catch {}
-  }
-
-  if (!projectId) {
-    throw new Error("GOOGLE_CLOUD_PROJECT is required to list Vertex AI Memory Banks.");
-  }
-
-  const location = options?.location ??
-    process.env.VERTEX_AI_LOCATION ??
-    process.env.GOOGLE_CLOUD_LOCATION ??
-    "us-central1";
-
-  const url = `https://${location}-aiplatform.googleapis.com/v1beta1/projects/${projectId}/locations/${location}/reasoningEngines`;
-
-
-  const res = await fetch(url, {
-    headers: { "Authorization": `Bearer ${token.token}` }
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Failed to list Vertex AI Memory Banks (${res.status}): ${errText}`);
-  }
-
-  const data = await res.json();
-  return data.reasoningEngines || [];
+  const { token, url } = await reasoningEngines(options, "list");
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`Failed to list Vertex AI Memory Banks (${res.status}): ${await res.text()}`);
+  return (await res.json()).reasoningEngines || [];
 }
 
-// Shared singleton getter, overrideable per-caller or per-test.
+// Shared singleton; `override` lets a caller or test inject its own.
+let memoryServiceInstance: BaseMemoryService | null = null;
 export function getMemoryService(override?: BaseMemoryService): BaseMemoryService {
   if (override) return override;
-  if (!memoryServiceInstance) {
-    memoryServiceInstance = createMemoryBankService();
-  }
-  return memoryServiceInstance;
+  return (memoryServiceInstance ??= createMemoryBankService());
 }
 
-// Resets or sets the active memory service singleton (useful for testing or reconfiguration).
-export function setMemoryService(service: BaseMemoryService | null): void {
-  memoryServiceInstance = service;
-}
-
-// ---- ADK Events (adk.dev/events) Integration --------------------------------
-
-import {
-  createEvent,
-  createEventActions,
-  toStructuredEvents,
-  EventType,
-  adkEventStream,
-  emitAdkEvent,
-  subscribeToAdkEvents,
-  getAdkEvents,
-  clearAdkEvents,
-  classifyAdkEventType,
-  type AdkEvent,
-} from "./adk-events";
-
-export {
-  createEvent,
-  createEventActions,
-  toStructuredEvents,
-  EventType,
-  adkEventStream,
-  emitAdkEvent,
-  subscribeToAdkEvents,
-  getAdkEvents,
-  clearAdkEvents,
-  classifyAdkEventType,
-  type AdkEvent,
-};
-
-// Aliases for memory-specific consumers
-export type MemoryEvent = AdkEvent;
-export type MemoryEventListener = (event: AdkEvent) => void;
-export const memoryEvents = adkEventStream;
-export const subscribeToMemoryEvents = subscribeToAdkEvents;
-export const getMemoryEvents = getAdkEvents;
-export const clearMemoryEvents = clearAdkEvents;
-export const recordMemoryEvent = emitAdkEvent;
-
-export interface IngestTranscriptParams {
+interface IngestTranscriptParams {
   text: string;
   sessionId?: string;
   userId?: string;
@@ -375,57 +160,41 @@ export interface IngestTranscriptParams {
   memoryService?: BaseMemoryService;
 }
 
-export interface IngestTranscriptResult {
-  ok: boolean;
-  sessionId: string;
-  userId: string;
-  appName: string;
-  eventCount: number;
-  service: "vertex_ai" | "in_memory" | "custom";
-}
-
-export interface ParsedSpeakerTurn {
-  speaker: string;
-  text: string;
-}
-
-// Parses speaker turns from formatted dialogue or meeting transcripts
-export function parseSpeakerTurns(text: string): ParsedSpeakerTurn[] {
+// Speaker turns from "Name: ..." or "[Meeting: x]" lines; untagged lines join the current turn.
+export function parseSpeakerTurns(text: string): { speaker: string; text: string }[] {
   if (!text || !text.trim()) return [];
-  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const speakerRegex = /^(?:\[(?:Meeting:\s*)?([^\]]+)\]|([A-Za-z0-9_\s]{2,25}):)\s*(.*)$/;
-
-  const turns: ParsedSpeakerTurn[] = [];
-  let currentSpeaker = "user";
-  let currentBuffer: string[] = [];
-
-  for (const line of lines) {
-    const match = line.match(speakerRegex);
-    if (match) {
-      const speaker = (match[1] || match[2] || "user").trim();
-      const content = (match[3] || "").trim();
-      if (currentBuffer.length > 0) {
-        turns.push({ speaker: currentSpeaker, text: currentBuffer.join(" ") });
-        currentBuffer = [];
-      }
-      currentSpeaker = speaker;
-      if (content) currentBuffer.push(content);
-    } else {
-      currentBuffer.push(line);
-    }
+  const turns: { speaker: string; text: string }[] = [];
+  let speaker = "user";
+  let buffer: string[] = [];
+  const flush = () => { if (buffer.length) turns.push({ speaker, text: buffer.join(" ") }); buffer = []; };
+  for (const line of text.split(/\n+/).map(l => l.trim()).filter(Boolean)) {
+    const m = line.match(/^(?:\[(?:Meeting:\s*)?([^\]]+)\]|([A-Za-z0-9_\s]{2,25}):)\s*(.*)$/);
+    if (!m) { buffer.push(line); continue; }
+    flush();
+    speaker = (m[1] || m[2] || "user").trim();
+    if (m[3]?.trim()) buffer.push(m[3].trim());
   }
-
-  if (currentBuffer.length > 0) {
-    turns.push({ speaker: currentSpeaker, text: currentBuffer.join(" ") });
-  }
-
+  flush();
   return turns.length > 0 ? turns : [{ speaker: "user", text }];
 }
 
-// Ingests transcript text and extracted actions into Vertex AI Memory Bank (or InMemoryMemoryService).
-export async function ingestTranscriptToMemoryBank(
-  params: IngestTranscriptParams
-): Promise<IngestTranscriptResult> {
+type ServiceName = "vertex_ai" | "in_memory" | "custom";
+const serviceName = (svc: BaseMemoryService): ServiceName =>
+  svc instanceof VertexAiMemoryBankService ? "vertex_ai" : svc instanceof InMemoryMemoryService ? "in_memory" : "custom";
+const errMsg = (e: any) => e?.message || String(e);
+
+// One memory:insert / memory:retrieve telemetry event (AdminMonitoring reads these stateDelta fields).
+export function emitMemoryEvent(invocationId: string, summary: string, stateDelta: Record<string, unknown>) {
+  emitAdkEvent(createEvent({
+    author: "memory",
+    invocationId,
+    content: { role: "model", parts: [{ text: summary }] },
+    actions: createEventActions({ stateDelta }),
+  }));
+}
+
+// Ingests transcript text into Vertex AI Memory Bank (or InMemoryMemoryService), one event per speaker turn.
+export async function ingestTranscriptToMemoryBank(params: IngestTranscriptParams) {
   const startTime = Date.now();
   const text = (params.text || "").trim();
   const appName = params.appName || process.env.APP_NAME || "scribant";
@@ -433,478 +202,165 @@ export async function ingestTranscriptToMemoryBank(
   const sessionId = safeSeg(params.sessionId, "session");
   const timestamp = params.timestamp || new Date().toISOString();
   const service = params.memoryService ?? getMemoryService();
+  const base = { eventType: "memory:insert", sessionId, userId, appName, text };
+  const fail = (e: any, extra = {}) => {
+    emitMemoryEvent(sessionId, `[Memory Ingest Error]: ${errMsg(e)}`, { ...base, status: "error", durationMs: Date.now() - startTime, error: errMsg(e), ...extra });
+    return e;
+  };
 
-  if (!text) {
-    const err = new Error("Transcript text is required for memory bank ingestion.");
-    emitAdkEvent(
-      createEvent({
-        author: "memory",
-        invocationId: sessionId,
-        content: {
-          role: "model",
-          parts: [{ text: `[Memory Ingest Error]: ${err.message}` }],
-        },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:insert",
-            status: "error",
-            durationMs: Date.now() - startTime,
-            sessionId,
-            userId,
-            appName,
-            text: "",
-            error: err.message,
-          },
-        }),
-      })
-    );
-    throw err;
-  }
+  if (!text) throw fail(new Error("Transcript text is required for memory bank ingestion."));
 
+  const svc = serviceName(service);
   try {
-    // Ingest speaker turns into Memory Bank as attributed events
-    const turns = parseSpeakerTurns(text);
-    const events: any[] = turns.map(t => ({
+    const events: any[] = parseSpeakerTurns(text).map(t => ({
       author: t.speaker || "user",
       content: { role: "user", parts: [{ text: t.text }] },
       timestamp,
     }));
-
-    const isVertex = service instanceof VertexAiMemoryBankService;
-
     if (typeof (service as any).addEventsToMemory === "function") {
-      await (service as any).addEventsToMemory({
-        appName,
-        userId,
-        sessionId,
-        events,
-        customMetadata: {
-          sessionId,
-          timestamp,
-        },
-      });
+      await (service as any).addEventsToMemory({ appName, userId, sessionId, events, customMetadata: { sessionId, timestamp } });
     } else {
-      await service.addSessionToMemory({
-        id: sessionId,
-        appName,
-        userId,
-        events,
-        state: {},
-        lastUpdateTime: Date.now(),
-      } as any);
+      await service.addSessionToMemory({ id: sessionId, appName, userId, events, state: {}, lastUpdateTime: Date.now() } as any);
     }
-
-    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
-    const durationMs = Date.now() - startTime;
-
-    const result: IngestTranscriptResult = {
-      ok: true,
-      sessionId,
-      userId,
-      appName,
-      eventCount: events.length,
-      service: serviceName,
-    };
-
-    // Emit ADK-compatible Event (adk.dev/events)
-    emitAdkEvent(
-      createEvent({
-        author: "memory",
-        invocationId: sessionId,
-        content: {
-          role: "model",
-          parts: [{ text: `[Memory Ingest]: ${text.slice(0, 120)}` }],
-        },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:insert",
-            status: "success",
-            durationMs,
-            service: serviceName,
-            sessionId,
-            userId,
-            appName,
-            text,
-            eventCount: events.length,
-            plan: params.plan,
-          },
-        }),
-      })
-    );
-
-    return result;
+    emitMemoryEvent(sessionId, `[Memory Ingest]: ${text.slice(0, 120)}`, {
+      ...base, status: "success", durationMs: Date.now() - startTime, service: svc, eventCount: events.length, plan: params.plan,
+    });
+    return { ok: true, sessionId, userId, appName, eventCount: events.length, service: svc };
   } catch (error: any) {
-    const durationMs = Date.now() - startTime;
-    const isVertex = service instanceof VertexAiMemoryBankService;
-    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
-
-    emitAdkEvent(
-      createEvent({
-        author: "memory",
-        invocationId: sessionId,
-        content: {
-          role: "model",
-          parts: [{ text: `[Memory Ingest Error]: ${error?.message || String(error)}` }],
-        },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:insert",
-            status: "error",
-            durationMs,
-            service: serviceName,
-            sessionId,
-            userId,
-            appName,
-            text,
-            error: error?.message || String(error),
-            plan: params.plan,
-          },
-        }),
-      })
-    );
-    throw error;
+    throw fail(error, { service: svc, plan: params.plan });
   }
 }
 
-export interface RetrievedMemory {
-  text: string;
-  author: string;
-  timestamp: string;
+// Every capture record under `root` (one per line across all .jsonl files); unreadable files are skipped.
+function* readCaptures(root: string, onError?: (file: string, e: any) => void): Generator<MemoryCapture> {
+  for (const file of findJsonlFiles(root)) {
+    let records: MemoryCapture[];
+    try {
+      records = fs.readFileSync(file, "utf8").split("\n").filter(l => l.trim()).map(l => JSON.parse(l));
+    } catch (e) { onError?.(file, e); continue; }
+    yield* records;
+  }
 }
 
-export interface RetrieveMemoryParams {
-  query: string;
-  userId?: string;
-  appName?: string;
-  memoryService?: BaseMemoryService;
-}
-
-export interface ArchiveTokenMetrics {
-  totalArchiveTokens: number;
-  sessionCount: number;
-  fileCount: number;
-  averageSessionTokens: number;
-}
-
-export interface MemoryEfficiencyReport {
-  archiveTokens: number;
-  injectedMemoryTokens: number;
-  simulatedLegacyTokens: number;
-  actualMemoryBankTokens: number;
-  savedTokens: number;
-  savingsPercent: number;
-  efficiencyMultiplier: string;
-}
-
-export interface RetrieveMemoryResult {
-  query: string;
-  memories: RetrievedMemory[];
-  count: number;
-  service: "vertex_ai" | "in_memory" | "custom";
-  efficiency?: MemoryEfficiencyReport;
-}
-
-// Scans local durable memory directory and sums total tokens across all historical sessions
-export function getArchiveTokenMetrics(root = path.join(process.cwd(), "data", "memory")): ArchiveTokenMetrics {
-  const files = findJsonlFiles(root);
+// Sums tokens across every locally captured session.
+export function getArchiveTokenMetrics(root = path.join(process.cwd(), "data", "memory")) {
   let totalChars = 0;
   let sessionCount = 0;
-
-  for (const file of files) {
-    try {
-      const content = fs.readFileSync(file, "utf8").trim();
-      if (!content) continue;
-      const lines = content.split("\n").filter(Boolean);
-      for (const line of lines) {
-        const record = JSON.parse(line) as MemoryCapture;
-        const text = record.content?.parts?.[0]?.text || "";
-        const ideas = record.ideasSummary || "";
-        totalChars += text.length + ideas.length;
-        sessionCount++;
-      }
-    } catch {
-      // Ignore read errors
-    }
+  for (const record of readCaptures(root)) {
+    totalChars += (record.content?.parts?.[0]?.text || "").length + (record.ideasSummary || "").length;
+    sessionCount++;
   }
-
-  // Calculate exact literal tokens from the actual historical session text on disk
-  const totalArchiveTokens = Math.max(0, Math.ceil(totalChars / 3.8));
-
+  const totalArchiveTokens = Math.ceil(totalChars / 3.8);
   return {
     totalArchiveTokens,
     sessionCount,
-    fileCount: files.length,
+    fileCount: findJsonlFiles(root).length,
     averageSessionTokens: sessionCount > 0 ? Math.round(totalArchiveTokens / sessionCount) : 0,
   };
 }
 
-export function computeMemoryEfficiency(injectedMemories: string[], promptText = "", root?: string): MemoryEfficiencyReport {
-  const archive = getArchiveTokenMetrics(root);
-  const basePromptTokens = estimateTokens(promptText) + 320; // 320 tokens for base system prompt & skill schema
+export function computeMemoryEfficiency(injectedMemories: string[], promptText = "", root?: string) {
+  const archiveTokens = getArchiveTokenMetrics(root).totalArchiveTokens;
+  const basePromptTokens = estimateTokens(promptText) + 320; // base system prompt & skill schema
   const injectedMemoryTokens = estimateTokens(injectedMemories.join("\n"));
-
-  // Without Memory Bank: Monolithic injection of all past sessions into the prompt
-  const simulatedLegacyTokens = basePromptTokens + archive.totalArchiveTokens;
-  // With Memory Bank: Only the base prompt + the 1-2 targeted retrieved memory snippets
+  // Without Memory Bank every past session goes into the prompt; with it, only the retrieved snippets.
+  const simulatedLegacyTokens = basePromptTokens + archiveTokens;
   const actualMemoryBankTokens = basePromptTokens + injectedMemoryTokens;
   const savedTokens = Math.max(0, simulatedLegacyTokens - actualMemoryBankTokens);
-  const savingsPercent = simulatedLegacyTokens > 0
-    ? Math.max(0, Math.min(99.9, Number(((savedTokens / simulatedLegacyTokens) * 100).toFixed(1))))
-    : 0;
-  const multiplier = actualMemoryBankTokens > 0
-    ? (simulatedLegacyTokens / actualMemoryBankTokens).toFixed(1) + "x"
-    : "1.0x";
-
   return {
-    archiveTokens: archive.totalArchiveTokens,
-    injectedMemoryTokens,
-    simulatedLegacyTokens,
-    actualMemoryBankTokens,
-    savedTokens,
-    savingsPercent,
-    efficiencyMultiplier: multiplier,
+    archiveTokens, injectedMemoryTokens, simulatedLegacyTokens, actualMemoryBankTokens, savedTokens,
+    savingsPercent: Math.min(99.9, Number(((savedTokens / simulatedLegacyTokens) * 100).toFixed(1))),
+    efficiencyMultiplier: (simulatedLegacyTokens / actualMemoryBankTokens).toFixed(1) + "x",
   };
 }
 
-// Searches/retrieves relevant memories from Vertex AI Memory Bank (or InMemoryMemoryService).
+// Searches Vertex AI Memory Bank (or InMemoryMemoryService) for memories relevant to `query`.
 export async function retrieveFromMemoryBank(
   query: string,
-  options?: Omit<RetrieveMemoryParams, "query">
-): Promise<RetrieveMemoryResult> {
+  options?: { userId?: string; appName?: string; memoryService?: BaseMemoryService },
+) {
   const startTime = Date.now();
   const trimmedQuery = (query || "").trim();
   const appName = options?.appName || process.env.APP_NAME || "scribant";
   const userId = safeSeg(options?.userId, "default_user");
   const service = options?.memoryService ?? getMemoryService();
+  const base = { eventType: "memory:retrieve", query: trimmedQuery, userId, appName };
+  const fail = (e: any, extra = {}) => {
+    emitMemoryEvent(`retrieve-${Date.now()}`, `[Memory Retrieve Error]: ${errMsg(e)}`, { ...base, status: "error", durationMs: Date.now() - startTime, error: errMsg(e), ...extra });
+    return e;
+  };
 
-  if (!trimmedQuery) {
-    const err = new Error("Search query is required for memory bank retrieval.");
-    emitAdkEvent(
-      createEvent({
-        author: "memory",
-        invocationId: `retrieve-${Date.now()}`,
-        content: {
-          role: "model",
-          parts: [{ text: `[Memory Retrieve Error]: ${err.message}` }],
-        },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:retrieve",
-            status: "error",
-            durationMs: Date.now() - startTime,
-            query: "",
-            userId,
-            appName,
-            error: err.message,
-          },
-        }),
-      })
-    );
-    throw err;
-  }
+  if (!trimmedQuery) throw fail(new Error("Search query is required for memory bank retrieval."));
 
+  const svc = serviceName(service);
   try {
-    const response: SearchMemoryResponse = await service.searchMemory({
-      appName,
-      userId,
-      query: trimmedQuery,
-    });
-
-    const memories: RetrievedMemory[] = (response.memories || []).map((m: MemoryEntry) => {
-      const textParts = m.content?.parts?.map((p: any) => p.text).filter(Boolean) ?? [];
-      return {
-        text: textParts.join("\n"),
-        author: m.author || "user",
-        timestamp: m.timestamp || new Date().toISOString(),
-      };
-    });
-
-    const isVertex = service instanceof VertexAiMemoryBankService;
-    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
-    const durationMs = Date.now() - startTime;
+    const response: SearchMemoryResponse = await service.searchMemory({ appName, userId, query: trimmedQuery });
+    const memories = (response.memories || []).map((m: MemoryEntry) => ({
+      text: (m.content?.parts?.map((p: any) => p.text).filter(Boolean) ?? []).join("\n"),
+      author: m.author || "user",
+      timestamp: m.timestamp || new Date().toISOString(),
+    }));
     const efficiency = computeMemoryEfficiency(memories.map(m => m.text), trimmedQuery);
-
-    const result: RetrieveMemoryResult = {
-      query: trimmedQuery,
-      memories,
-      count: memories.length,
-      service: serviceName,
-      efficiency,
-    };
-
-    // Emit ADK-compatible Event (adk.dev/events)
-    emitAdkEvent(
-      createEvent({
-        author: "memory",
-        invocationId: `retrieve-${Date.now()}`,
-        content: {
-          role: "model",
-          parts: [{ text: `[Memory Retrieve]: "${trimmedQuery}" (${memories.length} match${memories.length === 1 ? "" : "es"})` }],
-        },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:retrieve",
-            status: "success",
-            durationMs,
-            service: serviceName,
-            query: trimmedQuery,
-            userId,
-            appName,
-            count: memories.length,
-            memories,
-            efficiency,
-          },
-        }),
-      })
-    );
-
-    return result;
+    const n = memories.length;
+    emitMemoryEvent(`retrieve-${Date.now()}`, `[Memory Retrieve]: "${trimmedQuery}" (${n} match${n === 1 ? "" : "es"})`, {
+      ...base, status: "success", durationMs: Date.now() - startTime, service: svc, count: n, memories, efficiency,
+    });
+    return { query: trimmedQuery, memories, count: n, service: svc, efficiency };
   } catch (error: any) {
-    const durationMs = Date.now() - startTime;
-    const isVertex = service instanceof VertexAiMemoryBankService;
-    const serviceName = isVertex ? "vertex_ai" : service instanceof InMemoryMemoryService ? "in_memory" : "custom";
-
-    emitAdkEvent(
-      createEvent({
-        author: "memory",
-        invocationId: `retrieve-${Date.now()}`,
-        content: {
-          role: "model",
-          parts: [{ text: `[Memory Retrieve Error]: ${error?.message || String(error)}` }],
-        },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:retrieve",
-            status: "error",
-            durationMs,
-            service: serviceName,
-            query: trimmedQuery,
-            userId,
-            appName,
-            error: error?.message || String(error),
-          },
-        }),
-      })
-    );
-    throw error;
+    throw fail(error, { service: svc });
   }
 }
 
-// Recursively walks a directory and gathers all .jsonl files
 function findJsonlFiles(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
-  const results: string[] = [];
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...findJsonlFiles(fullPath));
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      results.push(fullPath);
-    }
-  }
-  return results;
+  return fs.readdirSync(dir, { recursive: true, encoding: "utf8" })
+    .filter(f => f.endsWith(".jsonl"))
+    .map(f => path.join(dir, f));
 }
 
-// Synchronizes all durable local session captures from data/memory into Vertex AI Memory Bank.
+// Pushes every local session capture in data/memory into Memory Bank.
 export async function syncLocalMemoriesToMemoryBank(
   root = path.join(process.cwd(), "data", "memory"),
   memoryService?: BaseMemoryService
 ): Promise<{ syncedCount: number; errors: string[] }> {
-  const files = findJsonlFiles(root);
   let syncedCount = 0;
   const errors: string[] = [];
-
-  for (const file of files) {
+  for (const record of readCaptures(root, (file, e) => errors.push(`Failed to sync ${file}: ${errMsg(e)}`))) {
+    const text = record.content?.parts?.[0]?.text;
+    if (!text) continue;
     try {
-      const content = fs.readFileSync(file, "utf8").trim();
-      if (!content) continue;
-      const lines = content.split("\n").filter(Boolean);
-      for (const line of lines) {
-        const record = JSON.parse(line) as MemoryCapture;
-        const text = record.content?.parts?.[0]?.text;
-        if (!text) continue;
-        await ingestTranscriptToMemoryBank({
-          text,
-          sessionId: record.sessionId,
-          timestamp: record.timestamp,
-          memoryService,
-        });
-        syncedCount++;
-      }
-    } catch (e: any) {
-      errors.push(`Failed to sync ${file}: ${e?.message || e}`);
+      await ingestTranscriptToMemoryBank({ text, sessionId: record.sessionId, timestamp: record.timestamp, memoryService });
+      syncedCount++;
+    } catch (e) {
+      errors.push(`Failed to sync ${record.sessionId}: ${errMsg(e)}`);
     }
   }
-
   return { syncedCount, errors };
 }
 
-// Helper to prepend retrieved memory context directly into the user message content parts
-export function injectMemoryIntoUserMessage(request: LlmRequest, memories: string[]): void {
+// Prepend retrieved memories to the user turn so the model reads them as grounding context.
+function injectMemoryIntoUserMessage(request: LlmRequest, memories: string[]): void {
   if (!memories.length) return;
-  const memoryBlock = `[Relevant Context from Memory Bank]:\n${memories.map(m => `- ${m}`).join("\n")}`;
-
-  if (!request.contents || request.contents.length === 0) {
-    request.contents = [{ role: "user", parts: [{ text: memoryBlock }] }];
-    return;
-  }
-
-  // Prepend memory block to the user turn's parts so the model sees it as grounding context
-  const userContent = request.contents.find(c => c.role === "user") || request.contents[0];
-  if (userContent) {
-    userContent.parts = [{ text: memoryBlock }, ...(userContent.parts || [])];
-  }
+  const block = { text: `[Relevant Context from Memory Bank]:\n${memories.map(m => `- ${m}`).join("\n")}` };
+  const user = request.contents?.find(c => c.role === "user") ?? request.contents?.[0];
+  if (user) user.parts = [block, ...(user.parts || [])];
+  else request.contents = [{ role: "user", parts: [block] }];
 }
 
-/**
- * ADK beforeModelCallback that automatically ingests the current transcript / session state
- * into Vertex AI Memory Bank (or InMemoryMemoryService) before the LLM call executes.
- */
-export const autoMemoryIngestCallback: SingleBeforeModelCallback = async ({ context, request }) => {
-  try {
-    const memoryService = context.invocationContext?.memoryService ?? getMemoryService();
-    const sessionId = context.invocationContext?.session?.id || "session";
-    const userId = context.invocationContext?.session?.userId || "default_user";
-    const appName = context.invocationContext?.session?.appName || "scribant";
-
-    const text = context.state.get<string>("corrected") ||
-      context.state.get<string>("rawText") ||
-      (request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ")) || "";
-
-    if (text.trim()) {
-      await ingestTranscriptToMemoryBank({
-        text: text.trim(),
-        sessionId,
-        userId,
-        appName,
-        memoryService,
-      });
-    }
-  } catch (e: any) {
-    console.warn("[beforeModelCallback] Automatic memory ingestion failed:", e?.message || e);
-  }
-  return undefined;
-};
-
-/**
- * Detects whether the input text contains a genuine memory recall intent
- * (e.g. asking about past decisions, previous meetings, stored facts, or historical context),
- * and extracts ONLY the specific query/topic needed for semantic retrieval.
- *
- * Returns the clean, extracted query string, or `null` if no memory retrieval is required.
- */
+// The recall query when `text` asks about the past ("what did we decide…"), else null.
+// ponytail: regex heuristic; swap for a classifier stage if recall misfires in practice.
 export function extractMemoryRecallQuery(text: string): string | null {
-  if (!text || typeof text !== "string") return null;
-  const trimmed = text.trim();
+  const trimmed = typeof text === "string" ? text.trim() : "";
   if (!trimmed) return null;
+  const stripFiller = (q: string, filler: string) => q.trim()
+    .replace(new RegExp(`^[\\s,:-]*(\\b(${filler})\\b[\\s,:-]*)+`, "i"), "")
+    .replace(/^[\s,:-]+/, "").replace(/[.!?]+$/, "").trim();
 
-  // Short direct questions/queries (e.g. from manual query inputs or search prompts)
+  // Short direct questions (manual query inputs, search prompts).
   if (trimmed.length < 90 && (trimmed.endsWith("?") || /^(what|who|where|when|why|how|which|remember|recall|search|find|show me|tell me|did we|do we|have we)/i.test(trimmed))) {
-    return trimmed.replace(/^[\s,:-]*(\b(by the way|hey|also|please|can you|could you)\b[\s,:-]*)+/i, "").replace(/^[\s,:-]+/, "").replace(/[.!?]+$/, "").trim();
+    return stripFiller(trimmed, "by the way|hey|also|please|can you|could you");
   }
 
-  // Common recall marker regex patterns
   const recallPatterns: RegExp[] = [
     // Questions about past meetings/sessions/conversations
     /(?:(?:what|who|where|when|how|which|why)\s+(?:did|was|were|happened|is|are|we|have we|had we|do we)\b[^.!?\n]+(?:\?|$))/i,
@@ -914,95 +370,42 @@ export function extractMemoryRecallQuery(text: string): string | null {
     /(?:(?:in (?:the|our) (?:last|previous|earlier|past)\s+(?:meeting|call|session|sync|notes|discussion)|last time we (?:talked|discussed|met|spoke)|earlier we (?:decided|agreed|said))\s*[,:-]?\s*[^.!?\n]+(?:\?|$)?)/i,
     // Decisions or status inquiries
     /(?:(?:what(?:'s|\s+is|\s+was)\s+(?:the\s+)?(?:status|update|decision|plan|agreement|to-do|action item)\s+(?:of|on|for|regarding)\b[^.!?\n]+(?:\?|$)?))/i,
-    // Sentences ending with ? that contain past/historical references
+    // Questions that contain past/historical references
     /(?:[^.!?\n]*\b(?:last week|last time|yesterday|earlier|previously|before|already decided|agreed upon)\b[^.!?\n]*\?)/i,
   ];
-
-  // Split into sentences / utterances
-  const sentences = trimmed.split(/(?<=[.!?\n])\s+/);
-
-  for (const sentence of sentences) {
-    const s = sentence.trim();
-    if (!s) continue;
+  for (const sentence of trimmed.split(/(?<=[.!?\n])\s+/)) {
     for (const pattern of recallPatterns) {
-      const match = s.match(pattern);
-      if (match) {
-        // Clean up leading meta-conversational filler words and punctuation
-        const cleanQuery = match[0].trim()
-          .replace(/^[\s,:-]*(\b(hey|by the way|also|so|well|uh|um|please|can you|could you|tell me|let me know)\b[\s,:-]*)+/i, "")
-          .replace(/^[\s,:-]+/, "")
-          .replace(/[.!?]+$/, "")
-          .trim();
-
-        if (cleanQuery.length >= 4) {
-          return cleanQuery;
-        }
-      }
+      const match = sentence.trim().match(pattern);
+      const q = match && stripFiller(match[0], "hey|by the way|also|so|well|uh|um|please|can you|could you|tell me|let me know");
+      if (q && q.length >= 4) return q;
     }
   }
-
   return null;
 }
 
-/**
- * ADK beforeModelCallback that automatically ingests the transcript into Memory Bank AND
- * retrieves relevant past memories ONLY when a specific memory recall need is detected.
- */
+// beforeModelCallback: ingest the transcript every call; search memory only when it asks about the past.
 export const memoryBankBeforeModelCallback: SingleBeforeModelCallback = async ({ context, request }) => {
   try {
     const memoryService = context.invocationContext?.memoryService ?? getMemoryService();
-    const sessionId = context.invocationContext?.session?.id || "session";
-    const userId = context.invocationContext?.session?.userId || "default_user";
-    const appName = context.invocationContext?.session?.appName || "scribant";
-
-    const text = context.state.get<string>("corrected") ||
+    const session = context.invocationContext?.session;
+    const ids = { sessionId: session?.id || "session", userId: session?.userId || "default_user", appName: session?.appName || "scribant" };
+    const text = (context.state.get<string>("corrected") ||
       context.state.get<string>("rawText") ||
-      (request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ")) || "";
+      request.contents?.[0]?.parts?.map((p: any) => p.text).filter(Boolean).join(" ") || "").trim();
+    if (!text) return undefined;
 
-    if (text.trim()) {
-      // 1. Ingest session transcript into Memory Bank
-      const ingestPromise = ingestTranscriptToMemoryBank({
-        text: text.trim(),
-        sessionId,
-        userId,
-        appName,
-        memoryService,
-      });
-
-      // 2. Only retrieve when a genuine memory recall question/intent is present
-      const recallQuery = extractMemoryRecallQuery(text.trim());
-
-      if (recallQuery) {
-        const [, searchRes] = await Promise.all([
-          ingestPromise,
-          retrieveFromMemoryBank(recallQuery, {
-            userId,
-            appName,
-            memoryService,
-          }),
-        ]);
-
-        // Preload past context into the user message
-        if (searchRes && searchRes.memories && searchRes.memories.length > 0) {
-          injectMemoryIntoUserMessage(
-            request,
-            searchRes.memories.map(m => m.text)
-          );
-        }
-      } else {
-        // When no recall query is detected, await ingestion without wasting search latency/tokens
-        await ingestPromise;
-      }
-    }
+    const recallQuery = extractMemoryRecallQuery(text);
+    const [, found] = await Promise.all([
+      ingestTranscriptToMemoryBank({ text, ...ids, memoryService }),
+      recallQuery ? retrieveFromMemoryBank(recallQuery, { userId: ids.userId, appName: ids.appName, memoryService }) : null,
+    ]);
+    if (found) injectMemoryIntoUserMessage(request, found.memories.map(m => m.text));
   } catch (e: any) {
     console.warn("[memoryBankBeforeModelCallback] Callback error:", e?.message || e);
   }
   return undefined;
 };
 
-// ponytail: self-check pins the overwrite/traversal/reshape behavior, plus the shrink-not-merge,
-// embedded-newline, and hour-boundary bring-forward edge cases above, as well as Phase 2 ingest/retrieve/sync.
-// Run: tsx memory.ts — no API key needed, no model is called.
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   (async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "scribant-memory-"));
@@ -1180,9 +583,6 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
       assert.ok(syncedSearch.memories.some(m => m.text.includes("talking")));
 
       // Service creation with explicit config
-      const customMem = createMemoryBankService({ forceInMemory: true });
-      assert.ok(customMem instanceof InMemoryMemoryService);
-
       const vertexMem = createMemoryBankService({
         agentEngineId: "test-engine-id",
         projectId: "test-project",
@@ -1193,18 +593,8 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
 
       // ---- Automatic Memory Callback Self-checks ----
       const cbMemService = new InMemoryMemoryService();
-      const mockState: Record<string, any> = { corrected: "Schedule a product demo with Alex on Friday" };
-      const mockContext: any = {
-        invocationContext: {
-          memoryService: cbMemService,
-          session: { id: "run-cb-1", userId: "cb-user", appName: "scribant" },
-        },
-        state: { get: (k: string) => mockState[k] },
-      };
-      const mockRequest: any = { contents: [], config: {} };
-
-      // 1. Test autoMemoryIngestCallback
-      await autoMemoryIngestCallback({ context: mockContext, request: mockRequest });
+      // 1. Seed a memory for the recall checks below
+      await ingestTranscriptToMemoryBank({ text: "Schedule a product demo with Alex on Friday", sessionId: "run-cb-1", userId: "cb-user", memoryService: cbMemService });
       const cbRetrieve = await retrieveFromMemoryBank("Alex", {
         userId: "cb-user",
         memoryService: cbMemService,
@@ -1236,7 +626,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
 
       // ---- Memory Events Self-checks ----
       const eventsCaptured: AdkEvent[] = [];
-      const unsub = subscribeToMemoryEvents(evt => eventsCaptured.push(evt));
+      const unsub = subscribeToAdkEvents(evt => eventsCaptured.push(evt));
 
       // Test insert event
       const evtIngest = await ingestTranscriptToMemoryBank({
@@ -1285,10 +675,10 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
       );
 
       // Test event history filtering
-      const insertHistory = getMemoryEvents({ type: "memory:insert" });
+      const insertHistory = getAdkEvents({ type: "memory:insert" });
       assert.ok(insertHistory.every(e => classifyAdkEventType(e) === "memory:insert"));
 
-      const retrieveHistory = getMemoryEvents({ type: "memory:retrieve" });
+      const retrieveHistory = getAdkEvents({ type: "memory:retrieve" });
       assert.ok(retrieveHistory.every(e => classifyAdkEventType(e) === "memory:retrieve"));
 
       unsub();

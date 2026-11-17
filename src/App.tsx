@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 import Header, { AppTab } from "./components/Header";
 import AudioRecorder from "./components/AudioRecorder";
 import ActiveSession from "./components/ActiveSession";
-import SessionHistory from "./components/SessionHistory";
 import AdminMonitoring from "./components/AdminMonitoring";
 import ApiDocsView from "./components/ApiDocsView";
 import { StreamRun, AnalysisResult, ProofResult, AutonomyMode } from "./types";
@@ -19,23 +18,25 @@ import {
 import { Info, Lock, FolderSync, Trash2 } from "lucide-react";
 import { isAutoExecutable } from "./utils/autonomy";
 import { mergeList, isSameItem, PlanList } from "./utils/plan-merge";
-
+import { applyCorrections } from "./utils/transcript";
 
 // New characters of speech required before the expensive classifier stage re-runs.
-// Set to 15 so short single-sentence requests trigger extraction immediately.
 const PLAN_MIN_GROWTH = 15;
-
-// The debounce below waits for a quiet gap before running the live pipeline.
-// Set to 500ms for near-instant triggering, with a 2500ms max cap during non-stop speech.
+// The live pipeline waits for a quiet gap, capped during non-stop speech.
 const LIVE_QUIET_MS = 500;
 const LIVE_MAX_WAIT_MS = 2500;
 
+const TOKEN_KEY = "gcp_access_token";
+const EXPIRY_KEY = "gcp_access_token_expiry";
+const tokenExpired = () => Date.now() >= Number(localStorage.getItem(EXPIRY_KEY) || 0);
+// Store (with a TTL in seconds) or clear the OAuth token.
+function storeToken(token: string | null, ttlSec = 3600) {
+  if (!token) return localStorage.removeItem(TOKEN_KEY), localStorage.removeItem(EXPIRY_KEY);
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(EXPIRY_KEY, String(Date.now() + ttlSec * 1000));
+}
 
-
-// State that's just mirrored to localStorage verbatim (no expiry/removal branching like the token
-// has) — one hook instead of a bespoke init-then-useEffect pair per field. Old plain-string values
-// (written before this hook existed) fail JSON.parse and fall back to the raw string, so existing
-// sessions aren't reset; every write from here on is JSON.
+// State mirrored to localStorage as JSON. Old plain-string values fail JSON.parse and are kept raw.
 function useLocalStorage<T>(key: string, initial: T) {
   const [value, setValue] = useState<T>(() => {
     const raw = localStorage.getItem(key);
@@ -48,43 +49,20 @@ function useLocalStorage<T>(key: string, initial: T) {
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => {
-    const storedToken = localStorage.getItem("gcp_access_token");
-    const storedExpiry = localStorage.getItem("gcp_access_token_expiry");
-    if (storedToken && storedExpiry) {
-      const expiryTime = parseInt(storedExpiry, 10);
-      if (Date.now() < expiryTime) {
-        return storedToken;
-      } else {
-        localStorage.removeItem("gcp_access_token");
-        localStorage.removeItem("gcp_access_token_expiry");
-      }
-    }
+    if (!tokenExpired()) return localStorage.getItem(TOKEN_KEY);
+    storeToken(null);
     return null;
   });
   const [clientId, setClientId] = useLocalStorage("gcp_client_id", "");
-  const [runs, setRuns] = useLocalStorage<StreamRun[]>("stream_runs_archive", []);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(() => {
-    const data = localStorage.getItem("stream_runs_archive");
-    if (!data) return null;
-    try {
-      const parsed: StreamRun[] = JSON.parse(data);
-      return Array.isArray(parsed) && parsed.length > 0 ? parsed[0].id : null;
-    } catch {
-      return null;
-    }
-  });
   const [autonomyMode, setAutonomyMode] = useLocalStorage<AutonomyMode>("autonomy_mode", "consent");
   const [allowUncertain, setAllowUncertain] = useLocalStorage("autonomy_allow_uncertain", false);
   const [activeTab, setActiveTab] = useState<AppTab>("workspace");
   const [eventsCount, setEventsCount] = useState(0);
   const [savingDrive, setSavingDrive] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  // Bumped on Clear All and handed to AudioRecorder as `clearSignal`. It used to be the `key`, but
-  // remounting also tore down the live mic and shared-tab capture; those now only stop when the
-  // user stops them, so the recorder resets its own text state off this counter instead.
-  const [recorderKey, setRecorderKey] = useState(0);
+  // Bumped on Clear All; AudioRecorder resets its text without stopping capture.
+  const [clearSignal, setClearSignal] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [liveDraft, setLiveDraft] = useState<AnalysisResult | null>(null);
   const [liveSummary, setLiveSummary] = useState("");
@@ -97,26 +75,24 @@ export default function App() {
   const liveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const inFlightRef = useRef(false);
   const lastSentTextRef = useRef("");
+  const lastLiveErrorRef = useRef<string | null>(null);
   const lastPlannedLenRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
-  // Minted once per recording (first non-empty transcript), reused by every /api/live tick AND the
-  // final /api/analyze call — one id, one server-side session file, auto-saved every few seconds
-  // instead of only at finalize. Cleared whenever liveTranscript resets to "".
+  // Minted on the first non-empty transcript and reused by every /api/live tick, so the session
+  // auto-saves to one server-side file. Cleared whenever liveTranscript resets to "".
   const sessionIdRef = useRef<string | null>(null);
   // When the CURRENT unsent change first appeared — reset once a cycle is scheduled for it. Lets the
   // debounce below cap the wait instead of resetting forever while speech keeps streaming in.
   const pendingSinceRef = useRef<number | null>(null);
-  // Live-draft items whose auto-write is in flight. The live pipeline re-plans every tick and keeps
-  // re-offering an item as `pending` until its status flips, so without this the same event would be
-  // created once per tick until the first create returned. Matched by identity, not index: a re-plan
-  // can reorder the list while the write is out.
+  // Live-draft items whose auto-write is in flight, so a re-plan landing before the create returns
+  // can't fire it again. Matched by identity: a re-plan can reorder the list mid-write.
   const autoFiringRef = useRef<{ list: PlanList; item: any }[]>([]);
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 5000);
   };
 
-  // Normalize a raw classifier plan (from either /api/analyze or the live pipeline's plan stage),
+  // Normalize a raw classifier plan (the live pipeline's plan stage),
   // merged over the draft it replaces so settled rows keep their status, ids and answers while
   // scheduled/created rows still take refined details (rules and self-check in plan-merge.ts).
   const toAnalysisResult = (rawRes: any, rawText: string, prev?: AnalysisResult | null): AnalysisResult => ({
@@ -135,67 +111,31 @@ export default function App() {
       prev?.searchQueries || []),
   });
 
-  // Apply an updater to whichever analysis is selected (live draft or an archived run).
-  const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) => {
-    if (selectedRunId === "live-draft") {
-      setLiveDraft(prev => (prev ? updater(prev) : prev));
-    } else {
-      setRuns(prev => prev.map(r =>
-        r.id === selectedRunId && r.analysis ? { ...r, analysis: updater(r.analysis) } : r
-      ));
-    }
-  };
-
   const handleSetToken = (newToken: string | null) => {
     setToken(newToken);
-    if (newToken) {
-      localStorage.setItem("gcp_access_token", newToken);
-      if (!localStorage.getItem("gcp_access_token_expiry")) {
-        const expiryTime = Date.now() + 3600 * 1000;
-        localStorage.setItem("gcp_access_token_expiry", expiryTime.toString());
-      }
-    } else {
-      localStorage.removeItem("gcp_access_token");
-      localStorage.removeItem("gcp_access_token_expiry");
-    }
+    storeToken(newToken);
   };
 
-  // Authenticate implicitly on URL redirect hash matching
+  // OAuth implicit-grant redirect: the token arrives in the URL hash.
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash) {
-      const params = new URLSearchParams(hash.substring(1));
-      const accessToken = params.get("access_token");
-      const expiresIn = params.get("expires_in") || "3600";
-      if (accessToken) {
-        const expiryTime = Date.now() + parseInt(expiresIn, 10) * 1000;
-        localStorage.setItem("gcp_access_token", accessToken);
-        localStorage.setItem("gcp_access_token_expiry", expiryTime.toString());
-        setToken(accessToken);
-        showToast("Connected successfully! Google Workspace integration is now ONLINE.");
-        // Clear secret hash parameters from browser history
-        window.history.replaceState({}, document.title, window.location.pathname);
-      }
-    }
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const accessToken = params.get("access_token");
+    if (!accessToken) return;
+    storeToken(accessToken, Number(params.get("expires_in") || 3600));
+    setToken(accessToken);
+    showToast("Connected successfully! Google Workspace integration is now ONLINE.");
+    window.history.replaceState({}, document.title, window.location.pathname); // drop the secret hash
   }, []);
 
-  // Monitor token expiration periodically
   useEffect(() => {
     if (!token) return;
     const interval = setInterval(() => {
-      const storedExpiry = localStorage.getItem("gcp_access_token_expiry");
-      if (storedExpiry) {
-        const expiryTime = parseInt(storedExpiry, 10);
-        if (Date.now() >= expiryTime) {
-          handleSetToken(null);
-          showToast("Your Google session has expired. Reverted to Sandbox Preview Mode.");
-        }
-      }
+      if (!tokenExpired()) return;
+      handleSetToken(null);
+      showToast("Your Google session has expired. Reverted to Sandbox Preview Mode.");
     }, 10000);
     return () => clearInterval(interval);
   }, [token]);
-
-  // clientId/runs/autonomyMode/allowUncertain mirror themselves via useLocalStorage above.
 
   // Always sync the client ID from the server's credentials.json if present.
   useEffect(() => {
@@ -204,7 +144,6 @@ export default function App() {
       .then(d => { if (d.googleClientId) setClientId(d.googleClientId); })
       .catch(() => {});
   }, []);
-
 
   // ONE capture cycle: proofread → summary + plan, streamed back stage by stage. One timer, not one
   // per stage — independent timers race each other and stack up 429s. Deliberately not keyed on
@@ -225,7 +164,7 @@ export default function App() {
     // The classifier is the expensive stage; only re-plan once enough new speech has landed.
     const withPlan = !liveDraft || text.length - lastPlannedLenRef.current >= PLAN_MIN_GROWTH;
     lastSentTextRef.current = text;
-    setBusy({ proof: false, summary: true, plan: withPlan });
+    setBusy(b => ({ ...b, summary: true, plan: withPlan }));
 
     try {
       const res = await fetch("/api/live", {
@@ -251,22 +190,49 @@ export default function App() {
         }
       }
     } catch (error: any) {
-      if (error.name !== "AbortError") console.error("Live pipeline failed:", error);
+      if (error.name !== "AbortError") handleStage({ stage: "pipeline", error: error.message });
     } finally {
       inFlightRef.current = false;
-      setBusy({ proof: false, summary: false, plan: false });
+      setBusy(b => ({ ...b, summary: false, plan: false })); // proof is owned by proofreadOnStop
+    }
+  };
+
+  // Proofreading runs once when the mic stops, not per live tick: measured per tick it doubled
+  // time-to-plan without changing the plan (summary/plan agents already read past casing and
+  // punctuation). It only makes the transcript itself readable. AudioRecorder applies the result.
+  const proofreadOnStop = async () => {
+    const text = liveTranscript.trim();
+    if (text.length < 15) return;
+    setBusy(b => ({ ...b, proof: true }));
+    try {
+      const res = await fetch("/api/transcribe-correct", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      const { corrections, words } = await res.json();
+      // That text was already summarized and planned: the correction is cosmetic, so it mustn't
+      // re-arm the debounce and buy the same answer twice. If it was NOT sent yet, leave the ref so
+      // the pending final tick still runs.
+      if (lastSentTextRef.current === text) lastSentTextRef.current = applyCorrections(text, words, corrections).text;
+      setProofResult({ text, corrections, words });
+    } catch (err: any) {
+      console.error("Proofread failed:", err);
+      showToast(`Proofread failed: ${err.message}`);
+    } finally {
+      setBusy(b => ({ ...b, proof: false }));
     }
   };
 
   const handleStage = (msg: any) => {
-    if (msg.error) { console.warn(`[live] ${msg.stage} stage failed:`, msg.error); }
-    else if (msg.stage === "proof") {
-      setProofResult({ text: msg.text, corrections: msg.corrections, words: msg.words });
-      // This cycle already reasoned over the corrected text, so don't let applying the correction
-      // re-arm the debounce and buy the same answer twice.
-      if (msg.corrected) lastSentTextRef.current = msg.corrected;
+    if (msg.error) {
+      console.warn(`[live] ${msg.stage} stage failed:`, msg.error);
+      // Once per distinct error, not once per tick — a dead credential fails every cycle.
+      if (msg.error !== lastLiveErrorRef.current) showToast(`Live ${msg.stage} failed: ${msg.error}`);
+      lastLiveErrorRef.current = msg.error;
     }
-    else if (msg.stage === "summary") setLiveSummary(msg.summary);
+    else if (msg.stage === "summary") { setLiveSummary(msg.summary); lastLiveErrorRef.current = null; }
     else if (msg.stage === "plan") {
       setLiveDraft(prev => toAnalysisResult(msg.plan, msg.text, prev));
       lastPlannedLenRef.current = (msg.text || "").length;
@@ -275,10 +241,8 @@ export default function App() {
     if (msg.stage in busy) setBusy(b => ({ ...b, [msg.stage]: false }));
   };
 
-  // Debounce with a cap: normally waits for a 2s quiet gap, but continuous speech (interim results
-  // firing every few hundred ms) can keep resetting that gap indefinitely, so proofreading/summary
-  // would never run mid-tirade. Once this change has been waiting LIVE_MAX_WAIT_MS, run on the next
-  // tick instead of waiting for quiet.
+  // Debounce with a cap: continuous speech would keep resetting the quiet gap forever, so once a
+  // change has waited LIVE_MAX_WAIT_MS it runs on the next tick.
   useEffect(() => {
     const text = liveTranscript.trim();
     if (!text) {
@@ -301,25 +265,6 @@ export default function App() {
     return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
   }, [liveTranscript, autoRun]);
 
-
-
-  // Sync selectedRunId to live-draft or fallback to archive
-  useEffect(() => {
-    const text = liveTranscript.trim();
-    const selectedRun = runs.find(r => r.id === selectedRunId);
-    const isShowingFinalizedRun = selectedRun && selectedRun.rawText.trim() === text;
-
-    if (text) {
-      if (!isShowingFinalizedRun && selectedRunId !== "live-draft") {
-        setSelectedRunId("live-draft");
-      }
-    } else {
-      if (selectedRunId === "live-draft") {
-        setSelectedRunId(runs.length > 0 ? runs[0].id : null);
-      }
-    }
-  }, [liveTranscript, selectedRunId, runs]);
-
   const handleSetClientId = (id: string) => {
     setClientId(id);
     showToast("GCP Client Credentials configured.");
@@ -331,74 +276,12 @@ export default function App() {
       showToast("Add your Google OAuth Client ID below to sign in — see the README for the 5-minute GCP setup.");
       return;
     }
-    const redirectUri = window.location.origin;
-    // Full CRUD scopes for Google Calendar, Tasks, Drive, Docs, and Sheets.
-    const scope = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/userinfo.profile";
-
-    // Standard Implicit Grant Flow auth URL
-    const googleAuthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&include_granted_scopes=true&prompt=consent`;
-
-    window.location.href = googleAuthUrl;
-  };
-
-  const handleAnalyzeStream = async (text: string) => {
-    setIsProcessing(true);
-    // The SAME id the live loop's been auto-saving under (minted on the first non-empty transcript
-    // tick) — so finalize appends the last, authoritative line to the session file the live ticks
-    // were already writing, rather than starting a new one. Falls back to a fresh id only if
-    // finalize is somehow reached without a live tick ever having run.
-    const runId = sessionIdRef.current ?? `run-${Date.now()}`;
-
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-
-    try {
-      // Finalize: the full classifier pass behind the "Analyze Thoughts" button. The capture loop
-      // uses /api/live instead, so this runs once per session and is never cancelled.
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, currentLocalTime: new Date().toISOString(), liveSummary, sessionId: runId }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Brain dump categorization failed.");
-      }
-
-      const rawRes = await res.json();
-
-      const analysis = toAnalysisResult(rawRes, text, liveDraft);
-
-      // Consent-gated autonomy. Finalize only — the live draft re-plans continuously, so running
-      // this there would re-fire the same writes every cycle. Mutates the local object before it
-      // enters state, so the index-based handlers below aren't involved.
-      await autoExecute(analysis);
-
-      const newRun: StreamRun = {
-        id: runId,
-        timestamp: new Date().toISOString(),
-        rawText: text,
-        status: "completed",
-        analysis
-      };
-
-      setRuns(prev => [newRun, ...prev]);
-      setSelectedRunId(newRun.id);
-      
-      // Clear live draft and transcript so no more tokens are consumed after finalization
-      setLiveTranscript("");
-      setLiveDraft(null);
-      setLiveSummary("");
-      
-      showToast("Thoughts structured! Actionable items detected.");
-    } catch (error: any) {
-      console.error(error);
-      showToast(`Analyzer Error: ${error.message || "Failed to process speech intents."}`);
-    } finally {
-      setIsProcessing(false);
-    }
+    const scope = ["calendar.events", "tasks", "drive", "documents", "spreadsheets", "userinfo.profile"]
+      .map(s => `https://www.googleapis.com/auth/${s}`).join(" ");
+    window.location.href = "https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
+      client_id: clientId, redirect_uri: window.location.origin, response_type: "token",
+      scope, include_granted_scopes: "true", prompt: "consent",
+    });
   };
 
   const runSearch = async (query: string) => {
@@ -415,14 +298,13 @@ export default function App() {
     return { condensed: data.condensed, answer: data.inDepth, sources: data.sources };
   };
 
-  // One row per executable item kind: which analysis list it lives in, how to run it, and what to
-  // say afterwards. The approve buttons and the autonomy pass both read this table, so a manual
-  // execution and an automatic one can never drift apart.
   // Exactly the field values a write sends to Google. Stamped onto the item after every successful
   // write; if it no longer matches, the speaker refined the item and the remote copy is stale.
   const eventFingerprint = (e: any) => JSON.stringify([e.title, e.description, e.start, e.end, e.allDay]);
   const taskFingerprint = (t: any) => JSON.stringify([t.title, t.notes, t.dueDate]);
 
+  // One row per executable kind. The approve buttons and the autonomy pass both read this table, so
+  // manual and automatic execution can't drift apart.
   const KINDS = {
     calendar: {
       list: "calendarEvents",
@@ -453,7 +335,7 @@ export default function App() {
       fingerprint: null,
       update: null,
       exec: async (q: any) => ({ status: "completed", ...(await runSearch(q.query)) }),
-      done: (q: any) => `Researced facts retrieved for query: "${q.query}"`,
+      done: (q: any) => `Researched facts retrieved for query: "${q.query}"`,
       auto: (q: any) => `Auto-searched "${q.query}", as requested.`,
       failed: (msg: string) => `Facts query search failed: ${msg}`,
       undo: null, // a search wrote nothing to undo
@@ -461,10 +343,8 @@ export default function App() {
   } as const;
   type Kind = keyof typeof KINDS;
 
-  // Replace one item in one of the analysis lists, leaving everything else untouched. The row is
-  // found by identity rather than by the index the click came from: a live re-plan can land while the
-  // write is in flight and reorder the list under it, which would otherwise stamp a freshly created
-  // event id onto somebody else's row. `update` receives the row as it is NOW, not as it was clicked.
+  // Update one row, found by identity (a re-plan mid-write can reorder the list). `update` gets the
+  // row as it is now, not as it was clicked.
   const patchItem = (a: AnalysisResult, list: PlanList, original: any, update: (row: any) => any): AnalysisResult => {
     if (!original) return a;
     const rows = [...(a as any)[list]];
@@ -478,7 +358,7 @@ export default function App() {
   // Execute ONE reviewed item, then fold the result — or the failure — back into what's on screen.
   const executeItem = async (kind: Kind, index: number) => {
     const { list, exec, done, failed } = KINDS[kind];
-    const item: any = (activeAnalysis as any)?.[list]?.[index];
+    const item: any = (liveDraft as any)?.[list]?.[index];
     if (!item) return;
     try {
       const patch = await exec(item);
@@ -491,32 +371,8 @@ export default function App() {
     }
   };
 
-  // Execute whatever the current autonomy mode allows (see isAutoExecutable for the gate), mutating
-  // the analysis in place. A failure marks that item failed but never blocks the rest.
-  const autoExecute = async (analysis: AnalysisResult) => {
-    if (autonomyMode === "manual") return;
-    for (const { list, exec, auto } of Object.values(KINDS)) {
-      const items: any[] = (analysis as any)[list];
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (!isAutoExecutable(item, autonomyMode, allowUncertain)) continue;
-        try {
-          items[i] = { ...item, ...(await exec(item)) };
-          showToast(auto(item));
-        } catch (err: any) {
-          items[i] = { ...item, status: "failed", error: err.message };
-        }
-      }
-    }
-  };
-
-  // Fully Autonomous / On Your Command, applied to the LIVE draft: the moment the planner surfaces
-  // an item the gate allows, it is written to the user's account without waiting for a button. The
-  // gate is the same isAutoExecutable used at finalize, so the consent rules are pinned in one place.
-  //
-  // Re-firing is blocked by two things working together: exec() flips the item off "pending" (and
-  // toAnalysisResult preserves a scheduled/created/completed/failed status across re-plans), which
-  // covers everything after the write lands, and autoFiringRef covers the window before it does.
+  // Autonomy: write any live-draft item isAutoExecutable allows, without a button. exec() flips it off
+  // "pending" (kept across re-plans by plan-merge); autoFiringRef covers the gap until it lands.
   useEffect(() => {
     if (!liveDraft || autonomyMode === "manual") return;
     for (const { list, exec, auto, update, fingerprint, idKey } of Object.values(KINDS)) {
@@ -524,10 +380,8 @@ export default function App() {
       items.forEach(item => {
         if (autoFiringRef.current.some(f => f.list === list && isSameItem(list, f.item, item))) return;
 
-        // Two jobs behind one guard. Writing something never written is gated by the consent rules;
-        // RE-writing something already on the user's calendar is not a new decision, it is keeping a
-        // promise already made — the mode check above is the brake. Without this, refining an
-        // appointment mid-sentence left Google holding the first, half-specified version forever.
+        // A new write is gated by consent; re-syncing an item already written (refined mid-sentence)
+        // is not a new decision, so only the mode check above gates it.
         const stale = !!update && !!idKey && !!item[idKey] && !!item.synced && fingerprint(item) !== item.synced;
         const run = stale ? update : isAutoExecutable(item, autonomyMode, allowUncertain) ? exec : null;
         if (!run) return;
@@ -541,9 +395,8 @@ export default function App() {
             showToast(stale ? `Updated "${item.title}" — you added details while talking.` : auto(item));
           } catch (err: any) {
             console.error(err);
-            // A failed re-sync must not mark the item failed — the event IS on the calendar, only
-            // the edit didn't land. Stamp the fingerprint anyway, or a permanently failing update
-            // (revoked scope, event deleted in Google) would retry on every single live tick.
+            // A failed re-sync isn't a failed item (it exists remotely). Stamp the fingerprint anyway
+            // so a permanently failing update doesn't retry every tick.
             setLiveDraft(a => (a ? patchItem(a, list, item, row => stale
               ? { ...row, synced: fingerprint(item), error: err.message }
               : { ...row, status: "failed", error: err.message }) : a));
@@ -581,20 +434,14 @@ export default function App() {
     }
   };
 
-  // The analysis currently shown (live draft or selected archive run).
-  const activeAnalysis = selectedRunId === "live-draft"
-    ? liveDraft
-    : runs.find(r => r.id === selectedRunId)?.analysis ?? null;
-
-  // Undo a created calendar event / task: delete by the id the create returned, then reset the item
-  // to pending so its button comes back.
+  // "undone", not "pending": the button returns, but auto mode must not re-create it.
   const handleUndo = async (kind: Exclude<Kind, "search">, index: number) => {
     const { list, undo } = KINDS[kind];
-    const item: any = (activeAnalysis as any)?.[list]?.[index];
+    const item: any = (liveDraft as any)?.[list]?.[index];
     if (!item?.[undo.idKey]) return;
     try {
       await deleteCreatedItem(token, undo.action, item[undo.idKey]);
-      updateActiveAnalysis(a => patchItem(a, list, item, row => ({ ...row, status: "pending", [undo.idKey]: undefined })));
+      updateActiveAnalysis(a => patchItem(a, list, item, row => ({ ...row, status: "undone", [undo.idKey]: undefined })));
       showToast(`Removed "${item.title}" from ${undo.where}.`);
     } catch (err: any) {
       console.error(err);
@@ -602,19 +449,17 @@ export default function App() {
     }
   };
 
+  const updateActiveAnalysis = (updater: (a: AnalysisResult) => AnalysisResult) =>
+    setLiveDraft(prev => (prev ? updater(prev) : prev));
+
   const handleClearAll = () => {
     if (window.confirm("Are you sure you want to clear everything? This will reset the transcript, AI notes, main ideas, calendar events, search queries, and to-dos.")) {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-      setRuns([]);
-      setSelectedRunId(null);
-      setRecorderKey(k => k + 1);
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setClearSignal(k => k + 1);
       setLiveTranscript("");
       setLiveDraft(null);
       setLiveSummary("");
-      setIsProcessing(false);
       setProofResult(null);
       setBusy({ proof: false, summary: false, plan: false });
       inFlightRef.current = false;
@@ -626,17 +471,10 @@ export default function App() {
     }
   };
 
-  const selectedRun = runs.find(r => r.id === selectedRunId);
-
-  const displayedRun: StreamRun | null = selectedRunId === "live-draft"
-    ? {
-        id: "live-draft",
-        timestamp: new Date().toISOString(),
-        rawText: liveTranscript,
-        status: busy.plan ? "processing" : "completed",
-        analysis: liveDraft || undefined
-      }
-    : (selectedRun || null);
+  const displayedRun: StreamRun | null = liveTranscript.trim()
+    ? { id: "live-draft", timestamp: new Date().toISOString(), rawText: liveTranscript,
+        status: busy.plan ? "processing" : "completed", analysis: liveDraft || undefined }
+    : null;
 
   return (
     <div className="min-h-screen bg-stone-100/40 text-stone-900 flex flex-col font-sans selection:bg-amber-100">
@@ -698,27 +536,18 @@ export default function App() {
           {/* Content layout: Top Row (Microphone) */}
           <div className="w-full">
             <AudioRecorder
-              clearSignal={recorderKey}
-              onAnalyze={handleAnalyzeStream}
-              isProcessing={isProcessing}
+              clearSignal={clearSignal}
               onShowToast={showToast}
               onChangeTranscript={setLiveTranscript}
               liveSummary={liveSummary}
               proofResult={proofResult}
               busy={busy}
               onRunNow={() => runLive(liveTranscript.trim())}
-              onSaveToDrive={() => handleSaveToDrive(
-                "Scribant Session",
-                "Live Notes.md",
-                liveSummary,
-              )}
+              onStopListening={proofreadOnStop}
+              onSaveToDrive={() => handleSaveToDrive("Scribant Session", "Live Notes.md", liveSummary)}
               savingDrive={savingDrive}
-              mainIdeas={activeAnalysis?.summary || ""}
-              onSaveMainIdeasToDrive={() => handleSaveToDrive(
-                "Scribant Session",
-                "Session Summary.md",
-                activeAnalysis?.summary || "",
-              )}
+              mainIdeas={liveDraft?.summary || ""}
+              onSaveMainIdeasToDrive={() => handleSaveToDrive("Scribant Session", "Session Summary.md", liveDraft?.summary || "")}
             />
           </div>
 
@@ -731,8 +560,8 @@ export default function App() {
               onExecuteSearch={i => executeItem("search", i)}
               onUndoCalendar={i => handleUndo("calendar", i)}
               onUndoTask={i => handleUndo("task", i)}
-              onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchItem(a, "calendarEvents", activeAnalysis?.calendarEvents[i], () => u))}
-              onUpdateTask={(i, u) => updateActiveAnalysis(a => patchItem(a, "tasks", activeAnalysis?.tasks[i], () => u))}
+              onUpdateCalendar={(i, u) => updateActiveAnalysis(a => patchItem(a, "calendarEvents", liveDraft?.calendarEvents[i], () => u))}
+              onUpdateTask={(i, u) => updateActiveAnalysis(a => patchItem(a, "tasks", liveDraft?.tasks[i], () => u))}
               isLiveAnalyzing={busy.plan}
             />
           </div>

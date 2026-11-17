@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Terminal, Zap, Activity, BookOpen } from "lucide-react";
+import { BrainCircuit, Key, Info, Check, CloudLightning, LogOut, FolderSync, X, Activity, BookOpen } from "lucide-react";
 import { AutonomyMode } from "../types";
 
 export type AppTab = "workspace" | "admin" | "docs";
@@ -28,6 +28,12 @@ const AUTONOMY_OPTIONS: { mode: AutonomyMode; label: string; description: string
   { mode: "consent", label: "On Your Command", description: "The agent acts only when you explicitly say so (\"add that to my to-do list\"); everything else waits for a click." },
   { mode: "auto", label: "Fully Autonomous", description: "Anything confidently identified is added to your workspace on its own; uncertain items still wait for review." },
 ];
+
+const NAV = [
+  ["workspace", BrainCircuit, "text-amber-600", "Board"],
+  ["admin", Activity, "text-indigo-600", "Administration & Monitoring"],
+  ["docs", BookOpen, "text-purple-600", "API Documentation"],
+] as const;
 
 export default function Header({
   token,
@@ -67,8 +73,6 @@ export default function Header({
     onShowConfigChange(false);
   };
 
-  const currentRedirectUri = window.location.origin;
-
   return (
     <div id="app-header-container" className="space-y-3">
 
@@ -77,9 +81,7 @@ export default function Header({
           <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-600">
             <BrainCircuit className="w-6 h-6" />
           </div>
-          <div className="space-y-0.5">
-            <h1 className="text-base font-extrabold tracking-tight font-sans text-stone-800">Scribant</h1>
-          </div>
+          <h1 className="text-base font-extrabold tracking-tight font-sans text-stone-800">Scribant</h1>
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto shrink-0 justify-between sm:justify-end">
@@ -116,49 +118,26 @@ export default function Header({
       {onTabChange && (
         <div className="flex items-center justify-between gap-3 pt-0.5">
           <nav className="flex items-center gap-1.5 p-1 bg-stone-100/90 border border-stone-200/90 rounded-xl shadow-2xs">
-            <button
-              type="button"
-              onClick={() => onTabChange("workspace")}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
-                activeTab === "workspace"
-                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
-                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
-              }`}
-            >
-              <BrainCircuit className={`w-4 h-4 ${activeTab === "workspace" ? "text-amber-600" : "text-stone-400"}`} />
-              <span>Board</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onTabChange("admin")}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
-                activeTab === "admin"
-                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
-                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
-              }`}
-            >
-              <Activity className={`w-4 h-4 ${activeTab === "admin" ? "text-indigo-600" : "text-stone-400"}`} />
-              <span>Administration &amp; Monitoring</span>
-              {eventsCount > 0 && (
-                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-900 text-stone-100 font-mono font-bold">
-                  {eventsCount}
-                </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onTabChange("docs")}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
-                activeTab === "docs"
-                  ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
-                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
-              }`}
-            >
-              <BookOpen className={`w-4 h-4 ${activeTab === "docs" ? "text-purple-600" : "text-stone-400"}`} />
-              <span>API Documentation</span>
-            </button>
+            {NAV.map(([id, Icon, color, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => onTabChange(id)}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-sans transition-all cursor-pointer ${
+                  activeTab === id
+                    ? "bg-white text-stone-900 shadow-xs border border-stone-200/90 font-bold"
+                    : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60 font-medium"
+                }`}
+              >
+                <Icon className={`w-4 h-4 ${activeTab === id ? color : "text-stone-400"}`} />
+                <span>{label}</span>
+                {id === "admin" && eventsCount > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-900 text-stone-100 font-mono font-bold">
+                    {eventsCount}
+                  </span>
+                )}
+              </button>
+            ))}
           </nav>
         </div>
       )}
@@ -260,7 +239,7 @@ export default function Header({
                 className="w-full bg-stone-50 border border-stone-200 focus:bg-white rounded-lg p-2.5 text-xs text-stone-700 font-mono outline-none focus:ring-1 focus:ring-amber-500/20"
               />
               <span className="text-[10px] text-stone-400 block font-sans">
-                Authorized redirect URI: <code className="bg-stone-100 px-1.5 py-0.5 rounded text-amber-700 font-mono text-[9px]">{currentRedirectUri}</code>
+                Authorized redirect URI: <code className="bg-stone-100 px-1.5 py-0.5 rounded text-amber-700 font-mono text-[9px]">{window.location.origin}</code>
               </span>
             </div>
           </div>

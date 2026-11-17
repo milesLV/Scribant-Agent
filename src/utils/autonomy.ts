@@ -45,6 +45,8 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("autonomy.ts")) 
   // already-executed items are never re-run, in any mode
   for (const m of ["consent", "auto"] as const)
     eq(isAutoExecutable({ ...commanded, status: "created" }, m, true), false, `re-ran a done item in ${m}`);
+  // ...and an item the user undid is never re-created behind their back
+  eq(isAutoExecutable({ ...mentioned, status: "undone" }, "auto", true), false, "auto re-created an undone item");
 
   console.log("autonomy self-check ✓");
 }

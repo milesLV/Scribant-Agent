@@ -93,7 +93,6 @@ export function skillSchemaProperties(): Record<string, z.ZodTypeAny> {
 }
 
 // ponytail: self-check guards the response contract the client depends on. Run: tsx skills.ts
-// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   const props = skillSchemaProperties();
   assert.deepEqual(Object.keys(props), ["calendarEvents", "tasks", "searchQueries"]);
@@ -107,7 +106,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     Object.keys((props.calendarEvents as z.ZodArray<z.ZodObject<z.ZodRawShape>>).element.shape),
     ["title", "description", "start", "end", "uncertain", "allDay", "explicitCommand", "sourceText", "speaker"]
   );
-  // tasks must stay index 3 (calendar=2) so the calendar criteria's "(see #3)" reference holds.
+  // tasks must stay right after calendar so the calendar criteria's "(see #3)" reference holds.
   assert.equal(SKILLS.findIndex(s => s.name === "tasks"), 1);
   console.log("skills self-check ✓");
 }

@@ -28,7 +28,7 @@ function List({ items, depth }: { items: OutlineItem[]; depth: number }) {
 }
 
 export default function MarkdownBullets({ text }: { text: string }) {
-  const items = text ? parseOutline(text) : [];
+  const items = parseOutline(text);
   if (items.length === 0) return null;
   return (
     <div className="text-stone-600 font-sans text-xs">

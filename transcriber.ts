@@ -7,20 +7,14 @@ import { Word } from "./src/types";
 import { cleanJsonString } from "./server-utils";
 import { applyCorrections } from "./src/utils/transcript";
 
-// Split text into words with char offsets. \S+ run over the string; match.index is the offset.
-function tokenize(text: string): { text: string; start: number; end: number }[] {
-  const out: { text: string; start: number; end: number }[] = [];
-  const re = /\S+/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) out.push({ text: m[0], start: m.index, end: m.index + m[0].length });
-  return out;
-}
+type Token = { text: string; start: number; end: number };
 
-// ---- Provider A: obvious correction vs ambiguous flag (the proofread router) ------
-// One LLM pass that ROUTES each suspect word to one of two actions instead of flagging everything:
-//   corrections — obvious typo/grammar with a single unambiguous fix, safe to auto-apply.
-//   flagged     — real word likely misheard/wrong-in-context, where the fix is a judgement call -> flag.
-// Self-corrected phrases ("write, actually written-down") are left alone. Same Word[] seam as above.
+// Split text into words with char offsets.
+const tokenize = (text: string): Token[] =>
+  [...text.matchAll(/\S+/g)].map(m => ({ text: m[0], start: m.index!, end: m.index! + m[0].length }));
+
+// One LLM pass ROUTES each suspect word: corrections (unambiguous, auto-applied), flagged (judgement
+// call, low confidence + suggestions), deletions (recogniser artifacts, gated by isDisfluency).
 interface Correction { index: number; from: string; to: string; }
 
 export const PROOFREAD_CORRECT_INSTRUCTION = `You are a transcription proofreader for spoken brain-dumps. Each word is indexed from 0.
@@ -44,10 +38,7 @@ Return ONLY JSON:
 Return empty "flagged"/"deletions" if there's nothing suspect — but "corrections" still needs every capitalization and end-of-sentence fix from above; that's never empty unless the transcript already has them. Never rewrite a correctly-spelled, already-punctuated word for any other reason.
 For a multi-word PHRASE fix ("frozen cons" -> "pros and cons"), put the WHOLE intended phrase as one string ("to" for a correction, or one "suggestions" entry for a flag) — never split it word-by-word.`;
 
-// The two halves of the proofread pass, split so the caller can own the model call in between:
-// the orchestrator's proofreader sub-agent is an ADK LlmAgent, so ADK makes the request and this
-// module only builds the prompt and reads the answer.
-type ProofPrompt = { tokens: { text: string; start: number; end: number }[]; words: Word[]; contents: string };
+type ProofPrompt = { tokens: Token[]; words: Word[]; contents: string };
 
 export function buildProofreadPrompt(text: string): ProofPrompt {
   const tokens = tokenize(text);
@@ -76,18 +67,12 @@ export function parseProofread(rawText: string, prompt: ProofPrompt): { correcti
   };
 
   for (const c of parsed.corrections || []) {
-    // Same index-then-text-match fallback as the flag path (guards model index drift).
-    let i = c.index;
-    if (!(tokens[i] && looseEq(tokens[i].text, c.from))) i = tokens.findIndex(t => looseEq(t.text, c.from));
-    if (i < 0 || !tokens[i]) continue;
+    const i = locate(tokens, c.index, c.from);
+    if (i < 0) continue;
     if (c.to) corrections.push({ index: i, from: tokens[i].text, to: String(c.to) });
     else proposeDelete(i);
   }
-  for (const d of parsed.deletions || []) {
-    let i = d.index;
-    if (!(tokens[i] && looseEq(tokens[i].text, d.word))) i = tokens.findIndex(t => looseEq(t.text, d.word));
-    proposeDelete(i);   // already being rewritten by a real correction -> proposeDelete no-ops (see guard above)
-  }
+  for (const d of parsed.deletions || []) proposeDelete(locate(tokens, d.index, d.word));
   deleteIdx.sort((a, b) => a - b);
 
   // Group into maximal runs of consecutive indices — a whole-clause restart ("I was a very nice time
@@ -120,11 +105,11 @@ export function parseProofread(rawText: string, prompt: ProofPrompt): { correcti
       // leading into "log" deleted too — the one leading into "dog" is real and must survive, or the
       // result reads "a a dog" instead of "a dog".
       let extra = -1;
-      let match = isDisfluency(word, [before, after].filter(Boolean) as string[]);
-      if (!match && isFiller(after) && isDisfluency(word, [tokens[i + 2]?.text].filter(Boolean) as string[])) {
+      let match = isDisfluency(word, [before, after]);
+      if (!match && isFiller(after) && isDisfluency(word, [tokens[i + 2]?.text])) {
         match = true;
         if (isFiller(before)) extra = i - 1;
-      } else if (!match && isFiller(before) && isDisfluency(word, [tokens[i - 2]?.text].filter(Boolean) as string[])) {
+      } else if (!match && isFiller(before) && isDisfluency(word, [tokens[i - 2]?.text])) {
         match = true;
         if (isFiller(after)) extra = i + 1;
       }
@@ -137,19 +122,22 @@ export function parseProofread(rawText: string, prompt: ProofPrompt): { correcti
   }
 
   for (const s of parsed.flagged || []) {
-    let i = s.index;
-    if (!(words[i] && looseEq(words[i].text, s.word))) i = words.findIndex(w => looseEq(w.text, s.word));
-    if (i >= 0 && words[i]) {
-      words[i].confidence = clamp(s.confidence ?? 0.5);
-      if (s.suggestions?.length) words[i].alternatives = s.suggestions;
-    }
+    const i = locate(words, s.index, s.word);
+    if (i < 0) continue;
+    words[i].confidence = Math.max(0, Math.min(1, s.confidence ?? 0.5));
+    if (s.suggestions?.length) words[i].alternatives = s.suggestions;
   }
   return { corrections, words };
 }
 
 // ---- helpers ----
 function looseEq(a: string, b: string): boolean {
-  return a.replace(/\W/g, "").toLowerCase() === b.replace(/\W/g, "").toLowerCase();
+  return a.replace(/\W/g, "").toLowerCase() === String(b ?? "").replace(/\W/g, "").toLowerCase();
+}
+
+// The model's index, or — when it drifted — the first token whose text matches. -1 if neither.
+function locate(list: { text: string }[], index: number, text: string): number {
+  return list[index] && looseEq(list[index].text, text) ? index : list.findIndex(t => looseEq(t.text, text));
 }
 
 // Levenshtein, char-level. Small inputs (single words), so the plain O(n*m) table is fine.
@@ -177,16 +165,10 @@ function isPhraseRestart(span: string[], next: string[]): boolean {
   return mismatches > 0 && mismatches <= Math.max(1, Math.floor(span.length / 3));
 }
 
-// Deleting a word is destructive and irreversible from the user's side, so a RULE — not the model —
-// decides what may be deleted at all: a token only qualifies as a transcription artifact when a
-// neighbour looks like the word it garbled ("stork store", "reeling reading", "to to").
-//
-// This bounds the blast radius to "adjacent to something similar"; it is deliberately NOT sufficient
-// on its own. An intentional repeat ("very very cold") passes this guard by design — rejecting THAT
-// is the prompt's job. Guard limits the damage, prompt handles the intent; both are load-bearing.
-// ASR garbles either edge of a word and leaves the other intact — "stork"/"store" keep their front
-// ("sto"), "log"/"dog" keep their back ("og"). A prefix-only check misses the second kind entirely,
-// so this shares if EITHER edge lines up for >=2 chars.
+// Deletion is destructive, so a RULE — not the model — decides what may be deleted: a token qualifies
+// only when a neighbour looks like the word it garbled ("stork store", "to to"). An intentional repeat
+// ("very very cold") passes by design; rejecting that is the prompt's job. ASR keeps one edge of a
+// word intact ("stork"/"store" the front, "log"/"dog" the back), so EITHER edge sharing >=2 chars counts.
 const sharesEdge = (a: string, b: string): boolean => {
   let p = 0;
   while (p < a.length && p < b.length && a[p] === b[p]) p++;
@@ -194,26 +176,21 @@ const sharesEdge = (a: string, b: string): boolean => {
 };
 const reverse = (s: string): string => [...s].reverse().join("");
 
-// A short filler word doesn't break adjacency when checking whether a token is a self-correction
-// artifact (see the neighbour-widening above in parseProofread).
+// A short filler doesn't break adjacency for the artifact check (see parseProofread).
 const isFiller = (w?: string): boolean => !!w && /^(a|an|the|um|uh)$/i.test(w.replace(/\W/g, ""));
 
-export function isDisfluency(word: string, neighbours: string[]): boolean {
+export function isDisfluency(word: string, neighbours: (string | undefined)[]): boolean {
   const a = word.replace(/\W/g, "").toLowerCase();
   if (!a) return false;
   return neighbours.some(raw => {
-    const b = raw.replace(/\W/g, "").toLowerCase();
+    const b = (raw ?? "").replace(/\W/g, "").toLowerCase();
     if (!b) return false;
     if (a === b) return true;                                     // exact accidental repeat
     if (!sharesEdge(a, b) && !sharesEdge(reverse(a), reverse(b))) return false;  // must share a real edge
     return editDistance(a, b) <= Math.floor(Math.min(a.length, b.length) / 2);
   });
 }
-function clamp(n: number): number {
-  return Math.max(0, Math.min(1, n));
-}
 
-// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
   (async () => {
     const toks = tokenize("call grandma tomorow");

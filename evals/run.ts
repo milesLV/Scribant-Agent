@@ -13,8 +13,8 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import assert from "node:assert/strict";
-import { LlmAgent, Gemini } from "@google/adk";
-import { askAgent, createGeminiModel, MODEL } from "../agents";
+import { LlmAgent } from "@google/adk";
+import { askAgent, createGeminiModel } from "../agents";
 import { applyCorrections, CONFIDENCE_THRESHOLD } from "../src/utils/transcript";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -31,18 +31,11 @@ function loadJsonl(file: string): any[] {
   return readFileSync(path.join(DATA, file), "utf8")
     .split("\n").map(l => l.trim()).filter(Boolean).map(l => JSON.parse(l));
 }
-function locateSpan(sub: string, text: string): number | null {
-  const i = norm(text).indexOf(norm(sub));
-  return i < 0 ? null : i;
-}
 // Compare the produced start as WALL-CLOCK time (what the model wrote), matching the dataset's
 // local expectations. ponytail: naive string parse, not Date() — dodges runner-TZ drift.
 function parseWallClock(s: string): { date: string; hour: number } | null {
-  if (!s) return null;
-  const dm = String(s).match(/(\d{4}-\d{2}-\d{2})/);
-  if (!dm) return null;
-  const hm = String(s).match(/T(\d{2})/);
-  return { date: dm[1], hour: hm ? Number(hm[1]) : 0 };
+  const m = String(s ?? "").match(/(\d{4}-\d{2}-\d{2})(?:T(\d{2}))?/);
+  return m ? { date: m[1], hour: Number(m[2] ?? 0) } : null;
 }
 
 // Word-level edit distance / reference length = WER. Used for the correction pipeline (corrected vs gold).
@@ -135,7 +128,7 @@ function gradeIntent(c: any, out: any, mat: Record<string, Record<string, number
   }
   for (const p of prod) {
     const st = p.raw.sourceText;
-    if (st && locateSpan(st, c.transcript) === null) fails.push(`sourceText not in transcript: '${st}'`);
+    if (st && !contains(c.transcript, norm(st))) fails.push(`sourceText not in transcript: '${st}'`);
   }
   return { kind: "intent", id: c.id, note: c.note, pass: fails.length === 0, fails, expectedCount: expected.length, correct };
 }
@@ -441,11 +434,7 @@ function selfCheck() {
 
   // --- deletions: WER must see the token removed, not blanked ---
   const storkText = "I went to the stork store";
-  const storkWords = storkText.split(" ").reduce((acc: any[], t) => {
-    const start = acc.length ? acc[acc.length - 1].end + 1 : 0;
-    return [...acc, { text: t, start, end: start + t.length, confidence: 1 }];
-  }, []);
-  const storkFix = correctedText(storkText, storkWords, [{ index: 4, from: "stork", to: "" }]);
+  const storkFix = correctedText(storkText, spansOf(storkText), [{ index: 4, from: "stork", to: "" }]);
   assert.equal(storkFix, "I went to the store", "deletion removes the token (no double space)");
   assert.equal(werWord(storkFix, "I went to the store"), 0, "deleted disfluency scores WER 0 against gold");
 

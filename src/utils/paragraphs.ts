@@ -1,120 +1,70 @@
 // The single place a paragraph break is decided. Pure + browser-safe (no node imports).
 //
-// Live speech has no paragraphs — we invent them, and the model we invent them under is FICTION's,
-// not the essay's. Fiction breaks on discrete events (a new speaker, a new actor, a shift in scene)
-// and lets length fall out as a consequence; the essay breaks on "one idea per paragraph" and the
-// web breaks on visual pacing. Only the fiction model has triggers a machine can actually observe
-// in a dictated stream, which is why it's the one encoded here.
-//
-// What this file deliberately does NOT do:
-//   - It does not read punctuation as a primary signal. Chrome's Web Speech auto-punctuation is
-//     inconsistent (it punctuates confident, well-formed phrases and skips short or uncertain ones),
-//     so a rule keyed on a trailing period fires erratically on identical speech. Punctuation only
-//     ever REFINES a break that another rule already earned.
-//   - It does not consider pause duration. Prosody is the strongest cue in the segmentation
-//     literature, but it is out of scope by request; the shape below leaves room for it without
-//     assuming it.
+// Live speech has no paragraphs, so we invent them on fiction's model: break on observable events
+// (new speaker, scene, kind of material) and let length fall out. Punctuation is never a primary
+// signal (Web Speech punctuates inconsistently) and pause duration is out of scope.
 
 export type BreakKind = "none" | "paragraph" | "scene";
 
 export type UtteranceSource = "speech" | "stt" | "tab" | "typed";
 
-/** One contiguous run of text from a single producer, with whatever structure that producer knows. */
+/** One contiguous run of text from a single producer. */
 export interface Utterance {
   text: string;
-  /** Diarized speaker label. `undefined` means solo narration — NOT "unknown speaker". */
+  /** Diarized speaker label. `undefined` means solo narration, NOT "unknown speaker". */
   speaker?: string;
   source: UtteranceSource;
-  /**
-   * Producer-asserted hard boundary: a new recording session, a `[Meeting]` chunk header, a
-   * resumed capture. Fiction's scene break rather than its paragraph break — the tier above.
-   */
+  /** Producer-asserted hard boundary (new session, `[Meeting]` header): a scene break. */
   startsScene?: boolean;
 }
 
-/**
- * The paragraph currently being written into. Carried explicitly rather than re-derived from the
- * rendered string: recovering speaker identity by regex-matching "Speaker 1:" back out of the text
- * is how the current code loses track of it, and a paragraph's word count can't be recovered from
- * the tail at all once a producer has trimmed it.
- */
+/** The paragraph being written into, carried explicitly because it can't be re-derived from the text. */
 export interface OpenParagraph {
   speaker?: string;
-  /** Words accumulated in THIS paragraph, across every utterance folded into it so far. */
   words: number;
   endsSentence: boolean;
-  /** The narrative mode this paragraph is currently running in. */
   mode: NarrativeMode;
-  /** How long that run is, in sentence-ish units — see `sentenceUnits`. */
+  /** Length of the current mode run, in `sentenceUnits`. */
   sentences: number;
 }
 
 export const EMPTY_PARAGRAPH: OpenParagraph =
   Object.freeze({ words: 0, endsSentence: false, mode: "narration" as NarrativeMode, sentences: 0 });
 
-/**
- * Length caps, in words. These are the LAST rule consulted, not the first — a safety net for the
- * case where no structural trigger has fired in a long time (solo dictation, one speaker, no scene
- * markers), so the reader never faces an unbroken wall.
- *
- * The band comes from machine-paragraphing practice for transcripts, which breaks on length
- * thresholds around 50-100 words. The soft cap waits for a sentence to end so the break lands on a
- * real boundary; the hard cap gives up waiting, because if punctuation never arrives (see above) a
- * sentence-gated cap would never fire at all.
- *
- * They are measured differently on purpose. The soft cap reads the words ALREADY in the paragraph,
- * so a paragraph is never cut short of it. The hard cap reads what the paragraph WOULD hold once
- * this utterance joins, so it is a true ceiling — measuring it the other way lets a paragraph
- * overshoot by a whole utterance (three 50-word chunks reach 150 under a 110 cap before the fourth
- * finally trips it).
- */
+// Length caps (words): the last-resort safety net when no structural rule fires. The soft cap
+// reads words already in the paragraph and waits for a sentence end; the hard cap reads what the
+// paragraph WOULD hold with this utterance, so it's a true ceiling even if punctuation never comes.
 export const SOFT_CAP_WORDS = 60;
 export const HARD_CAP_WORDS = 110;
 
 export interface ParagraphOptions {
   softCapWords?: number;
   hardCapWords?: number;
-  /** Set false to disable rule 3 (narrative-mode breaks). Modes are still tracked either way. */
+  /** false disables rule 3 (narrative-mode breaks). Modes are still tracked. */
   detectMode?: boolean;
 }
 
-/**
- * Whitespace only, deliberately. The joined transcript is fed verbatim to the proofreader and
- * summarizer agents, so a visible scene marker ("* * *") would become tokens they have to explain
- * away. Two tiers stay distinguishable to a renderer that splits on `\n{3,}` before `\n{2}`.
- */
-export const SEPARATORS: Record<BreakKind, string> = {
-  none: " ",
-  paragraph: "\n\n",
-  scene: "\n\n\n",
-};
+// Whitespace only: the transcript goes verbatim to the agents, so a visible "* * *" would cost tokens.
+export const SEPARATORS: Record<BreakKind, string> = { none: " ", paragraph: "\n\n", scene: "\n\n\n" };
 
 /* --- narrative mode -------------------------------------------------------------------------- */
 
-/**
- * The kinds of thing a person does while thinking out loud. Fiction's five narrative types (action,
- * reaction, dialogue, interiority, observation) don't transfer — a brain dump has no cast — but the
- * underlying move does: a paragraph holds one KIND of material, and changing kind starts a new one.
- */
+// A paragraph holds one KIND of thinking-out-loud; changing kind starts a new one.
 export type NarrativeMode = "narration" | "intent" | "question" | "aside";
 
-/** Sentence-ish units a mode must run for before a change is allowed to break the paragraph. */
+/** Sentence units a mode must run for before a change may break the paragraph. */
 export const MODE_MIN_SENTENCES = 2;
 
-// Openers that mark a deliberate turn away from what was being said. Stripped before classifying,
-// and on their own they mean "aside" — the spoken equivalent of a parenthetical.
+// Openers marking a deliberate turn; on their own they make an "aside".
 const SHIFT_MARKERS = [
   "actually", "wait", "hang on", "hold on", "anyway", "anyways", "by the way", "side note",
   "scratch that", "never mind", "nevermind", "on second thought", "i mean", "oh wait",
 ];
 
-// Openers with no rhetorical weight at all. Also stripped, but they signal nothing — treating
-// "so" or "and" as a mode shift would break a paragraph every other utterance, which is exactly
-// the over-breaking the length caps already guard against.
+// Openers that signal nothing; stripped so they don't hide a real cue behind them.
 const FILLERS = ["um", "uh", "erm", "er", "okay", "ok", "so", "and", "but", "like", "well", "yeah", "right", "now"];
 
-// Committing to a future action: the single most useful thing to isolate in a thought stream,
-// because it is what the planner stage downstream is looking for.
+// Committing to a future action: what the planner downstream is looking for.
 const INTENT_CUES = [
   "i need to", "i have to", "i've got to", "i gotta", "i should", "i must", "i want to", "i'll",
   "i am going to", "i'm going to", "we need to", "we have to", "we should", "we'll", "we're going to",
@@ -122,16 +72,14 @@ const INTENT_CUES = [
   "todo", "to do", "next step", "action item", "follow up", "follow-up",
 ];
 
-// Deliberately narrower than "starts with a wh-word": "what I really meant was..." is narration,
-// not a question, so bare wh-openers are not enough on their own.
+// Narrower than any wh-opener: "what I really meant was..." is narration.
 const QUESTION_CUES = [
   "what if", "what about", "why is", "why are", "why do", "why did", "how do", "how does",
   "how can", "how should", "how would", "should we", "should i", "can we", "can i", "could we",
   "do we", "does that", "is that", "is it", "are we", "any idea", "anyone know",
 ];
 
-// The "Speaker 1: " that toUtterances keeps inside the text for the renderer would otherwise sit in
-// front of every cue and defeat all of them.
+// toUtterances keeps "Speaker 1: " in the text; it would sit in front of every cue.
 const stripSpeakerPrefix = (text: string) =>
   text.replace(/^\s*(?:\[Meeting[^\]]*\]|Speaker\s*\d+|You)\s*:?\s*/i, "");
 
@@ -139,42 +87,22 @@ const startsWithCue = (text: string, cues: string[]) =>
   cues.some(c => text === c || text.startsWith(c + " ") || text.startsWith(c + ","));
 
 /**
- * Which mode an utterance MARKS, from its opening words alone — or null when it marks nothing.
- *
- * Null means "continues whatever is running", not "narration". Cue matching can only ever detect a
- * marked transition; the absence of a cue is silence on the question, and reading it as a positive
- * vote for narration makes a continued run flip modes halfway through. "I need to write the
- * rollback plan" / "and book time with the platform team" is one intent run — the second utterance
- * carries no cue, and treating that as a return to narration both loses the run and swallows the
- * next real transition.
- *
- * Leading markers are peeled off FIRST and the remainder is what gets classified, so "actually I
- * need to call him" reads as intent (its real content) rather than as an aside that happens to
- * start with a marker. A marker in front of otherwise unmarked text is what actually makes an aside.
+ * The mode an utterance MARKS from its opening words, or null when it marks nothing. Null means
+ * "continues the current run", not "narration": "I need to X" / "and book Y" is one intent run.
+ * Markers and fillers are peeled first, so "actually I need to call him" is intent, not an aside.
  */
 export function classifyMode(text: string): NarrativeMode | null {
   let rest = stripSpeakerPrefix(text).trim().toLowerCase().replace(/^[^a-z0-9'"]+/, "");
   const endsQuestion = /\?["'”’)\]]*$/.test(rest);
 
   let shifted = false;
-  // Peel repeatedly: "okay so actually..." is one opener, not three utterances.
-  for (let peeled = true; peeled;) {
-    peeled = false;
-    for (const m of SHIFT_MARKERS) {
-      if (startsWithCue(rest, m ? [m] : [])) {
-        rest = rest.slice(m.length).replace(/^[^a-z0-9'"]+/, "");
-        shifted = peeled = true;
-        break;
-      }
-    }
-    if (peeled) continue;
-    for (const f of FILLERS) {
-      if (startsWithCue(rest, [f])) {
-        rest = rest.slice(f.length).replace(/^[^a-z0-9'"]+/, "");
-        peeled = true;
-        break;
-      }
-    }
+  // Peel repeatedly: "okay so actually..." is one opener.
+  for (;;) {
+    const marker = SHIFT_MARKERS.find(m => startsWithCue(rest, [m]));
+    const opener = marker ?? FILLERS.find(f => startsWithCue(rest, [f]));
+    if (!opener) break;
+    if (marker) shifted = true;
+    rest = rest.slice(opener.length).replace(/^[^a-z0-9'"]+/, "");
   }
 
   if (startsWithCue(rest, INTENT_CUES)) return "intent";
@@ -183,56 +111,38 @@ export function classifyMode(text: string): NarrativeMode | null {
   return null;
 }
 
-/**
- * How many sentences an utterance is worth. Terminators when the recognizer supplied them, and at
- * least one regardless — a mode gate that counted only real punctuation would never open on the
- * Web Speech path, which is the whole reason punctuation is not trusted anywhere else here either.
- */
+/** Sentences in an utterance: its terminators, but at least 1 so unpunctuated Web Speech still counts. */
 export const sentenceUnits = (text: string) =>
   Math.max(1, (text.match(/[.!?]+(?=["'”’)\]]*(?:\s|$))/g) ?? []).length);
 
 /* --------------------------------------------------------------------------------------------- */
 
-// Solo narration (`undefined`) and a blank label are the same speaker, not two different ones —
-// otherwise a producer that omits the field on some chunks breaks on every single utterance.
+// Absent and blank labels are the same speaker, or a producer that omits the field breaks every chunk.
 const speakerKey = (s?: string) => (s ?? "").trim().toLowerCase();
 
-const countWords = (text: string) => {
-  const t = text.trim();
-  return t ? t.split(/\s+/).length : 0;
-};
+const countWords = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
 
-// Trailing quotes and brackets are allowed to sit after the terminator: `he left."` still ends a
-// sentence. Used only to decide WHERE a length-driven break lands, never whether one happens.
+// `he left."` still ends a sentence. Only decides where a length break lands, never whether.
 const endsSentence = (text: string) => /[.!?]["'”’)\]]*\s*$/.test(text.trim());
 
-/**
- * The whole rule set, in priority order — first match wins. Every producer's break decision routes
- * through this function and no other, so the rules can only ever disagree in one place.
- */
+/** The whole rule set, in priority order; first match wins. Every producer routes through here. */
 export function breakBefore(
   open: OpenParagraph,
   next: Utterance,
   opts: ParagraphOptions = {},
 ): BreakKind {
-  // Nothing to break away from. Also covers a `startsScene` first utterance: a scene break before
-  // the opening line would render as leading blank space.
+  // Nothing to break away from (a leading scene break would render as blank space).
   if (open.words === 0) return "none";
   if (!next.text.trim()) return "none";
 
-  // 1. Producer-asserted scene boundary. Outranks everything below it.
+  // 1. Producer-asserted scene boundary.
   if (next.startsScene) return "scene";
 
-  // 2. New speaker = new paragraph. Fiction's hardest rule and the only one with near-universal
-  //    agreement across every style tradition; readers decode speaker alternation from the break
-  //    alone, so a missed one is far more costly than a spurious one.
+  // 2. New speaker = new paragraph. A missed one costs far more than a spurious one.
   if (speakerKey(open.speaker) !== speakerKey(next.speaker)) return "paragraph";
 
-  // 3. New narrative type = new paragraph. Fiction breaks when the mode changes (action ->
-  //    reaction -> dialogue -> interiority); the dictated-thought analogue is narration -> intent
-  //    -> question -> aside. Gated on the OUTGOING run being at least MODE_MIN_SENTENCES long, so
-  //    a single stray cue word cannot break a paragraph that has barely started — this is the
-  //    highest-false-positive rule in the set and the gate is what makes it safe to leave on.
+  // 3. New narrative mode = new paragraph, gated on the outgoing run's length so one stray cue
+  //    can't split a paragraph that has barely started (this rule's false-positive guard).
   if (opts.detectMode !== false && open.sentences >= MODE_MIN_SENTENCES) {
     const marked = classifyMode(next.text);
     if (marked && marked !== open.mode) return "paragraph";
@@ -241,7 +151,7 @@ export function breakBefore(
   const soft = opts.softCapWords ?? SOFT_CAP_WORDS;
   const hard = opts.hardCapWords ?? HARD_CAP_WORDS;
 
-  // 4. Length safety net. Sentence-gated first so the break lands cleanly, then forced.
+  // 4. Length safety net: sentence-gated first, then forced.
   if (open.words >= soft && open.endsSentence) return "paragraph";
   if (open.words + countWords(next.text) > hard) return "paragraph";
 
@@ -249,12 +159,8 @@ export function breakBefore(
 }
 
 /**
- * Fold one utterance into the open paragraph: the break decision plus the resulting state, so a
- * caller never has to reset `words`/`speaker` by hand and get it subtly wrong.
- *
- * Append-only by construction — it reads the OPEN paragraph and nothing behind it. Text already
- * committed upstream is never revisited, which is what keeps the proofreader's character offsets
- * valid across a live append (they are guarded by a `startsWith` prefix check on the transcript).
+ * Fold one utterance into the open paragraph: the break decision plus the next state. Append-only:
+ * it never reads committed text, which keeps the proofreader's character offsets valid.
  */
 export function absorb(
   open: OpenParagraph,
@@ -265,12 +171,9 @@ export function absorb(
 
   const kind = breakBefore(open, next, opts);
   const marked = classifyMode(next.text);
-  // A mode change that did NOT break (the gate was still closed) still restarts the run: the
-  // paragraph is in the new mode from here, and the new mode has to earn its own two units before
-  // it can be broken away from. Without this, rapid mode flapping would break on every utterance.
   const continues = kind === "none";
-  // Unmarked text inherits: within a paragraph it continues the run, and a fresh paragraph opened
-  // by an unmarked utterance starts neutral.
+  // Unmarked text inherits the run; a new paragraph opened by unmarked text starts neutral. A mode
+  // change that didn't break still restarts the run count, or flapping would break every utterance.
   const mode = marked ?? (continues ? open.mode : "narration");
   const sameMode = continues && mode === open.mode;
 
@@ -287,13 +190,9 @@ export function absorb(
 }
 
 /**
- * Fold a batch of utterances into the open paragraph, returning the text to APPEND and the state to
- * carry forward. Split from the string splice below so a caller can advance its paragraph state
- * OUTSIDE a React state updater — updaters may run more than once, and an updater that advanced the
- * state itself would apply every break twice.
- *
- * `addition` always leads with a separator (or is empty). Nothing here reads the existing
- * transcript, which is what makes appending strictly additive.
+ * Fold a batch into the open paragraph: the text to APPEND (leads with a separator, or is empty)
+ * and the state to carry. Kept apart from the splice so callers advance state outside a React
+ * updater, which may run twice.
  */
 export function foldUtterances(
   open: OpenParagraph,
@@ -307,13 +206,8 @@ export function foldUtterances(
     let text = u.text.trim();
     if (!text) continue;
     const { kind, open: next } = absorb(current, u, opts);
-    // `toUtterances` bakes the "Speaker N: " prefix into the text, because that is what the editor
-    // and the downstream agents read. When this utterance CONTINUES the open paragraph it is by
-    // definition the same speaker (break rule 2), so re-stating the label mid-paragraph would
-    // render "Speaker 2: hey Speaker 2: still me" — one label per 8s chunk, forever. A label that
-    // opens a NEW paragraph is kept: a length-capped monologue should name its speaker again.
-    // `current.words > 0` matters: the FIRST utterance also reports "none" (there is nothing to
-    // break away from), and stripping there would leave the opening paragraph unattributed.
+    // A continuing utterance is the same speaker (rule 2), so drop its repeated "Speaker N: ".
+    // Not on the very first utterance, which also reports "none" but must stay attributed.
     if (kind === "none" && current.words > 0 && u.speaker) {
       const prefix = `${u.speaker}: `;
       if (text.startsWith(prefix)) text = text.slice(prefix.length);
@@ -325,71 +219,35 @@ export function foldUtterances(
   return { addition, open: current };
 }
 
-/**
- * Attach a fold's `addition` to the transcript. trimEnd rather than trim: the leading whitespace is
- * the user's (see preserveHead in ./transcript), and only an empty transcript drops the separator
- * the addition leads with.
- */
+/** Attach an `addition`. trimEnd, not trim: leading whitespace is the user's (see preserveHead). */
 export function spliceAddition(prev: string, addition: string): string {
   if (!addition) return prev;
   return prev.trim() ? prev.trimEnd() + addition : addition.trimStart();
 }
 
-/**
- * Render a whole utterance list to the flat string the editor and the agents consume. One
- * implementation shared with the live path — batch rendering and incremental appending cannot drift
- * apart because there is nothing to drift from.
- */
+/** Batch render through the same fold the live path uses, so the two can't drift. */
 export function joinUtterances(utterances: Utterance[], opts: ParagraphOptions = {}): string {
   return spliceAddition("", foldUtterances(EMPTY_PARAGRAPH, utterances, opts).addition);
 }
 
 /* --- producer adapters ------------------------------------------------------------------ */
 
-// The parts of a /api/transcribe-audio response this file needs. Structural rather than imported
-// from openapi.ts so the browser bundle stays free of server code; the fields mirror
-// TranscribeAudioResponseSchema and are checked against it by the caller's types.
-export interface TranscribeTurn {
-  speaker: string;
-  text: string;
-}
+// Mirrors TranscribeAudioResponseSchema structurally, so the browser bundle imports no server code.
 export interface TranscribeResponse {
   text: string;
   speakerCount?: number;
-  turns?: TranscribeTurn[];
-  /** Server-side latch: true once THIS SESSION has ever held 2+ speakers. See speaker-registry.ts. */
+  turns?: { speaker: string; text: string }[];
+  /** Server latch: this SESSION has held 2+ speakers (speaker-registry.ts). */
   multiSpeaker?: boolean;
-  /**
-   * The user configured more than one expected speaker, so label from the very first word rather
-   * than waiting for a second voice to actually show up. Set by the caller from the STT config, not
-   * by the server — it is a statement of intent, not of observation.
-   */
+  /** Caller-set from STT config (max speakers > 1): label from word one, before a 2nd voice appears. */
   alwaysLabel?: boolean;
 }
 
 /**
- * Lift a transcription response into utterances — the ONE place a wire response becomes something
- * `absorb` can reason about.
- *
- * Cloud STT already computes diarized turns and the server already returns them; the client used to
- * read only the flattened `text` and then recover speakers by testing whether the string contained
- * `"Speaker "` anywhere. That sniff is what made breaks sticky: once any chunk mentioned a speaker,
- * every later chunk matched too, so every append broke forever after.
- *
- * A speaker label is attached ONLY when the SESSION holds more than one speaker — a solo recording
- * returns `undefined`, which reads as narration and lets consecutive chunks flow together. Labelling
- * a lone speaker would break the transcript between every chunk.
- *
- * "Session", not "chunk", is load-bearing and was the original bug. Deciding per chunk means a
- * window in which only one of two people happened to speak comes back unlabelled, and `speakerKey`
- * maps every absent label to "" — so two CONSECUTIVE unlabelled windows share a key and merge into
- * one paragraph, running two different people together. (An unlabelled window after a labelled one
- * does break.) The server latches the fact once two voices are confirmed across chunks and sends it
- * as `multiSpeaker`.
- *
- * Speaker labels themselves are CHUNK-LOCAL — "Speaker 1" in consecutive chunks is not guaranteed
- * to be the same person. Acoustic re-identification across requests was tried and measurably made
- * things worse; see speaker-registry.ts.
+ * The one place a transcription response becomes utterances. Labels are attached only when the
+ * session is multi-speaker; a solo recording stays unlabelled so its chunks flow together. Labels
+ * are chunk-local ("Speaker 1" may differ between chunks); cross-chunk re-identification was tried
+ * and made things worse (speaker-registry.ts).
  */
 export function toUtterances(res: TranscribeResponse, source: UtteranceSource): Utterance[] {
   const scene = (text: string) => (text.trimStart().startsWith("[Meeting") ? true : undefined);
@@ -397,32 +255,16 @@ export function toUtterances(res: TranscribeResponse, source: UtteranceSource): 
   const turns = res.turns ?? [];
   if (turns.length) {
     const distinct = new Set(turns.map(t => (t.speaker ?? "").trim()).filter(Boolean));
-    // Label when THIS chunk shows two voices, or when the session has been latched multi-speaker.
-    // Both halves are load-bearing.
-    //
-    // Without the first, the chunk that actually catches two people goes unlabelled — the latch
-    // needs corroboration across chunks, so it is still false on that very chunk.
-    //
-    // Without the second, consecutive chunks in which only ONE of two people speaks all come back
-    // unlabelled. `speakerKey` maps every absent label to "", so those chunks share a key and MERGE
-    // into one paragraph — two different people run together with no break. (An unlabelled chunk
-    // following a LABELLED one does break; "" and "speaker 2" differ. It is unlabelled-next-to-
-    // unlabelled that collapses, which is exactly what a solo chunk in a two-person session is.)
-    //
-    // `alwaysLabel` short-circuits both: the detection-based halves can only ever act AFTER a
-    // second voice has been heard, so the opening stretch of a two-person recording — everything
-    // said before the other person first speaks — is committed unlabelled and stays that way.
-    // Nothing can retro-label it without rewriting committed text, which the proofreader's
-    // character offsets forbid. Asking the user instead ("max speakers > 1") is the only signal
-    // available at word one.
+    // All three are needed. This chunk's own two voices: the latch lags by a chunk. The session
+    // latch: otherwise two consecutive one-voice chunks of a two-person talk share the "" key and
+    // merge. alwaysLabel: the only signal before the second person first speaks, since committed
+    // text can't be retro-labelled without breaking proofread offsets.
     const multi = (res.alwaysLabel ?? false) || (res.multiSpeaker ?? false) || distinct.size > 1;
 
     return turns
       .filter(t => t.text?.trim())
       .map(t => ({
-        // The "Speaker N: " prefix stays inside the text: it is what the transcript renderer and
-        // the downstream agents read. `speaker` carries the same fact in a form break rules can
-        // use without parsing it back out again.
+        // Prefix stays in the text (renderer and agents read it); `speaker` carries it for the rules.
         text: multi ? `${t.speaker}: ${t.text.trim()}` : t.text.trim(),
         speaker: multi ? t.speaker : undefined,
         source,
@@ -430,9 +272,7 @@ export function toUtterances(res: TranscribeResponse, source: UtteranceSource): 
       }));
   }
 
-  // No diarization (or the Gemini fallback, which returns none): one undivided utterance. No
-  // synthetic turn is invented here — asserting a speaker nobody detected would make solo speech
-  // break between every chunk.
+  // No diarization (or the Gemini fallback): one undivided utterance, no invented speaker.
   const text = res.text?.trim();
   return text ? [{ text, source, startsScene: scene(text) }] : [];
 }

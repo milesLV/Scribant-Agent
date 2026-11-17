@@ -4,63 +4,36 @@
 // construction, so a cached agent would pin one request's memory service and session state across
 // every later request. Building a fresh one per call keeps each request independent.
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Load .env if process.env is missing keys (e.g. when executing tsx agents.ts directly)
-try {
-  const envPath = path.join(process.cwd(), ".env");
-  if (fs.existsSync(envPath)) {
-    const envFile = fs.readFileSync(envPath, "utf-8");
-    for (const line of envFile.split("\n")) {
-      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-      if (match && match[1] && !process.env[match[1]]) {
-        const val = match[2]?.trim().replace(/^['"]|['"]$/g, "") || "";
-        process.env[match[1]] = val;
-      }
-    }
-  }
-} catch {}
+// `tsx agents.ts` etc. run without --env-file; existing env vars win.
+try { process.loadEnvFile(); } catch {}
 import { LlmAgent, Gemini, Runner, InMemorySessionService, GOOGLE_SEARCH } from "@google/adk";
 import type { ReadonlyContext } from "@google/adk";
 import { z } from "zod";
 import { SKILLS, skillSchemaProperties } from "./skills";
 import { PROOFREAD_CORRECT_INSTRUCTION, buildProofreadPrompt } from "./transcriber";
-import { getMemoryService, autoMemoryIngestCallback, memoryBankBeforeModelCallback } from "./memory";
+import { getMemoryService, memoryBankBeforeModelCallback } from "./memory";
 import { emitAdkEvent } from "./adk-events";
 import { recordTokenUsage } from "./token-telemetry";
 
-export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.7-flash";
+export const MODEL = process.env.GEMINI_MODEL || process.env.MODEL || "gemini-3.8-flash";
 
-if (process.env.GOOGLE_GENAI_USE_ENTERPRISE && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
-  process.env.GOOGLE_GENAI_USE_VERTEXAI = process.env.GOOGLE_GENAI_USE_ENTERPRISE;
-}
-if (!process.env.GOOGLE_GENAI_USE_VERTEXAI) {
-  process.env.GOOGLE_GENAI_USE_VERTEXAI = "true";
-}
-
-// In Vertex AI mode, auth is handled via Google Cloud ADC / IAM. Clean API key env vars
-// so the Google GenAI SDK does not log redundant precedence warnings on every agent invocation.
+process.env.GOOGLE_GENAI_USE_VERTEXAI ||= process.env.GOOGLE_GENAI_USE_ENTERPRISE || "true";
+// Vertex AI auth is ADC; stray API keys only make the GenAI SDK log precedence warnings.
 delete process.env.GEMINI_API_KEY;
 delete process.env.GOOGLE_GENAI_API_KEY;
 delete process.env.GOOGLE_API_KEY;
 
-
-// Sub-agents read their input from session state rather than the user message: inside the
-// orchestrator the message is the raw transcript, but everything downstream of the proofreader must
-// reason over the CORRECTED text. `corrected` is seeded by the orchestrator for callers that skip
+// Sub-agents read from state, not the user message: downstream of the proofreader they must see the
+// CORRECTED text. The orchestrator seeds `corrected` itself when there is no proof stage.
 const corrected = (ctx: ReadonlyContext) => ctx.state.get<string>("corrected") ?? "";
 
-// Rolling window context compactor: limits the verbatim speech stream to the active recent window
-// (~40 words) so intent classification stays fast with constant O(1) token complexity regardless
-// of how long the meeting/session runs. Historical context is preserved via liveSummary in ctx.state.
-export const recentWindow = (ctx: ReadonlyContext, maxWords = 40): string => {
-  const full = corrected(ctx);
-  if (!full) return "";
-  const words = full.trim().split(/\s+/);
-  if (words.length <= maxWords) return full;
-  return "..." + words.slice(-maxWords).join(" ");
+// The classifier sees only the last ~40 words, so its cost stays flat however long the session;
+// older context reaches it through liveSummary.
+const recentWindow = (ctx: ReadonlyContext): string => {
+  const text = corrected(ctx), words = text.trim().split(/\s+/);
+  return words.length <= 40 ? text : "..." + words.slice(-40).join(" ");
 };
 
 export function createGeminiModel(): Gemini {
@@ -126,9 +99,7 @@ export const groundedSearcher: AgentFactory = () => new LlmAgent({
   tools: [GOOGLE_SEARCH],
 });
 
-// Verbatim STT for one short audio chunk (shared-tab or mic capture — see /api/transcribe-audio).
-// The user message carries the audio as an inlineData part, not text, so this agent's instruction
-// is static; askAgentParts (not askAgent) is what supplies the actual clip.
+// Verbatim STT for one audio chunk; the clip arrives as an inlineData part via askAgent.
 export const audioTranscriber: AgentFactory = () => new LlmAgent({
   name: "audio_transcriber",
   model: createGeminiModel(),
@@ -177,7 +148,7 @@ const analyzeOutputSchema = z.object({
 });
 
 // Turn the transcript into calendar/task/search items. Transcript, reference time and the live
-// summary all come from session state, so the same agent serves the live pipeline and finalize.
+// summary all come from session state, so the same agent serves /api/live and /api/analyze.
 export const intentClassifier: AgentFactory = () => new LlmAgent({
   name: "intent_classifier",
   model: createGeminiModel(),
@@ -209,14 +180,10 @@ Stream of thoughts (Active Recent Window):
 
 // ---- the runner ------------------------------------------------------------
 
-// Retry policy for a transient model failure (quota or overload). Auth is Vertex AI ADC against one
-// project, so there is nothing to swap to — an instant retry would only hammer a backend that just
-// said no. Back off instead: two retries at 15s then 30s, then give up. Returns null when there's no
-// road left and the caller should throw. Pure so the branching is checkable without burning a request.
-export function nextAttempt(attempt: number, statedDelayS: number | null): { sleepS: number } | null {
-  if (attempt >= 3) return null;
-  return { sleepS: statedDelayS ?? 15 * attempt };
-}
+// Seconds to back off before retrying a quota/overload failure (15s, then 30s, or the model's own
+// retryDelay), or null when out of retries. One ADC project, so there is nothing to fail over to.
+export const nextAttempt = (attempt: number, statedDelayS: number | null): number | null =>
+  attempt >= 3 ? null : statedDelayS ?? 15 * attempt;
 
 export const sessionService = new InMemorySessionService();
 export const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -228,28 +195,20 @@ export function classifyError(errEvent: { errorCode?: unknown; errorMessage?: un
     || ["overloaded", "high demand"].some(s => msg.includes(s));
   // Gemini 429s carry a retryDelay ("retryDelay":"22s"); honor it over our own backoff.
   const stated = Number(msg.match(/retryDelay[^0-9]*(\d+)/)?.[1]) || null;
-  return { msg, isQuota, isOverload, stated };
+  // ADC failures arrive as UNKNOWN_ERROR with the real cause buried in the message.
+  const isAuth = /default credentials|invalid_grant|reauth|UNAUTHENTICATED|PERMISSION_DENIED/i.test(msg);
+  return { msg, isQuota, isOverload, isAuth, stated };
 }
 
 // Stateless agent call: ephemeral session per request, drain events, keep the last text and any
-// grounding metadata. ADK reports model failures as error EVENTS (errorCode/errorMessage), not
-// throws — they must be surfaced here or a 429 looks like an empty answer.
+// grounding metadata. ADK reports model failures as error EVENTS, not throws — surface them here or
+// a 429 looks like an empty answer. `input` is text, or raw parts (e.g. inlineData audio).
 export async function askAgent(
   make: AgentFactory,
-  text: string,
+  input: string | any[],
   options?: { diarizationEnabled?: boolean; source?: string; metadata?: Record<string, any>; sessionId?: string; userId?: string; stage?: string }
 ): Promise<{ text: string; grounding?: any }> {
-  return askAgentParts(make, [{ text }], options);
-}
-
-// Same call, but for a caller (audioTranscriber) whose input isn't plain text — an inlineData part
-// carrying an audio clip instead. Kept as a separate entry point rather than an overload so every
-// existing askAgent call site stays untouched.
-export async function askAgentParts(
-  make: AgentFactory,
-  parts: any[],
-  options?: { diarizationEnabled?: boolean; source?: string; metadata?: Record<string, any>; sessionId?: string; userId?: string; stage?: string }
-): Promise<{ text: string; grounding?: any }> {
+  const parts = typeof input === "string" ? [{ text: input }] : input;
   for (let attempt = 1; ; attempt++) {
     const agent = make();
     const runner = new Runner({ appName: "scribant", agent, sessionService, memoryService: getMemoryService() });
@@ -267,46 +226,36 @@ export async function askAgentParts(
       if (t) out = t;
       if (ev.groundingMetadata) grounding = ev.groundingMetadata;
       if (ev.usageMetadata) {
+        const audio = agent.name === "audio_transcriber";
         recordTokenUsage({
-          model: MODEL,
-          agent: agent.name,
-          stage: options?.stage || (agent.name === "audio_transcriber" ? "stt" : "standalone_analyze"),
-          modality: agent.name === "audio_transcriber" ? "audio" : "text",
-          durationMs: Date.now() - startTime,
-          usage: ev.usageMetadata,
-          diarizationEnabled: options?.diarizationEnabled,
-          provider: "gemini",
-          source: options?.source,
-          sessionId: options?.sessionId,
-          userId: options?.userId,
-          metadata: options?.metadata,
+          model: MODEL, agent: agent.name, provider: "gemini", usage: ev.usageMetadata, durationMs: Date.now() - startTime,
+          stage: options?.stage || (audio ? "stt" : "standalone_analyze"), modality: audio ? "audio" : "text",
+          diarizationEnabled: options?.diarizationEnabled, source: options?.source, sessionId: options?.sessionId,
+          userId: options?.userId, metadata: options?.metadata,
         });
       }
     }
     if (!errEvent) return { text: out, grounding };
 
     const { msg, isQuota, isOverload, stated } = classifyError(errEvent);
-    const plan = (isQuota || isOverload) ? nextAttempt(attempt, stated) : null;
-    if (!plan) throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
+    const sleepS = (isQuota || isOverload) ? nextAttempt(attempt, stated) : null;
+    if (sleepS == null) throw new Error(`Model error ${errEvent.errorCode}: ${msg.slice(0, 200)}`);
 
-    console.warn(
-      `[askAgent] ${errEvent.errorCode} on ${agent.name}` +
-      `${plan.sleepS ? `, waiting ${plan.sleepS}s` : ""} (attempt ${attempt})`
-    );
-    if (plan.sleepS) await sleep(plan.sleepS * 1000);
+    console.warn(`[askAgent] ${errEvent.errorCode} on ${agent.name}, waiting ${sleepS}s (attempt ${attempt})`);
+    await sleep(sleepS * 1000);
   }
 }
 
-// ponytail: self-check pins the retry policy (the only branching here). Run: tsx agents.ts
-// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
+// Self-check: retry policy + agents read their input from state. The `import.meta.url &&` guard keeps
+// every module's self-check dead in the CJS bundle, where import.meta.url is empty.
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   // Sleep and ramp, 3 runs total, then out of road -> throw.
-  assert.deepEqual(nextAttempt(1, null), { sleepS: 15 });
-  assert.deepEqual(nextAttempt(2, null), { sleepS: 30 });
+  assert.equal(nextAttempt(1, null), 15);
+  assert.equal(nextAttempt(2, null), 30);
   assert.equal(nextAttempt(3, null), null);
 
   // The model's own retryDelay wins over our ramp.
-  assert.deepEqual(nextAttempt(1, 22), { sleepS: 22 });
+  assert.equal(nextAttempt(1, 22), 22);
 
   assert.ok(liveSummarizer().canonicalModel instanceof Gemini);
   assert.equal(intentClassifier().canonicalBeforeModelCallbacks.length, 1);

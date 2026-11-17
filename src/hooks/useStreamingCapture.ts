@@ -1,40 +1,23 @@
 import { useCallback, useRef } from "react";
-import { toUtterances, type Utterance, type UtteranceSource } from "../utils/paragraphs";
-import { readSttConfig } from "./useChunkedCapture";
+import { toUtterances, type UtteranceSource } from "../utils/paragraphs";
+import { readSttConfig, pickMimeType, type CapturedChunk } from "./useChunkedCapture";
 
-// Live diarized capture over ONE long-lived Cloud STT recognition (server: stt-stream.ts).
-//
-// The chunked hook next door uploads an independent 8s request at a time, which is why its speaker
-// labels are chunk-local: each request clusters voices from scratch and "Speaker 1" in consecutive
-// chunks is not the same person. Here the whole capture is one recognition, so a label means one
-// person for as long as the stream lives.
-//
-// ponytail: audio goes up as WebM/Opus straight from MediaRecorder, the same encoder the chunked
-// path already uses. Raw PCM would let us pick the sample rate, but it needs an AudioWorklet and a
-// resampler — that was audio-window.ts, and it was deleted for good reason. WEBM_OPUS at 48kHz is
-// accepted by streamingRecognize (verified against the live API), so there is nothing to gain.
+// Live diarized capture over ONE long-lived Cloud STT recognition (server: stt-stream.ts), so a
+// speaker label means one person for the whole stream — unlike the chunked path, where each 8s
+// request clusters from scratch.
+// ponytail: WebM/Opus straight from MediaRecorder; streamingRecognize accepts it at 48kHz (verified
+// live), so raw PCM would only add an AudioWorklet + resampler for nothing.
 
-/** How often recorded audio is flushed to the socket. Small enough to feel live, large enough that
- *  each frame is a whole Opus cluster rather than a fragment. */
+/** Flush interval: live enough, and each frame is a whole Opus cluster. */
 const FLUSH_MS = 250;
-
-export interface StreamedChunk {
-  utterances: Utterance[];
-  startedAt: number;
-}
 
 interface Options {
   source: UtteranceSource & ("stt" | "tab");
   sourceTag: "mic" | "tab";
-  onChunk: (chunk: StreamedChunk) => void;
+  onChunk: (chunk: CapturedChunk) => void;
   /** Non-final preview text. Replaces the previous preview; never appended to the transcript. */
   onInterim?: (text: string) => void;
   onError?: (message: string) => void;
-}
-
-function pickMimeType(): string {
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
-  return candidates.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
 export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onError }: Options) {
@@ -82,13 +65,14 @@ export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onE
       say({ type: "stop" });
     }
     if (opts?.keepStream) {
-      // Abandoning a broken stream to fall back — nothing is going to drain, so close now.
+      // Abandoning a broken stream to fall back — nothing will drain, so close now.
       sock?.close();
       socketRef.current = null;
+    } else {
+      // The socket stays open until the server has drained the recognition (that is what brings
+      // the last utterance back); onclose cleans up.
+      streamRef.current?.getTracks().forEach(t => t.stop());
     }
-    // Otherwise the socket stays open: the server closes it once the recognition has drained, and
-    // that is what lets the last utterance come back. onclose does the cleanup.
-    if (!opts?.keepStream) streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
   }, []);
 
@@ -165,5 +149,5 @@ export function useStreamingCapture({ source, sourceTag, onChunk, onInterim, onE
     sock.onclose = () => { if (socketRef.current === sock) socketRef.current = null; };
   }, [onChunk, onError, onInterim, source, sourceTag, startRecorder]);
 
-  return { start, stop, isActive: () => Boolean(streamRef.current) };
+  return { start, stop };
 }

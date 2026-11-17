@@ -1,74 +1,42 @@
-/**
- * ADK Events Hub & Disk Logger (adk.dev/events)
- *
- * Implements an ADK-native event emitter, disk logger, and stream tap for all
- * agent runs, tool calls, model thoughts, content generation, and memory bank operations.
- *
- * Persists all events to disk as JSON Lines under ./data/events/{YYYY}/{MM}/{DD}/{HH}/events.jsonl
- * to enable accurate historical querying and filtering across server restarts.
- */
+// ADK event hub: in-memory history + real-time subscribers + append-only disk log at
+// data/events/{YYYY}/{MM}/{DD}/{HH}/events.jsonl, so history survives restarts.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  createEvent,
-  createEventActions,
-  toStructuredEvents,
-  EventType,
-  type Event as AdkEvent,
-} from "@google/adk";
+import { createEvent, createEventActions, toStructuredEvents, EventType, type Event as AdkEvent } from "@google/adk";
 import { hourBucket } from "./server-utils";
 
-export { createEvent, createEventActions, toStructuredEvents, EventType, type AdkEvent };
+export { createEvent, createEventActions, type AdkEvent };
 
-export type AdkEventListener = (event: AdkEvent) => void;
+type AdkEventListener = (event: AdkEvent) => void;
 
-/**
- * Classifies an ADK Event into a canonical event type string for filtering.
- */
+// First match wins, in this order.
+const STRUCTURED_TYPES: [string, EventType[]][] = [
+  ["tool_call", [EventType.TOOL_CALL]],
+  ["tool_result", [EventType.TOOL_RESULT]],
+  ["thought", [EventType.THOUGHT]],
+  ["code_exec", [EventType.CALL_CODE, EventType.CODE_RESULT]],
+  ["error", [EventType.ERROR]],
+  ["content", [EventType.CONTENT]],
+  ["finished", [EventType.FINISHED]],
+];
+
+// Canonical type string for filtering: explicit stateDelta.eventType, then memory ops, then the
+// ADK structured-event kind, then the author.
 export function classifyAdkEventType(event: AdkEvent): string {
   const delta = event.actions?.stateDelta || {};
-
-  // 1. Explicit event type in ADK state delta
-  if (typeof delta.eventType === "string" && delta.eventType) {
-    return delta.eventType;
-  }
-
-  // 2. Memory author operations
+  if (typeof delta.eventType === "string" && delta.eventType) return delta.eventType;
   if (event.author === "memory") {
-    if (delta.query || event.content?.parts?.some((p) => typeof p.text === "string" && p.text.includes("[Memory Retrieve]"))) {
-      return "memory:retrieve";
-    }
-    return "memory:insert";
+    const retrieve = delta.query || event.content?.parts?.some((p) => p.text?.includes("[Memory Retrieve]"));
+    return retrieve ? "memory:retrieve" : "memory:insert";
   }
-
-  // 3. ADK Structured Events inspection
-  const structured = toStructuredEvents(event);
-  if (structured.some((s) => s.type === EventType.TOOL_CALL)) {
-    return "tool_call";
+  const kinds = new Set(toStructuredEvents(event).map((s) => s.type));
+  if (event.errorCode) kinds.add(EventType.ERROR);
+  for (const [name, types] of STRUCTURED_TYPES) {
+    if (types.some((t) => kinds.has(t))) return name;
   }
-  if (structured.some((s) => s.type === EventType.TOOL_RESULT)) {
-    return "tool_result";
-  }
-  if (structured.some((s) => s.type === EventType.THOUGHT)) {
-    return "thought";
-  }
-  if (structured.some((s) => s.type === EventType.CALL_CODE || s.type === EventType.CODE_RESULT)) {
-    return "code_exec";
-  }
-  if (structured.some((s) => s.type === EventType.ERROR) || event.errorCode) {
-    return "error";
-  }
-  if (structured.some((s) => s.type === EventType.CONTENT)) {
-    return "content";
-  }
-  if (structured.some((s) => s.type === EventType.FINISHED)) {
-    return "finished";
-  }
-
-  // 4. Fallback to author or generic agent
   return event.author || "agent";
 }
 
@@ -84,301 +52,105 @@ export interface AdkEventFilterOptions {
   fromDisk?: boolean;
 }
 
-// Recursively walks a directory and gathers all .jsonl files
-function findJsonlFiles(dir: string): string[] {
-  if (!fs.existsSync(dir)) return [];
-  const results: string[] = [];
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...findJsonlFiles(fullPath));
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      results.push(fullPath);
-    }
-  }
-  return results;
+const DEFAULT_ROOT = path.join(process.cwd(), "data", "events");
+
+// Newest-first events in, filtered events out. Shared by the disk and in-memory paths.
+function filterEvents(events: AdkEvent[], o: AdkEventFilterOptions = {}): AdkEvent[] {
+  const isError = (e: AdkEvent) => Boolean(e.errorCode) || e.actions?.stateDelta?.status === "error";
+  const q = o.search?.trim().toLowerCase();
+  const out = events.filter((e) =>
+    (!o.type || o.type === "all" || classifyAdkEventType(e) === o.type) &&
+    (!o.author || o.author === "all" || e.author === o.author) &&
+    (o.status !== "error" || isError(e)) &&
+    (o.status !== "success" || !isError(e)) &&
+    (!o.sessionId || e.invocationId === o.sessionId || e.actions?.stateDelta?.sessionId === o.sessionId) &&
+    (o.since === undefined || e.timestamp >= o.since) &&
+    (o.until === undefined || e.timestamp <= o.until) &&
+    (!q || JSON.stringify(e).toLowerCase().includes(q))
+  );
+  return o.limit && o.limit > 0 ? out.slice(0, o.limit) : out;
 }
 
-/**
- * Appends an ADK Event to disk under ./data/events/{YYYY}/{MM}/{DD}/{HH}/events.jsonl.
- */
-export function logAdkEventToDisk(
-  event: AdkEvent,
-  root = path.join(process.cwd(), "data", "events"),
-  now = new Date(event.timestamp || Date.now())
-): string {
+function logAdkEventToDisk(event: AdkEvent, root: string): void {
   try {
-    const bucketDir = path.join(root, hourBucket(now));
-    if (!fs.existsSync(bucketDir)) {
-      fs.mkdirSync(bucketDir, { recursive: true });
-    }
-    const filePath = path.join(bucketDir, "events.jsonl");
-    const jsonLine = JSON.stringify(event) + "\n";
-    fs.appendFileSync(filePath, jsonLine, "utf8");
-    return filePath;
+    const dir = path.join(root, hourBucket(new Date(event.timestamp || Date.now())));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "events.jsonl"), JSON.stringify(event) + "\n", "utf8");
   } catch (err) {
     console.warn("[adk-events] Failed to log event to disk:", err);
-    return "";
   }
 }
 
-/**
- * Reads and accurately filters historical ADK Events from disk.
- */
-export function readAdkEventsFromDisk(
-  options?: AdkEventFilterOptions,
-  root = path.join(process.cwd(), "data", "events")
-): AdkEvent[] {
-  if (!fs.existsSync(root)) return [];
+const jsonlFiles = (root: string): string[] =>
+  fs.existsSync(root)
+    ? (fs.readdirSync(root, { recursive: true }) as string[]).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(root, f))
+    : [];
 
-  const files = findJsonlFiles(root);
-  // Sort files newest first by path name (which has YYYY/MM/DD/HH hierarchy)
-  files.sort((a, b) => b.localeCompare(a));
-
-  const eventMap = new Map<string, AdkEvent>();
-
-  for (const file of files) {
+export function readAdkEventsFromDisk(options?: AdkEventFilterOptions, root = DEFAULT_ROOT): AdkEvent[] {
+  // Newest bucket first (the path is YYYY/MM/DD/HH), so the first copy of an id wins.
+  const byId = new Map<string, AdkEvent>();
+  for (const file of jsonlFiles(root).sort().reverse()) {
     try {
-      const content = fs.readFileSync(file, "utf8");
-      const lines = content.split("\n");
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
+      for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+        if (!line.trim()) continue;
         try {
-          const event: AdkEvent = JSON.parse(trimmed);
-          if (event && event.id) {
-            // Newest event versions keep priority
-            if (!eventMap.has(event.id)) {
-              eventMap.set(event.id, event);
-            }
-          }
-        } catch {
-          // Ignore malformed line
-        }
+          const event: AdkEvent = JSON.parse(line);
+          if (event?.id && !byId.has(event.id)) byId.set(event.id, event);
+        } catch { /* malformed line */ }
       }
     } catch (e) {
       console.warn(`[adk-events] Failed to read event file ${file}:`, e);
     }
   }
-
-  let events = Array.from(eventMap.values());
-  // Sort by timestamp descending
-  events.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-
-  // Apply filters
-  if (options) {
-    if (options.type && options.type !== "all") {
-      const targetType = options.type;
-      events = events.filter((e) => classifyAdkEventType(e) === targetType);
-    }
-
-    if (options.author && options.author !== "all") {
-      const targetAuthor = options.author;
-      events = events.filter((e) => e.author === targetAuthor);
-    }
-
-    if (options.status && options.status !== "all") {
-      const targetStatus = options.status;
-      events = events.filter((e) => {
-        const deltaStatus = e.actions?.stateDelta?.status;
-        if (targetStatus === "error") {
-          return e.errorCode || deltaStatus === "error";
-        }
-        if (targetStatus === "success") {
-          return !e.errorCode && deltaStatus !== "error";
-        }
-        return true;
-      });
-    }
-
-    if (options.sessionId) {
-      const targetSession = options.sessionId;
-      events = events.filter(
-        (e) =>
-          e.invocationId === targetSession ||
-          e.actions?.stateDelta?.sessionId === targetSession
-      );
-    }
-
-    if (typeof options.since === "number") {
-      events = events.filter((e) => e.timestamp >= options.since!);
-    }
-
-    if (typeof options.until === "number") {
-      events = events.filter((e) => e.timestamp <= options.until!);
-    }
-
-    if (options.search && options.search.trim()) {
-      const q = options.search.toLowerCase().trim();
-      events = events.filter((e) => {
-        const raw = JSON.stringify(e).toLowerCase();
-        return raw.includes(q);
-      });
-    }
-
-    if (options.limit && options.limit > 0) {
-      events = events.slice(0, options.limit);
-    }
-  }
-
-  return events;
+  const events = [...byId.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  return filterEvents(events, options);
 }
 
-/**
- * Central event stream that buffers, logs to disk, and broadcasts all ADK events in real time.
- */
+const MAX_HISTORY = 300;
+
 export class AdkEventStream {
-  private listeners: Set<AdkEventListener> = new Set();
-  private history: AdkEvent[] = [];
-  private maxHistory: number = 300;
-  private diskRoot: string;
+  private listeners = new Set<AdkEventListener>();
+  private history: AdkEvent[];
 
-  constructor(diskRoot = path.join(process.cwd(), "data", "events")) {
-    this.diskRoot = diskRoot;
-    this.initFromDisk();
+  constructor(private diskRoot = DEFAULT_ROOT) {
+    try { this.history = readAdkEventsFromDisk({ limit: MAX_HISTORY }, diskRoot); } catch { this.history = []; }
   }
 
-  /**
-   * Initializes in-memory history snapshot from disk.
-   */
-  private initFromDisk(): void {
-    try {
-      const loaded = readAdkEventsFromDisk({ limit: this.maxHistory }, this.diskRoot);
-      this.history = loaded;
-    } catch {
-      this.history = [];
-    }
-  }
-
-  /**
-   * Emits an ADK Event to all subscribers, appends it to in-memory history,
-   * and persists it to disk.
-   */
   emit(event: AdkEvent): AdkEvent {
-    // 1. In-memory buffer
     this.history.unshift(event);
-    if (this.history.length > this.maxHistory) {
-      this.history.length = this.maxHistory;
-    }
-
-    // 2. Persist to disk
+    this.history.length = Math.min(this.history.length, MAX_HISTORY);
     logAdkEventToDisk(event, this.diskRoot);
-
-    // 3. Notify real-time subscribers
     for (const listener of this.listeners) {
-      try {
-        listener(event);
-      } catch (err) {
-        console.warn("[adk-events] Listener error:", err);
-      }
+      try { listener(event); } catch (err) { console.warn("[adk-events] Listener error:", err); }
     }
     return event;
   }
 
-  /**
-   * Subscribes to real-time ADK events. Returns an unsubscribe function.
-   */
   subscribe(listener: AdkEventListener): () => void {
     this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
+    return () => { this.listeners.delete(listener); };
   }
 
-
-
-  /**
-   * Returns event history with optional type/author/status/limit filters.
-   * If `fromDisk: true`, performs an accurate query across all disk files.
-   */
+  // In-memory (last MAX_HISTORY) unless fromDisk, which scans every file.
   getEvents(options?: AdkEventFilterOptions): AdkEvent[] {
-    if (options?.fromDisk) {
-      return readAdkEventsFromDisk(options, this.diskRoot);
-    }
-
-    let result = this.history;
-
-    if (options?.type && options.type !== "all") {
-      const targetType = options.type;
-      result = result.filter((e) => classifyAdkEventType(e) === targetType);
-    }
-
-    if (options?.author && options.author !== "all") {
-      const targetAuthor = options.author;
-      result = result.filter((e) => e.author === targetAuthor);
-    }
-
-    if (options?.status && options.status !== "all") {
-      const targetStatus = options.status;
-      result = result.filter((e) => {
-        const deltaStatus = e.actions?.stateDelta?.status;
-        if (targetStatus === "error") {
-          return e.errorCode || deltaStatus === "error";
-        }
-        if (targetStatus === "success") {
-          return !e.errorCode && deltaStatus !== "error";
-        }
-        return true;
-      });
-    }
-
-    if (options?.sessionId) {
-      const targetSession = options.sessionId;
-      result = result.filter(
-        (e) =>
-          e.invocationId === targetSession ||
-          e.actions?.stateDelta?.sessionId === targetSession
-      );
-    }
-
-    if (options?.search && options.search.trim()) {
-      const q = options.search.toLowerCase().trim();
-      result = result.filter((e) => {
-        const raw = JSON.stringify(e).toLowerCase();
-        return raw.includes(q);
-      });
-    }
-
-    if (options?.limit && options.limit > 0) {
-      result = result.slice(0, options.limit);
-    }
-
-    return [...result];
+    return options?.fromDisk ? readAdkEventsFromDisk(options, this.diskRoot) : filterEvents(this.history, options);
   }
 
-  /**
-   * Clears the in-memory history and optionally disk files.
-   */
   clear(options?: { clearDisk?: boolean }): void {
     this.history = [];
-    if (options?.clearDisk && fs.existsSync(this.diskRoot)) {
-      try {
-        fs.rmSync(this.diskRoot, { recursive: true, force: true });
-      } catch (err) {
-        console.warn("[adk-events] Failed to clear disk event directory:", err);
-      }
+    if (!options?.clearDisk) return;
+    try { fs.rmSync(this.diskRoot, { recursive: true, force: true }); } catch (err) {
+      console.warn("[adk-events] Failed to clear disk event directory:", err);
     }
   }
 }
 
-export const adkEventStream = new AdkEventStream();
+const adkEventStream = new AdkEventStream();
 
-export function emitAdkEvent(event: AdkEvent): AdkEvent {
-  return adkEventStream.emit(event);
-}
-
-export function subscribeToAdkEvents(listener: AdkEventListener): () => void {
-  return adkEventStream.subscribe(listener);
-}
-
-export function getAdkEvents(options?: AdkEventFilterOptions): AdkEvent[] {
-  return adkEventStream.getEvents(options);
-}
-
-export function clearAdkEvents(options?: { clearDisk?: boolean }): void {
-  adkEventStream.clear(options);
-}
+export const emitAdkEvent = (event: AdkEvent) => adkEventStream.emit(event);
+export const subscribeToAdkEvents = (listener: AdkEventListener) => adkEventStream.subscribe(listener);
+export const getAdkEvents = (options?: AdkEventFilterOptions) => adkEventStream.getEvents(options);
+export const clearAdkEvents = (options?: { clearDisk?: boolean }) => adkEventStream.clear(options);
 
 // Self-check for disk logging, loading, and accurate filtering
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -387,54 +159,24 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) {
     try {
       const stream = new AdkEventStream(tmpRoot);
 
-      // 1. Emit memory insert event
-      const insertEvt = createEvent({
-        id: "test-insert-1",
-        author: "memory",
-        invocationId: "session-123",
-        timestamp: Date.now() - 5000,
+      // A memory insert, a memory retrieve, and a model thought.
+      stream.emit(createEvent({
+        id: "test-insert-1", author: "memory", invocationId: "session-123", timestamp: Date.now() - 5000,
         content: { role: "model", parts: [{ text: "Recorded preference for dark mode" }] },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:insert",
-            status: "success",
-            sessionId: "session-123",
-            userId: "user-abc",
-            text: "User prefers dark mode",
-          },
-        }),
-      });
-      stream.emit(insertEvt);
-
-      // 2. Emit memory retrieve event
-      const retrieveEvt = createEvent({
-        id: "test-retrieve-1",
-        author: "memory",
-        invocationId: "session-124",
-        timestamp: Date.now() - 2000,
+        actions: createEventActions({ stateDelta: { eventType: "memory:insert", status: "success", sessionId: "session-123", text: "User prefers dark mode" } }),
+      }));
+      stream.emit(createEvent({
+        id: "test-retrieve-1", author: "memory", invocationId: "session-124", timestamp: Date.now() - 2000,
         content: { role: "model", parts: [{ text: "Retrieved preference: dark mode" }] },
-        actions: createEventActions({
-          stateDelta: {
-            eventType: "memory:retrieve",
-            status: "success",
-            query: "dark mode",
-            count: 1,
-          },
-        }),
-      });
-      stream.emit(retrieveEvt);
-
-      // 3. Emit thought event
-      const thoughtEvt = createEvent({
-        id: "test-thought-1",
-        author: "intent_classifier",
-        timestamp: Date.now() - 1000,
+        actions: createEventActions({ stateDelta: { eventType: "memory:retrieve", status: "success", query: "dark mode" } }),
+      }));
+      stream.emit(createEvent({
+        id: "test-thought-1", author: "intent_classifier", timestamp: Date.now() - 1000,
         content: { role: "model", parts: [{ text: "Thinking about dark mode context", thought: true }] },
-      });
-      stream.emit(thoughtEvt);
+      }));
 
       // Verify files written to disk
-      const files = findJsonlFiles(tmpRoot);
+      const files = jsonlFiles(tmpRoot);
       assert.ok(files.length >= 1, "Events JSONL files should exist on disk");
 
       // Verify read from disk with filtering by type

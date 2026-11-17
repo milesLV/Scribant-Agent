@@ -1,17 +1,9 @@
 // Merging a freshly classified plan over the one it replaces.
 //
-// The live pipeline re-derives the WHOLE plan from the WHOLE transcript on every tick, so an item
-// the user already acted on comes back from the classifier as an ordinary new row. Dropped in
-// verbatim, that resets a scheduled event's "Hooked" chip to an "Add Event" button, a logged to-do
-// to "Log To-Do", and a completed search back to "Research" — and it throws away the Google id that
-// Undo deletes by, plus the answer the search already paid for. With autonomy on, a missed match is
-// not a cosmetic duplicate row — it is a second event written to the user's real Google Calendar.
-//
-// Rows are matched by identity, never by list position: the classifier adds, merges and drops rows
-// between ticks, so index N is not the same item it was a tick ago.
-//
-// Lives here rather than inline in App.tsx so it can be pinned by a self-check — the same reason
-// autonomy.ts does.
+// The live pipeline re-derives the whole plan every tick, so items the user already acted on come
+// back as new rows. Dropped in verbatim they'd lose their Google id, status and search answer — and
+// with autonomy on, a missed match is a second real calendar event. Rows match by identity, never
+// by position: the classifier reorders, merges and drops rows between ticks.
 
 export type PlanList = "calendarEvents" | "tasks" | "searchQueries";
 
@@ -57,20 +49,18 @@ export function isSameItem(list: PlanList, a: any, b: any): boolean {
   return list === "searchQueries" ? isSameishText(a.query, b.query) : isSameishText(a.title, b.title);
 }
 
-// Settled = already written to Google, already researched, or failed with an error worth keeping on
-// screen. Only settled rows survive a re-plan; pending rows always take the classifier's newest
-// wording. isAutoExecutable's `status !== "pending"` gate then keeps carried rows from re-firing.
+// Settled = written, researched, failed or undone. Only settled rows survive a re-plan, and the
+// auto gate only fires on "pending", so carried rows never re-fire.
 const isSettled = (item: any) => !!item?.status && item.status !== "pending";
 
-// A row that exists in Google still takes the newer field values: the speaker adding a time or a
-// place is refining one appointment, not describing a second. The classifier never emits status,
-// eventId, taskId or synced, so spreading the incoming row last keeps the booking while the details
-// move, and App's autonomy effect sees the fingerprint drift and PATCHes Google. Failed rows and
-// completed searches win wholesale instead: re-arming a failure would retry every tick, and a
-// finished answer has nothing remote to keep in sync.
+// Rows that exist in Google take refined details (a time added mid-sentence is the same
+// appointment) but keep status/ids, so App sees the fingerprint drift and PATCHes. Everything else
+// settled wins wholesale: a failure must not retry every tick, and an answer has nothing to sync.
 const REFINABLE = new Set(["scheduled", "created"]);
 
 // Incoming plan over previous plan. Incoming order is kept, so the list doesn't reshuffle per tick.
+// ponytail: O(n²) identity scans — fine at brain-dump sizes (tens of rows); bucket by normalized
+// title first if plans ever reach hundreds.
 export function mergeList<T>(list: PlanList, incoming: T[], prev: T[]): T[] {
   const carried = new Set<T>();
   const merged: any[] = [];
@@ -177,6 +167,10 @@ if (typeof process !== "undefined" && process.argv[1]?.endsWith("plan-merge.ts")
   const failed = mergeList("tasks", [{ title: "Renew passport" }],
     [{ title: "Renew passport", status: "failed", error: "403" }] as any);
   eq([(failed[0] as any).status, (failed[0] as any).error], ["failed", "403"], "failed row lost its error");
+
+  // ── an undone row stays undone across re-plans, or auto mode would re-create it next tick ─────
+  eq(mergeList("calendarEvents", [{ title: "Dentist" }], [{ title: "Dentist", status: "undone" }] as any)
+      .map((e: any) => e.status), ["undone"], "re-plan re-armed an undone event");
 
   // ── unrelated items are never merged, and an empty previous plan is a plain pass-through ──────
   eq(mergeList("tasks", [{ title: "Renew passport" }], [{ title: "Book flights", status: "created" }] as any).length,

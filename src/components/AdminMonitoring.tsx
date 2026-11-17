@@ -18,7 +18,6 @@ import {
   Check,
   Users,
   Radio,
-  Sliders,
   CheckCircle2,
   Sparkles,
   AlertTriangle,
@@ -26,7 +25,209 @@ import {
 import { AdkEvent, SttConfig, SttStatus } from "../types";
 import { DEFAULT_MAX_SPEAKERS } from "../hooks/useChunkedCapture";
 import TokenVisualizer from "./TokenVisualizer";
-import { classifyEvent, EventFilterCategory, StatusFilterType } from "./DebugPanel";
+
+const SUB_TABS = [
+  ["tokens", Zap, "text-amber-600", "Token Engine"],
+  ["telemetry", Terminal, "text-indigo-600", "ADK Telemetry"],
+  ["infra", Server, "text-emerald-600", "GCP & STT Config"],
+] as const;
+
+// [filter, icon, label, active classes, idle classes, icon colour, badge colour]
+const EVENT_FILTERS = [
+  ["all", Activity, "All", "bg-white text-stone-900 shadow-2xs font-bold border border-stone-200", "text-stone-600 hover:text-stone-900", "text-stone-500", "bg-stone-200/80 text-stone-700"],
+  ["memory:insert", ArrowDownToLine, "memory:insert", "bg-emerald-50 text-emerald-800 shadow-2xs border border-emerald-300 font-bold", "text-stone-600 hover:text-emerald-700", "text-emerald-600", "bg-emerald-100 text-emerald-800"],
+  ["memory:retrieve", ArrowUpFromLine, "memory:retrieve", "bg-sky-50 text-sky-800 shadow-2xs border border-sky-300 font-bold", "text-stone-600 hover:text-sky-700", "text-sky-600", "bg-sky-100 text-sky-800"],
+  ["tool_call", Wrench, "tools", "bg-purple-50 text-purple-800 shadow-2xs border border-purple-300 font-bold", "text-stone-600 hover:text-purple-700", "text-purple-600", "bg-purple-100 text-purple-800"],
+  ["stt:transcribe", Radio, "stt:diarization", "bg-indigo-50 text-indigo-800 shadow-2xs border border-indigo-300 font-bold", "text-stone-600 hover:text-indigo-700", "text-indigo-600", "bg-indigo-100 text-indigo-800"],
+  ["error", AlertCircle, "errors", "bg-red-50 text-red-800 shadow-2xs border border-red-300 font-bold", "text-red-600 hover:text-red-800", "text-red-600", "bg-red-100 text-red-800"],
+] as const;
+
+type EventFilterCategory =
+  | "all"
+  | "memory:insert"
+  | "memory:retrieve"
+  | "stt:transcribe"
+  | "thought"
+  | "tool_call"
+  | "content"
+  | "error";
+
+type StatusFilterType = "all" | "success" | "error";
+
+/**
+ * Classifies an ADK Event into a category for filtering and visualization.
+ */
+function classifyEvent(event: AdkEvent): {
+  category: EventFilterCategory | string;
+  label: string;
+  isMemory: boolean;
+  status: "success" | "error" | "info";
+  summaryText: string;
+  durationMs?: number;
+  service?: string;
+  query?: string;
+  answer?: string;
+  error?: string;
+} {
+  const anyEvt = event as any;
+  const delta = event.actions?.stateDelta || anyEvt.actions?.state_delta || anyEvt.stateDelta || {};
+  const explicitType =
+    (typeof anyEvt.type === "string" && anyEvt.type !== "event" ? anyEvt.type : null) ||
+    delta.eventType ||
+    delta.event_type ||
+    anyEvt.eventType ||
+    event.customMetadata?.eventType ||
+    anyEvt.customMetadata?.event_type;
+
+  // 0. Is it STT Transcribe?
+  if (explicitType === "stt:transcribe" || delta.eventType === "stt:transcribe" || event.author === "google_cloud_stt") {
+    const speakerCount = typeof delta.speakerCount === "number" ? delta.speakerCount : 1;
+    const wordCount = typeof delta.wordCount === "number" ? delta.wordCount : 0;
+    const textVal = event.content?.parts?.map((p) => p.text).filter(Boolean).join(" ") || delta.text || "";
+    return {
+      category: "stt:transcribe",
+      label: "stt:transcribe",
+      isMemory: false,
+      status: "success",
+      summaryText: `Cloud STT: ${wordCount} words, ${speakerCount} speaker(s) this chunk${textVal ? ` — "${textVal.slice(0, 70)}"` : ""}`,
+    };
+  }
+
+  // 1. Is it Memory Insert?
+  const isMemoryInsert =
+    explicitType === "memory:insert" ||
+    (event.author === "memory" && (delta.text || anyEvt.text || event.content?.parts?.some((p) => typeof p.text === "string" && p.text.includes("[Memory Ingest]")))) ||
+    (event.author === "memory" && !delta.query && !anyEvt.query && !event.content?.parts?.some((p) => typeof p.text === "string" && p.text.includes("[Memory Retrieve]")));
+
+  // 2. Is it Memory Retrieve?
+  const isMemoryRetrieve =
+    explicitType === "memory:retrieve" ||
+    (event.author === "memory" && (delta.query || anyEvt.query || event.content?.parts?.some((p) => typeof p.text === "string" && p.text.includes("[Memory Retrieve]"))));
+
+  if (isMemoryInsert) {
+    const isError = delta.status === "error" || anyEvt.status === "error" || Boolean(delta.error) || Boolean(anyEvt.error) || Boolean(event.errorCode);
+    const textVal = delta.text || anyEvt.text || event.content?.parts?.map((p) => p.text).filter(Boolean).join(" ") || "Memory Ingestion";
+    return {
+      category: "memory:insert",
+      label: "memory:insert",
+      isMemory: true,
+      status: isError ? "error" : "success",
+      summaryText: textVal,
+      durationMs: typeof delta.durationMs === "number" ? delta.durationMs : anyEvt.durationMs,
+      service: delta.service || anyEvt.service,
+      error: delta.error || anyEvt.error || (event.errorMessage || (event.errorCode ? `Error ${event.errorCode}` : undefined)),
+    };
+  }
+
+  if (isMemoryRetrieve) {
+    const isError = delta.status === "error" || anyEvt.status === "error" || Boolean(delta.error) || Boolean(anyEvt.error) || Boolean(event.errorCode);
+    const queryVal = delta.query || anyEvt.query || "";
+    const countVal = typeof delta.count === "number" ? delta.count : (typeof anyEvt.count === "number" ? anyEvt.count : (Array.isArray(delta.memories) ? delta.memories.length : 0));
+    const summary = queryVal
+      ? `Query: "${queryVal}" (${countVal} match${countVal === 1 ? "" : "es"})`
+      : event.content?.parts?.map((p) => p.text).filter(Boolean).join(" ") || "Memory Retrieval";
+
+    return {
+      category: "memory:retrieve",
+      label: "memory:retrieve",
+      isMemory: true,
+      status: isError ? "error" : "success",
+      summaryText: summary,
+      durationMs: typeof delta.durationMs === "number" ? delta.durationMs : anyEvt.durationMs,
+      service: delta.service || anyEvt.service,
+      query: queryVal,
+      answer: delta.answer || anyEvt.answer,
+      error: delta.error || anyEvt.error || (event.errorMessage || (event.errorCode ? `Error ${event.errorCode}` : undefined)),
+    };
+  }
+
+  // Check errors
+  if (event.errorCode || event.errorMessage || anyEvt.error) {
+    return {
+      category: "error",
+      label: `error ${event.errorCode || ""}`,
+      isMemory: false,
+      status: "error",
+      summaryText: event.errorMessage || anyEvt.error || `Error ${event.errorCode}`,
+      error: event.errorMessage || anyEvt.error || String(event.errorCode),
+    };
+  }
+
+  // Check parts for tool calls, thoughts, or content
+  const parts = event.content?.parts || [];
+  const hasToolCall = parts.some((p) => p.functionCall);
+  const hasToolResponse = parts.some((p) => p.functionResponse);
+  const hasThought = parts.some((p) => p.thought);
+
+  if (hasToolCall || delta.eventType === "tool_call" || explicitType === "tool_call") {
+    const call = parts.find((p) => p.functionCall)?.functionCall;
+    const toolName = call?.name || delta.toolName || "call";
+    const toolArgs = call?.args || delta.args || {};
+    return {
+      category: "tool_call",
+      label: `tool: ${toolName}`,
+      isMemory: false,
+      status: "info",
+      summaryText: `Calling ${toolName}(${JSON.stringify(toolArgs)})`,
+    };
+  }
+
+  if (hasToolResponse || delta.eventType === "tool_result" || explicitType === "tool_result") {
+    const res = parts.find((p) => p.functionResponse)?.functionResponse;
+    const toolName = res?.name || delta.toolName || "result";
+    const toolResp = res?.response || delta.result || delta.resultId || {};
+    const isError = delta.status === "error" || Boolean(delta.error);
+    return {
+      category: "tool_call",
+      label: `tool_result: ${toolName}`,
+      isMemory: false,
+      status: isError ? "error" : "success",
+      summaryText: `Result from ${toolName}: ${JSON.stringify(toolResp).slice(0, 120)}`,
+      error: delta.error,
+    };
+  }
+
+  if (hasThought) {
+    const thought = parts.find((p) => p.thought)?.text || "";
+    return {
+      category: "thought",
+      label: "model:thought",
+      isMemory: false,
+      status: "info",
+      summaryText: thought || "Reasoning trace",
+    };
+  }
+
+  // Content or state delta from agents
+  const textContent = parts.map((p) => p.text).filter(Boolean).join(" ");
+  if (textContent) {
+    return {
+      category: "content",
+      label: event.author ? `agent:${event.author}` : "content",
+      isMemory: false,
+      status: "success",
+      summaryText: textContent,
+    };
+  }
+
+  if (Object.keys(delta).length > 0) {
+    return {
+      category: "content",
+      label: event.author ? `state:${event.author}` : "state_delta",
+      isMemory: false,
+      status: "success",
+      summaryText: `State update: keys [${Object.keys(delta).join(", ")}]`,
+    };
+  }
+
+  return {
+    category: "content",
+    label: event.author || "adk:event",
+    isMemory: false,
+    status: "info",
+    summaryText: `Event from ${event.author || "agent"}`,
+  };
+}
 
 // Bounds of the expected-speakers control. Every value in range is a single digit, which is what
 // lets the range text box assume "one keystroke == one bound" below.
@@ -320,11 +521,15 @@ export default function AdminMonitoring({
     }
   };
 
-  const insertCount = events.filter((e) => classifyEvent(e).category === "memory:insert").length;
-  const retrieveCount = events.filter((e) => classifyEvent(e).category === "memory:retrieve").length;
-  const toolCount = events.filter((e) => classifyEvent(e).category === "tool_call").length;
-  const sttCount = events.filter((e) => classifyEvent(e).category === "stt:transcribe" || e.author === "google_cloud_stt").length;
-  const errorCount = events.filter((e) => classifyEvent(e).status === "error").length;
+  const count = (pred: (e: AdkEvent) => boolean) => events.filter(pred).length;
+  const counts: Partial<Record<EventFilterCategory, number>> = {
+    all: totalCount,
+    "memory:insert": count((e) => classifyEvent(e).category === "memory:insert"),
+    "memory:retrieve": count((e) => classifyEvent(e).category === "memory:retrieve"),
+    tool_call: count((e) => classifyEvent(e).category === "tool_call"),
+    "stt:transcribe": count((e) => classifyEvent(e).category === "stt:transcribe" || e.author === "google_cloud_stt"),
+    error: count((e) => classifyEvent(e).status === "error"),
+  };
 
   const authors = Array.from(new Set(events.map((e) => e.author).filter(Boolean))) as string[];
 
@@ -365,47 +570,26 @@ export default function AdminMonitoring({
         <div className="flex flex-wrap items-center gap-2 self-stretch sm:self-auto justify-between sm:justify-end">
           {/* Sub-Tab Switcher */}
           <div className="flex items-center bg-stone-100 p-1 rounded-xl border border-stone-200/80">
-            <button
-              type="button"
-              onClick={() => setActiveSubTab("tokens")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-sans font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === "tokens"
-                  ? "bg-white text-stone-900 shadow-2xs border border-stone-200"
-                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60"
-              }`}
-            >
-              <Zap className={`w-3 h-3 ${activeSubTab === "tokens" ? "text-amber-600" : "text-stone-400"}`} />
-              <span>Token Engine</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveSubTab("telemetry")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-sans font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === "telemetry"
-                  ? "bg-white text-stone-900 shadow-2xs border border-stone-200"
-                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60"
-              }`}
-            >
-              <Terminal className={`w-3.5 h-3.5 ${activeSubTab === "telemetry" ? "text-indigo-600" : "text-stone-400"}`} />
-              <span>ADK Telemetry</span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-200/80 text-stone-700 font-mono font-bold">
-                {totalCount}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveSubTab("infra")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-sans font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === "infra"
-                  ? "bg-white text-stone-900 shadow-2xs border border-stone-200"
-                  : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60"
-              }`}
-            >
-              <Server className={`w-3.5 h-3.5 ${activeSubTab === "infra" ? "text-emerald-600" : "text-stone-400"}`} />
-              <span>GCP &amp; STT Config</span>
-            </button>
+            {SUB_TABS.map(([id, Icon, color, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveSubTab(id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-sans font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeSubTab === id
+                    ? "bg-white text-stone-900 shadow-2xs border border-stone-200"
+                    : "text-stone-600 hover:text-stone-900 hover:bg-stone-200/60"
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${activeSubTab === id ? color : "text-stone-400"}`} />
+                <span>{label}</span>
+                {id === "telemetry" && (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-200/80 text-stone-700 font-mono font-bold">
+                    {totalCount}
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
 
           <button
@@ -667,25 +851,17 @@ export default function AdminMonitoring({
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
-                  <span className="text-[10px] text-stone-500 uppercase tracking-wider block">GCP Project</span>
-                  <span className="text-stone-900 font-bold">{serverConfig?.projectId || "Not configured"}</span>
-                </div>
-
-                <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
-                  <span className="text-[10px] text-stone-500 uppercase tracking-wider block">Vertex AI Region</span>
-                  <span className="text-stone-900 font-bold">{serverConfig?.location || "us-central1"}</span>
-                </div>
-
-                <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
-                  <span className="text-[10px] text-stone-500 uppercase tracking-wider block">Reasoning Engine ID</span>
-                  <span className="text-emerald-700 font-bold">{serverConfig?.agentEngineId || "Not configured"}</span>
-                </div>
-
-                <div className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
-                  <span className="text-[10px] text-stone-500 uppercase tracking-wider block">Gemini Model</span>
-                  <span className="text-amber-700 font-bold">{serverConfig?.model || "gemini-3.7-flash"}</span>
-                </div>
+                {([
+                  ["GCP Project", serverConfig?.projectId || "Not configured", "text-stone-900"],
+                  ["Vertex AI Region", serverConfig?.location || "us-central1", "text-stone-900"],
+                  ["Reasoning Engine ID", serverConfig?.agentEngineId || "Not configured", "text-emerald-700"],
+                  ["Gemini Model", serverConfig?.model || "gemini-3.7-flash", "text-amber-700"],
+                ] as const).map(([label, value, color]) => (
+                  <div key={label} className="p-3 bg-stone-50 border border-stone-200/80 rounded-xl space-y-1 font-mono text-xs">
+                    <span className="text-[10px] text-stone-500 uppercase tracking-wider block">{label}</span>
+                    <span className={`${color} font-bold`}>{value}</span>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -708,103 +884,18 @@ export default function AdminMonitoring({
               <div className="flex flex-wrap items-center justify-between gap-3">
                 {/* Event Type Filter Tabs */}
                 <div className="flex flex-wrap items-center gap-1.5 bg-stone-100 p-1 rounded-xl border border-stone-200/80">
-                  <button
-                    type="button"
-                    onClick={() => setEventTypeFilter("all")}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                      eventTypeFilter === "all"
-                        ? "bg-white text-stone-900 shadow-2xs font-bold border border-stone-200"
-                        : "text-stone-600 hover:text-stone-900"
-                    }`}
-                  >
-                    <Activity className="w-3 h-3 text-stone-500" />
-                    <span>All</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-stone-200/80 text-stone-700 font-mono font-bold">
-                      {totalCount}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setEventTypeFilter((prev) => (prev === "memory:insert" ? "all" : "memory:insert"))}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                      eventTypeFilter === "memory:insert"
-                        ? "bg-emerald-50 text-emerald-800 shadow-2xs border border-emerald-300 font-bold"
-                        : "text-stone-600 hover:text-emerald-700"
-                    }`}
-                  >
-                    <ArrowDownToLine className="w-3 h-3 text-emerald-600" />
-                    <span>memory:insert</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 font-bold font-mono">
-                      {insertCount}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setEventTypeFilter((prev) => (prev === "memory:retrieve" ? "all" : "memory:retrieve"))}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                      eventTypeFilter === "memory:retrieve"
-                        ? "bg-sky-50 text-sky-800 shadow-2xs border border-sky-300 font-bold"
-                        : "text-stone-600 hover:text-sky-700"
-                    }`}
-                  >
-                    <ArrowUpFromLine className="w-3 h-3 text-sky-600" />
-                    <span>memory:retrieve</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-sky-100 text-sky-800 font-bold font-mono">
-                      {retrieveCount}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setEventTypeFilter((prev) => (prev === "tool_call" ? "all" : "tool_call"))}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                      eventTypeFilter === "tool_call"
-                        ? "bg-purple-50 text-purple-800 shadow-2xs border border-purple-300 font-bold"
-                        : "text-stone-600 hover:text-purple-700"
-                    }`}
-                  >
-                    <Wrench className="w-3 h-3 text-purple-600" />
-                    <span>tools</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-purple-100 text-purple-800 font-bold font-mono">
-                      {toolCount}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setEventTypeFilter((prev) => (prev === "stt:transcribe" ? "all" : "stt:transcribe"))}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                      eventTypeFilter === "stt:transcribe"
-                        ? "bg-indigo-50 text-indigo-800 shadow-2xs border border-indigo-300 font-bold"
-                        : "text-stone-600 hover:text-indigo-700"
-                    }`}
-                  >
-                    <Radio className="w-3 h-3 text-indigo-600" />
-                    <span>stt:diarization</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-800 font-bold font-mono">
-                      {sttCount}
-                    </span>
-                  </button>
-
-                  {errorCount > 0 && (
+                  {EVENT_FILTERS.filter(([id]) => id !== "error" || counts.error! > 0).map(([id, Icon, label, on, off, icon, badge]) => (
                     <button
+                      key={id}
                       type="button"
-                      onClick={() => setEventTypeFilter((prev) => (prev === "error" ? "all" : "error"))}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
-                        eventTypeFilter === "error"
-                          ? "bg-red-50 text-red-800 shadow-2xs border border-red-300 font-bold"
-                          : "text-red-600 hover:text-red-800"
-                      }`}
+                      onClick={() => setEventTypeFilter((prev) => (prev === id ? "all" : id))}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${eventTypeFilter === id ? on : off}`}
                     >
-                      <AlertCircle className="w-3 h-3 text-red-600" />
-                      <span>errors</span>
-                      <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-red-100 text-red-800 font-bold font-mono">
-                        {errorCount}
-                      </span>
+                      <Icon className={`w-3 h-3 ${icon}`} />
+                      <span>{label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${badge}`}>{counts[id]}</span>
                     </button>
-                  )}
+                  ))}
                 </div>
 
                 {/* Quick Simulation / Test Buttons */}

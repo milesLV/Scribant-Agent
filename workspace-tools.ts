@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 interface EventInput { title: string; description?: string; start: string; end?: string; allDay?: boolean; timeZone?: string; }
 interface TaskInput { title: string; notes?: string; dueDate?: string; }
 
-async function googleFetch(method: "GET" | "POST" | "PATCH", url: string, token: string, body?: unknown): Promise<any> {
+async function googleFetch(method: "GET" | "POST" | "PATCH" | "DELETE", url: string, token: string, body?: unknown): Promise<any> {
   const res = await fetch(url, {
     method,
     headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
@@ -49,27 +49,16 @@ export function toGcalDates(event: EventInput): { start: any; end: any } {
   return { start: { dateTime: event.start, timeZone }, end: { dateTime: event.end, timeZone } };
 }
 
-export async function gcalCreateEvent(token: string, event: EventInput): Promise<string> {
-  const { start, end } = toGcalDates(event);
-  const data = await googlePost(
-    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-    token,
-    { summary: event.title, description: event.description, start, end },
-  );
-  return data.id;
-}
+const gcalEventUrl = (eventId = "") =>
+  `https://www.googleapis.com/calendar/v3/calendars/primary/events${eventId && `/${encodeURIComponent(eventId)}`}`;
+const gcalBody = (event: EventInput) => ({ summary: event.title, description: event.description, ...toGcalDates(event) });
 
-const gcalEventUrl = (eventId: string) =>
-  `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`;
+export const gcalCreateEvent = async (token: string, event: EventInput): Promise<string> =>
+  (await googlePost(gcalEventUrl(), token, gcalBody(event))).id;
 
-// Edit an event already on the calendar rather than booking a second one. The live planner keeps
-// refining the same appointment as the speaker adds a time, a place or a duration.
-export async function gcalUpdateEvent(token: string, eventId: string, event: EventInput): Promise<string> {
-  const { start, end } = toGcalDates(event);
-  const data = await googlePatch(gcalEventUrl(eventId), token,
-    { summary: event.title, description: event.description, start, end });
-  return data.id;
-}
+// Edit in place rather than booking a second one: the live planner keeps refining one appointment.
+export const gcalUpdateEvent = async (token: string, eventId: string, event: EventInput): Promise<string> =>
+  (await googlePatch(gcalEventUrl(eventId), token, gcalBody(event))).id;
 
 // Tasks has no "@default" alias on the tasklist path the way Calendar has "primary" — the id has to
 // be looked up, and an account that has never opened Tasks owns no list at all. Both cases surface
@@ -84,31 +73,20 @@ const tasksUrl = (listId: string, taskId?: string) =>
   `https://www.googleapis.com/tasks/v1/lists/${encodeURIComponent(listId)}/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`;
 
 // Google Tasks keeps only the date portion of `due`.
-export async function gtasksCreateTask(token: string, task: TaskInput): Promise<string> {
-  const data = await googlePost(
-    tasksUrl(await resolveTaskListId(token)),
-    token,
-    { title: task.title, notes: task.notes, ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {}) },
-  );
-  return data.id;
-}
+const taskBody = (task: TaskInput) =>
+  ({ title: task.title, notes: task.notes, ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {}) });
 
-export async function gtasksUpdateTask(token: string, taskId: string, task: TaskInput): Promise<string> {
-  const data = await googlePatch(tasksUrl(await resolveTaskListId(token), taskId), token,
-    { title: task.title, notes: task.notes, ...(task.dueDate ? { due: new Date(task.dueDate).toISOString() } : {}) });
-  return data.id;
-}
+export const gtasksCreateTask = async (token: string, task: TaskInput): Promise<string> =>
+  (await googlePost(tasksUrl(await resolveTaskListId(token)), token, taskBody(task))).id;
+
+export const gtasksUpdateTask = async (token: string, taskId: string, task: TaskInput): Promise<string> =>
+  (await googlePatch(tasksUrl(await resolveTaskListId(token), taskId), token, taskBody(task))).id;
 
 // Undo path. 404/410 = already gone, which is the outcome the caller wanted — treat as success.
-async function googleDelete(url: string, token: string): Promise<void> {
-  const res = await fetch(url, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-  if (res.ok || res.status === 404 || res.status === 410) return;
-  const data = await res.json().catch(() => ({}));
-  throw new Error(data.error?.message || `Google API error ${res.status}`);
-}
+const googleDelete = (url: string, token: string): Promise<void> =>
+  googleFetch("DELETE", url, token).catch(e => { if (!/HTTP 4(04|10)\b/.test(e.message)) throw e; });
 
-export const gcalDeleteEvent = (token: string, eventId: string) =>
-  googleDelete(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}`, token);
+export const gcalDeleteEvent = (token: string, eventId: string) => googleDelete(gcalEventUrl(eventId), token);
 export const gtasksDeleteTask = async (token: string, taskId: string) =>
   googleDelete(tasksUrl(await resolveTaskListId(token), taskId), token);
 
@@ -123,11 +101,8 @@ export async function gdriveCreateFolder(token: string, folderName: string): Pro
   ).catch(() => null); // a failed lookup just means we create a new one
   if (found?.files?.length) return found.files[0].id;
 
-  const data = await googlePost("https://www.googleapis.com/drive/v3/files", token, {
-    name: folderName,
-    mimeType: "application/vnd.google-apps.folder",
-  });
-  return data.id;
+  return (await googlePost("https://www.googleapis.com/drive/v3/files", token,
+    { name: folderName, mimeType: "application/vnd.google-apps.folder" })).id;
 }
 
 // Drive uploads are two calls: create the metadata, then PATCH the bytes to the media endpoint.
@@ -160,12 +135,22 @@ export async function gdocsCreateDocument(token: string, title: string, content?
   return doc.documentId;
 }
 
-export async function gsheetsCreateSpreadsheet(token: string, title: string): Promise<string> {
-  const sheet = await googlePost("https://sheets.googleapis.com/v1/spreadsheets", token, {
-    properties: { title },
-  });
-  return sheet.spreadsheetId;
-}
+export const gsheetsCreateSpreadsheet = async (token: string, title: string): Promise<string> =>
+  (await googlePost("https://sheets.googleapis.com/v1/spreadsheets", token, { properties: { title } })).spreadsheetId;
+
+const eventSchema = z.object({
+  title: z.string().min(1).describe("Event summary/title"),
+  description: z.string().optional().describe("Event description/context; empty string if none"),
+  start: z.string().min(1).describe("Start as ISO-8601 local datetime, e.g. 2026-07-10T15:00:00"),
+  end: z.string().optional().describe("End as ISO-8601 local datetime; 30 minutes after start if no duration implied"),
+  allDay: z.boolean().optional().describe("True if it spans whole day(s) with no specific clock time"),
+  timeZone: z.string().optional().describe("IANA time zone identifier, e.g. America/Los_Angeles"),
+});
+const taskSchema = z.object({
+  title: z.string().min(1).describe("Compact title of the task"),
+  notes: z.string().optional().describe("Descriptions, sub-items, or context; empty string if none"),
+  dueDate: z.string().optional().describe("Deadline as ISO date YYYY-MM-DD, or empty string if open-ended"),
+});
 
 interface WorkspaceAction {
   description: string;
@@ -179,46 +164,22 @@ interface WorkspaceAction {
 export const WORKSPACE_ACTIONS: Record<string, WorkspaceAction> = {
   create_calendar_event: {
     description: "Schedule an event on the user's Google Calendar. Use for things that happen at a specific time or occupy whole days.",
-    parameters: z.object({
-      title: z.string().min(1).describe("Event summary/title"),
-      description: z.string().optional().describe("Event description/context; empty string if none"),
-      start: z.string().min(1).describe("Start as ISO-8601 local datetime, e.g. 2026-07-10T15:00:00"),
-      end: z.string().optional().describe("End as ISO-8601 local datetime; 30 minutes after start if no duration implied"),
-      allDay: z.boolean().optional().describe("True if it spans whole day(s) with no specific clock time"),
-      timeZone: z.string().optional().describe("IANA time zone identifier, e.g. America/Los_Angeles"),
-    }),
+    parameters: eventSchema,
     run: async (token, event) => ({ eventId: await gcalCreateEvent(token, event) }),
   },
   create_task: {
     description: "Add a todo item to the user's Google Tasks list. Use for actions to complete, optionally with a deadline.",
-    parameters: z.object({
-      title: z.string().min(1).describe("Compact title of the task"),
-      notes: z.string().optional().describe("Descriptions, sub-items, or context; empty string if none"),
-      dueDate: z.string().optional().describe("Deadline as ISO date YYYY-MM-DD, or empty string if open-ended"),
-    }),
+    parameters: taskSchema,
     run: async (token, task) => ({ taskId: await gtasksCreateTask(token, task) }),
   },
   update_calendar_event: {
     description: "Update an event already on the user's Google Calendar, in place. Use when details of an event you previously created have changed — never create a second event for the same appointment.",
-    parameters: z.object({
-      id: z.string().min(1).describe("The eventId returned when this event was created"),
-      title: z.string().min(1).describe("Event summary/title"),
-      description: z.string().optional().describe("Event description/context; empty string if none"),
-      start: z.string().min(1).describe("Start as ISO-8601 local datetime, e.g. 2026-07-10T15:00:00"),
-      end: z.string().optional().describe("End as ISO-8601 local datetime; 30 minutes after start if no duration implied"),
-      allDay: z.boolean().optional().describe("True if it spans whole day(s) with no specific clock time"),
-      timeZone: z.string().optional().describe("IANA time zone identifier, e.g. America/Los_Angeles"),
-    }),
+    parameters: eventSchema.extend({ id: z.string().min(1).describe("The eventId returned when this event was created") }),
     run: async (token, { id, ...event }) => ({ eventId: await gcalUpdateEvent(token, id, event) }),
   },
   update_task: {
     description: "Update a todo already in the user's Google Tasks list, in place. Use when a task you previously created gains a deadline or better wording.",
-    parameters: z.object({
-      id: z.string().min(1).describe("The taskId returned when this task was created"),
-      title: z.string().min(1).describe("Compact title of the task"),
-      notes: z.string().optional().describe("Descriptions, sub-items, or context; empty string if none"),
-      dueDate: z.string().optional().describe("Deadline as ISO date YYYY-MM-DD, or empty string if open-ended"),
-    }),
+    parameters: taskSchema.extend({ id: z.string().min(1).describe("The taskId returned when this task was created") }),
     run: async (token, { id, ...task }) => ({ taskId: await gtasksUpdateTask(token, id, task) }),
   },
   create_drive_folder: {
@@ -245,15 +206,12 @@ export const WORKSPACE_ACTIONS: Record<string, WorkspaceAction> = {
   },
   create_google_sheet: {
     description: "Create a native Google Spreadsheet in Google Sheets.",
-    parameters: z.object({
-      title: z.string().min(1).describe("Spreadsheet title"),
-    }),
+    parameters: z.object({ title: z.string().min(1).describe("Spreadsheet title") }),
     run: async (token, { title }) => ({ fileId: await gsheetsCreateSpreadsheet(token, title) }),
   },
 };
 
-// ponytail: self-check pins the date-shape logic and the error surface. Run: tsx workspace-tools.ts
-// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only (prod boot would crash on fileURLToPath(undefined)).
+// Self-check: date shapes, request shapes, error surface.
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   // all-day: end is exclusive, same-day span bumps one day
   assert.deepEqual(

@@ -1,18 +1,11 @@
 import { useCallback, useRef } from "react";
 import { toUtterances, type Utterance, type UtteranceSource } from "../utils/paragraphs";
 
-// The record -> upload -> transcribe loop, shared by BOTH capture paths.
-//
-// The mic and the shared tab used to carry a copy of this each, which is how they ended up with
-// different chunk durations (8000 vs 9000) and opposite diarization defaults. One implementation
-// means they cannot drift again.
-//
-// ponytail: one standalone chunk per request, no overlap, no rolling window.
-// A 30s window stepped every 8s was tried (bce2bd7) on the theory that more audio per request
-// would help Cloud STT tell two voices apart. Measured against the live API, it does not: V1
-// diarization is deterministic, so a window that MOVES is a window that re-decides audio already
-// committed, and the same stretch of speech came back labelled differently from one step to the
-// next. Upgrade path is streamingRecognize, not a bigger window — see speaker-registry.ts.
+// The record -> upload -> transcribe loop, shared by the mic and the shared tab so their chunk
+// length and diarization defaults cannot drift apart again.
+// ponytail: one standalone chunk per request, no overlap. A rolling 30s window (bce2bd7) made Cloud
+// STT re-decide committed audio and relabel it step to step; the upgrade is streamingRecognize
+// (useStreamingCapture), not a bigger window.
 
 /** One recorded chunk. ~8s: long enough for Cloud STT to cluster, short enough to feel live. */
 export const CHUNK_MS = 8000;
@@ -30,38 +23,20 @@ interface Options {
   onDegraded?: (provider: string) => void;
 }
 
-// Picks the best webm/opus variant this browser actually supports; Chrome always supports the
-// first, but this stays defensive rather than hard-coding it.
-function pickMimeType(): string {
+export function pickMimeType(): string {
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
   return candidates.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
 export interface SttSettings { enableDiarization: boolean; maxSpeakers: number }
 
-/**
- * Upper bound for a session that has never touched the Admin slider. The browser mirror of
- * DEFAULT_MAX_SPEAKERS in cloud-stt.ts, which cannot be imported here — it pulls in node:assert.
- * Change both together.
- */
+// Browser copy of cloud-stt.ts DEFAULT_MAX_SPEAKERS (that module imports node:assert). Change both.
 export const DEFAULT_MAX_SPEAKERS = 1;
 
-/**
- * Diarization settings, read fresh each chunk so a change in Admin takes effect without a restart.
- *
- * Deliberately does NOT read `minSpeakers`. The floor is advisory, not binding — measured, it
- * changes nothing on clean audio, and on low-confidence audio it pushes the recognizer into
- * splitting a single voice at an arbitrary pause, so one person alternates between Speaker 1 and
- * Speaker 2. That is the reported bug. The Admin control is an upper bound only.
- *
- * Reading it is not merely unnecessary, it is unsafe: the reverted diarization toggle used to
- * write `minSpeakers: 2` into localStorage, so every browser that switched diarization on while
- * that shipped still carries a 2. Honouring persisted state would reproduce the bug on exactly
- * the machines that hit it the first time.
- */
+// Read fresh per chunk so an Admin change applies without a restart. One default for mic and tab.
+// Deliberately ignores a persisted `minSpeakers`: a floor of 2 splits one voice into two on noisy
+// audio, and the reverted diarization toggle left `minSpeakers: 2` in some browsers' localStorage.
 export function readSttConfig(): SttSettings {
-  // ONE default for every caller. The mic path used to default this to true and the tab path to
-  // false, so the same session diarized or didn't depending on which capture started it.
   const fallback = { enableDiarization: false, maxSpeakers: DEFAULT_MAX_SPEAKERS };
   try {
     const saved = localStorage.getItem("scribant_stt_config");
@@ -164,5 +139,5 @@ export function useChunkedCapture({ source, sourceTag, onChunk, onDegraded }: Op
     streamRef.current = null;
   }, []);
 
-  return { start, stop, isActive: () => Boolean(streamRef.current) };
+  return { start, stop };
 }

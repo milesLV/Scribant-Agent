@@ -121,7 +121,7 @@ function ActionButton({ busy, disabled, onClick, icon: Icon, label }: {
   );
 }
 
-// The card shell every panel shares — also used by SessionHistory, which is why it's exported.
+// The card shell every panel shares.
 export function Panel({ icon: Icon, iconClass, title, action, children }: {
   icon: typeof Calendar; iconClass: string; title: React.ReactNode; action?: React.ReactNode; children: React.ReactNode;
 }) {
@@ -162,8 +162,7 @@ export default function ActiveSession({
   onUpdateTask,
   isLiveAnalyzing = false
 }: ActiveSessionProps) {
-  // Which row (if any) of each list is mid-write. One record instead of three parallel useStates —
-  // a kind can only ever have one row executing at a time, same as before.
+  // Which row of each list is mid-write (one at a time per kind).
   const [executing, setExecuting] = useState<Record<"calendar" | "task" | "search", number | null>>({
     calendar: null, task: null, search: null,
   });
@@ -180,11 +179,7 @@ export default function ActiveSession({
     );
   }
 
-  // Spinner-on-the-clicked-row for a write: mark the row busy, always clear it. No confirmation
-  // step — every one of these writes is reversible from the UndoChip the button becomes, and the
-  // card already shows the exact values being sent, so a blocking prompt only re-read data the
-  // user was looking at. Auto-execution (see isAutoExecutable in App.tsx) never prompted either;
-  // this makes the deliberate path consistent with it.
+  // Spinner on the clicked row. No confirm prompt: every write is undoable from its UndoChip.
   const runOnRow = async (
     kind: "calendar" | "task" | "search",
     idx: number,
@@ -232,14 +227,12 @@ export default function ActiveSession({
             <div className="space-y-3.5 max-h-[350px] overflow-y-auto pr-1">
               {analysis.calendarEvents.map((item, idx) => {
                 const setDate = (field: "start" | "end") => (e: React.ChangeEvent<HTMLInputElement>) => {
-                  try {
-                    const val = e.target.value;
-                    onUpdateCalendar(idx, {
-                      ...item,
-                      [field]: val ? (val.length === 16 ? `${val}:00` : val) : "",
-                      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-                    });
-                  } catch {}
+                  const val = e.target.value;
+                  onUpdateCalendar(idx, {
+                    ...item,
+                    [field]: val ? (val.length === 16 ? `${val}:00` : val) : "",
+                    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+                  });
                 };
                 return (
                   <ItemCard
@@ -342,8 +335,6 @@ export default function ActiveSession({
 
       </div>
 
-      {/* Web query searches. Full width: Main Ideas used to sit beside this as the second
-          grid column, and now lives as a slide-out on the Bullet Point Summary panel. */}
       <Panel icon={Search} iconClass="text-blue-600" title="Info Queries">
         {!analysis ? (
           <p className="text-xs text-stone-400 italic py-2 leading-relaxed">No search queries identified yet. Ask questions in your thoughts (e.g. &ldquo;I wonder who designed the Concorde&rdquo;) to trigger research actions.</p>

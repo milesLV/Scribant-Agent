@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { Express, Request, Response } from "express";
 
@@ -7,9 +8,8 @@ export const ErrorResponseSchema = z.object({
   error: z.string().describe("Error message describing why the request failed."),
 });
 
-export type ValidationResult<T> =
-  | { success: true; data: T; error?: string }
-  | { success: false; error: string; data?: T };
+// Both optional fields stay: callers read .error/.data without narrowing (no strictNullChecks).
+export type ValidationResult<T> = { success: true; data: T; error?: string } | { success: false; error: string; data?: T };
 
 export function validatePayload<T>(schema: z.ZodType<T>, data: unknown): ValidationResult<T> {
   const parsed = schema.safeParse(data);
@@ -72,20 +72,10 @@ export const TranscribeCorrectRequestSchema = z.object({
 });
 
 export const TranscribeCorrectResponseSchema = z.object({
-  corrections: z.array(
-    z.object({
-      original: z.string().describe("Original misheard text segment."),
-      corrected: z.string().describe("Corrected text segment."),
-      reason: z.string().optional().describe("Reason for correction."),
-    })
-  ).describe("List of proofreading corrections."),
-  words: z.array(
-    z.object({
-      word: z.string().describe("Word token."),
-      start: z.number().describe("Start timestamp in seconds."),
-      end: z.number().describe("End timestamp in seconds."),
-    })
-  ).describe("Word-level timestamp alignments."),
+  corrections: z.array(z.object({ original: z.string(), corrected: z.string(), reason: z.string().optional() }))
+    .describe("Proofreading corrections: original misheard segment, its correction, and why."),
+  words: z.array(z.object({ word: z.string(), start: z.number(), end: z.number() }))
+    .describe("Word-level alignments; start/end in seconds."),
 });
 
 export const LivePipelineRequestSchema = z.object({
@@ -113,12 +103,7 @@ export const MemoryRetrieveQuerySchema = z.object({
 export const MemoryRetrieveResponseSchema = z.object({
   ok: z.literal(true),
   answer: z.string().nullable().describe("AI-synthesized direct answer based on retrieved memories."),
-  memories: z.array(
-    z.object({
-      text: z.string().describe("Retrieved memory snippet."),
-      timestamp: z.string().describe("Timestamp when memory was recorded."),
-    })
-  ).describe("Matching memory records."),
+  memories: z.array(z.object({ text: z.string(), timestamp: z.string() })).describe("Matching memory snippets and when each was recorded."),
 });
 
 export const MemorySyncResponseSchema = z.object({
@@ -136,28 +121,6 @@ export const TokenStatsResponseSchema = z.object({
   compaction: z.record(z.string(), z.unknown()).describe("Compaction ratio metrics."),
   archive: z.record(z.string(), z.unknown()).describe("Archive token metrics."),
   efficiency: z.record(z.string(), z.unknown()).describe("Memory efficiency metrics."),
-});
-
-export const TokenTelemetryTimeSeriesQuerySchema = z.object({
-  from: z.coerce.number().optional().describe("Start epoch timestamp in ms"),
-  to: z.coerce.number().optional().describe("End epoch timestamp in ms"),
-  interval: z
-    .enum(["1s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "24h"])
-    .optional()
-    .default("1m"),
-  agent: z.string().optional().describe("Filter by agent label"),
-  model: z.string().optional().describe("Filter by model name"),
-  sessionId: z.string().optional().describe("Filter by session ID"),
-  diarization: z
-    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
-    .describe("Filter by whether diarization was enabled"),
-  diarizationEnabled: z
-    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
-    .describe("Filter by whether diarization was enabled"),
-  provider: z.string().optional().describe("Filter by provider (gemini, google_cloud_stt)"),
-  source: z.string().optional().describe("Filter by audio/pipeline source (mic, tab, pipeline)"),
-  modality: z.string().optional().describe("Filter by modality (audio, text)"),
-  stage: z.string().optional().describe("Filter by pipeline stage"),
 });
 
 export const TokenTimeSeriesPointSchema = z.object({
@@ -179,18 +142,26 @@ export const TokenTelemetryTimeSeriesResponseSchema = z.object({
   points: z.array(TokenTimeSeriesPointSchema),
 });
 
+// Query strings carry booleans as "true"/"false".
+const boolQuery = z.preprocess(v => (v === "true" ? true : v === "false" ? false : v), z.boolean().optional())
+  .describe("Filter by whether diarization was enabled");
+
 export const TokenTelemetryAggregateQuerySchema = z.object({
   from: z.coerce.number().optional().describe("Start epoch timestamp in ms"),
   to: z.coerce.number().optional().describe("End epoch timestamp in ms"),
   sessionId: z.string().optional().describe("Filter by session ID"),
-  diarization: z
-    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
-    .describe("Filter by whether diarization was enabled"),
-  diarizationEnabled: z
-    .preprocess((val) => (val === "true" ? true : val === "false" ? false : val), z.boolean().optional())
-    .describe("Filter by whether diarization was enabled"),
-  provider: z.string().optional().describe("Filter by provider"),
-  source: z.string().optional().describe("Filter by source"),
+  diarization: boolQuery,
+  diarizationEnabled: boolQuery,
+  provider: z.string().optional().describe("Filter by provider (gemini, google_cloud_stt)"),
+  source: z.string().optional().describe("Filter by audio/pipeline source (mic, tab, pipeline)"),
+});
+
+export const TokenTelemetryTimeSeriesQuerySchema = TokenTelemetryAggregateQuerySchema.extend({
+  interval: z.enum(["1s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", "24h"]).optional().default("1m"),
+  agent: z.string().optional().describe("Filter by agent label"),
+  model: z.string().optional().describe("Filter by model name"),
+  modality: z.string().optional().describe("Filter by modality (audio, text)"),
+  stage: z.string().optional().describe("Filter by pipeline stage"),
 });
 
 export const AggregateDimensionStatsSchema = z.object({
@@ -240,12 +211,7 @@ export const SearchResponseSchema = z.object({
   query: z.string().describe("Original query."),
   condensed: z.string().describe("1-2 sentence direct answer."),
   inDepth: z.string().describe("Detailed 4-7 sentence explanation."),
-  sources: z.array(
-    z.object({
-      uri: z.string().describe("Source web URL."),
-      title: z.string().describe("Source page title."),
-    })
-  ).describe("Grounded web search sources."),
+  sources: z.array(z.object({ uri: z.string(), title: z.string() })).describe("Grounded web search sources (URL and page title)."),
 });
 
 export const TranscribeAudioRequestSchema = z.object({
@@ -265,17 +231,9 @@ export const TranscribeAudioResponseSchema = z.object({
   // that degradation if it is always told which engine answered.
   provider: z.enum(["gemini", "google_cloud_stt"]).describe("STT engine that produced this result."),
   speakerCount: z.number().optional().describe("Distinct speakers in THIS chunk (labels are chunk-local — see speaker-registry.ts)."),
-  turns: z
-    .array(
-      z.object({
-        speaker: z.string().describe("Chunk-local speaker label, e.g. \"Speaker 1\"."),
-        text: z.string(),
-        startMs: z.number().optional().describe("Chunk-relative start time."),
-        endMs: z.number().optional(),
-      })
-    )
+  turns: z.array(z.object({ speaker: z.string(), text: z.string(), startMs: z.number().optional(), endMs: z.number().optional() }))
     .optional()
-    .describe("Diarized speaker dialogue turns for this chunk. Absent when diarization was off or degraded."),
+    .describe("Diarized turns for this chunk (chunk-local labels like \"Speaker 1\", chunk-relative ms). Absent when diarization was off or degraded."),
   multiSpeaker: z.boolean().optional().describe("Latched: true once the session has seen 2+ speakers in 2+ chunks. Keeps labels on solo chunks."),
   degraded: z.boolean().optional().describe("True when diarization was requested but could not be produced (Cloud STT failed, Gemini answered)."),
 });
@@ -285,6 +243,9 @@ export const TranscribeAudioResponseSchema = z.object({
  * boundary, so they are defined here with the rest and validated with validatePayload, same as
  * every other endpoint. The client opens the socket, sends ONE start message, then raw binary
  * audio frames; `segment` cuts a fresh recognition before Google's 305s streaming limit.
+ * Server replies (not validated): `interim {text}` preview, never appended; `final {turns, speakers}`
+ * append-only committed turns; `segment_due` near the 305s limit (client cuts and sends `segment`);
+ * `error {message}`.
  */
 export const SttStreamStartSchema = z.object({
   type: z.literal("start"),
@@ -300,25 +261,12 @@ export const SttStreamControlSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stop") }).describe("Close the recognition and the socket."),
 ]);
 
-export const SttStreamMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("interim"), text: z.string() })
-    .describe("Non-final preview text. Never appended to the transcript."),
-  z.object({
-    type: z.literal("final"),
-    turns: z.array(z.object({ speaker: z.string(), text: z.string(), startMs: z.number().optional(), endMs: z.number().optional() })),
-    speakers: z.number().describe("Distinct speakers seen in this recognition so far. Stream-wide, not per-turn."),
-  }).describe("Committed turns. Append-only: previously sent turns are never revised."),
-  z.object({ type: z.literal("segment_due") })
-    .describe("The open recognition is nearing Google's 305s limit. The client must cut its recorder and reply with `segment`."),
-  z.object({ type: z.literal("error"), message: z.string() }),
-]);
-
 export const SttStatusResponseSchema = z.object({
   available: z.boolean().describe("Whether Google Cloud STT V2 is available."),
   authenticated: z.boolean().describe("Whether Google Cloud ADC authentication is active."),
   projectId: z.string().optional().describe("GCP Project ID in use."),
   defaultMinSpeakers: z.number().describe("Default minimum speaker count (1)."),
-  defaultMaxSpeakers: z.number().describe("Default maximum speaker count (2)."),
+  defaultMaxSpeakers: z.number().describe("Default maximum speaker count (1)."),
   supportedModels: z.array(z.string()).describe("Supported STT models."),
   error: z.string().optional().describe("Authentication or configuration error message."),
 });
@@ -331,903 +279,86 @@ export const ExecuteRequestSchema = z.object({
   id: z.string().optional().describe("Resource ID required when action is 'delete'."),
 });
 
-// --- OPENAPI 3.0.3 SPECIFICATION GENERATOR ---
+// --- OPENAPI 3.0.3 SPEC, generated from the schemas above so it can't drift from what the server validates ---
+
+const toSchema = (s: z.ZodType) => z.toJSONSchema(s, { target: "openapi-3.0", io: "input" }) as any;
+const json = (s: z.ZodType) => ({ content: { "application/json": { schema: toSchema(s) } } });
+const queryParams = (s: z.ZodType) => {
+  const { properties = {}, required = [] } = toSchema(s);
+  return Object.entries<any>(properties).map(([name, schema]) =>
+    ({ name, in: "query", required: required.includes(name), description: schema.description, schema }));
+};
+
+type Route = { tag: string; summary: string; body?: z.ZodType; query?: z.ZodType; res?: z.ZodType; stream?: string };
+const CORE = "Core & Pipeline", MEMORY = "Memory & Context", ADK = "ADK & Telemetry", TOOLS = "Integrations & Tools";
+const SSE = "text/event-stream";
+const ROUTES: Record<string, Route> = {
+  "get /api/config": { tag: TOOLS, summary: "Get client & environment configuration", res: ConfigResponseSchema },
+  "post /api/analyze": { tag: CORE, summary: "Analyze transcript & extract action plan", body: AnalyzeRequestSchema, res: PlanOutputSchema },
+  "post /api/transcribe-correct": { tag: CORE, summary: "Proofread & correct transcript", body: TranscribeCorrectRequestSchema, res: TranscribeCorrectResponseSchema },
+  "post /api/live": { tag: CORE, summary: "Real-time pipeline (NDJSON stream, one line per stage)", body: LivePipelineRequestSchema, stream: "application/x-ndjson" },
+  "post /api/transcribe-audio": { tag: CORE, summary: "Transcribe a base64 audio chunk", body: TranscribeAudioRequestSchema, res: TranscribeAudioResponseSchema },
+  "get /api/stt/status": { tag: CORE, summary: "Cloud STT & diarization readiness", res: SttStatusResponseSchema },
+  "post /api/memory/ingest": { tag: MEMORY, summary: "Ingest a transcript into Memory Bank", body: MemoryIngestRequestSchema },
+  "get /api/memory/retrieve": { tag: MEMORY, summary: "Retrieve memories & synthesize an answer", query: MemoryRetrieveQuerySchema, res: MemoryRetrieveResponseSchema },
+  "post /api/memory/retrieve": { tag: MEMORY, summary: "Retrieve memories & synthesize an answer", body: MemoryRetrieveQuerySchema, res: MemoryRetrieveResponseSchema },
+  "get /api/memory/search": { tag: MEMORY, summary: "Alias of GET /api/memory/retrieve", query: MemoryRetrieveQuerySchema, res: MemoryRetrieveResponseSchema },
+  "post /api/memory/search": { tag: MEMORY, summary: "Alias of POST /api/memory/retrieve", body: MemoryRetrieveQuerySchema, res: MemoryRetrieveResponseSchema },
+  "post /api/memory/sync": { tag: MEMORY, summary: "Sync local session files into Memory Bank", res: MemorySyncResponseSchema },
+  "get /api/memory/stats": { tag: MEMORY, summary: "Memory archive statistics" },
+  "get /api/tokens/stats": { tag: ADK, summary: "Token usage & context compaction metrics", query: TokenStatsQuerySchema, res: TokenStatsResponseSchema },
+  "get /api/tokens/telemetry/timeseries": { tag: ADK, summary: "Token telemetry time series", query: TokenTelemetryTimeSeriesQuerySchema, res: TokenTelemetryTimeSeriesResponseSchema },
+  "get /api/tokens/telemetry/aggregate": { tag: ADK, summary: "Aggregated token telemetry", query: TokenTelemetryAggregateQuerySchema, res: TokenTelemetryAggregateResponseSchema },
+  "get /api/tokens/telemetry/stream": { tag: ADK, summary: "Live token telemetry (SSE)", stream: SSE },
+  "get /api/memory/events": { tag: ADK, summary: "Query ADK & memory event history", query: EventsQuerySchema },
+  "get /api/adk/events": { tag: ADK, summary: "Alias of /api/memory/events", query: EventsQuerySchema },
+  "post /api/memory/events/clear": { tag: ADK, summary: "Clear event history", body: EventsClearRequestSchema },
+  "post /api/adk/events/clear": { tag: ADK, summary: "Alias of /api/memory/events/clear", body: EventsClearRequestSchema },
+  "get /api/memory/events/stream": { tag: ADK, summary: "Live event stream (SSE)", stream: SSE },
+  "get /api/adk/events/stream": { tag: ADK, summary: "Alias of /api/memory/events/stream", stream: SSE },
+  "post /api/search": { tag: TOOLS, summary: "Grounded web search", body: SearchRequestSchema, res: SearchResponseSchema },
+  "post /api/execute": { tag: TOOLS, summary: "Execute or undo a reviewed Workspace action", body: ExecuteRequestSchema },
+};
 
 export function getOpenApiSpec() {
+  const paths: Record<string, any> = {};
+  for (const [key, r] of Object.entries(ROUTES)) {
+    const [method, path] = key.split(" ");
+    const ok = r.res ? { description: "OK", ...json(r.res) }
+      : r.stream ? { description: "Stream", content: { [r.stream]: {} } } : { description: "OK" };
+    (paths[path] ??= {})[method] = {
+      tags: [r.tag],
+      summary: r.summary,
+      ...(r.query && { parameters: queryParams(r.query) }),
+      ...(r.body && { requestBody: { required: true, ...json(r.body) } }),
+      responses: {
+        "200": ok,
+        ...((r.body || r.query) && { "400": { description: "Invalid request", ...json(ErrorResponseSchema) } }),
+        "5XX": { description: "Server error, or a model stage that failed after retries (502)", ...json(ErrorResponseSchema) },
+      },
+    };
+  }
   return {
     openapi: "3.0.3",
     info: {
       title: "Scribant Agent API",
       version: "1.0.0",
-      description:
-        "OpenAPI specification for Scribant Agent — an intelligent AI transcription, plan extraction, memory, and workspace automation service.",
-      contact: {
-        name: "Scribant Engineering",
-      },
+      description: "Transcription, plan extraction, memory, and Google Workspace automation.",
     },
-    servers: [
-      {
-        url: "http://127.0.0.1:3000",
-        description: "Local Development Server",
-      },
-    ],
-    tags: [
-      { name: "Core & Pipeline", description: "Transcription, analysis, proofreading, and live streaming pipeline endpoints." },
-      { name: "Memory & Context", description: "Vertex AI Memory Bank ingestion, query retrieval, and local memory sync." },
-      { name: "ADK & Telemetry", description: "ADK event logs, event streaming (SSE), token metrics, and telemetry stats." },
-      { name: "Integrations & Tools", description: "Google Workspace tool execution, grounded web search, and client config." },
-    ],
-    paths: {
-      "/api/config": {
-        get: {
-          tags: ["Integrations & Tools"],
-          summary: "Get Client & Environment Configuration",
-          description: "Serves the public Google OAuth Client ID and active GCP/Vertex AI environment parameters.",
-          responses: {
-            "200": {
-              description: "Configuration object",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      googleClientId: { type: "string", nullable: true, example: "123456789-abc.apps.googleusercontent.com" },
-                      projectId: { type: "string", nullable: true, example: "agentclinicep04" },
-                      location: { type: "string", nullable: true, example: "us-central1" },
-                      agentEngineId: { type: "string", nullable: true, example: "1778474901334654976" },
-                      model: { type: "string", nullable: true, example: "gemini-3.7-flash" },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/analyze": {
-        post: {
-          tags: ["Core & Pipeline"],
-          summary: "Analyze Transcript & Extract Action Plan",
-          description: "Processes raw transcript text and extracts structured calendar events, tasks, and web search queries.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["text"],
-                  properties: {
-                    text: { type: "string", example: "Schedule a meeting with Sarah tomorrow at 3pm to review the quarterly budget." },
-                    currentLocalTime: { type: "string", format: "date-time", example: "2026-08-15T18:30:00Z" },
-                    liveSummary: { type: "string", example: "Discussing quarterly budget meeting with Sarah." },
-                    sessionId: { type: "string", example: "session-1723749000" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Extracted action plan",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      calendarEvents: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            title: { type: "string", example: "Meeting with Sarah" },
-                            start: { type: "string", example: "2026-08-16T15:00:00Z" },
-                            end: { type: "string", example: "2026-08-16T16:00:00Z" },
-                            allDay: { type: "boolean", example: false },
-                            description: { type: "string", example: "Review quarterly budget" },
-                          },
-                        },
-                      },
-                      tasks: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            title: { type: "string", example: "Prepare quarterly budget slides" },
-                            dueDate: { type: "string", example: "2026-08-16T12:00:00Z" },
-                          },
-                        },
-                      },
-                      searchQueries: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            query: { type: "string", example: "Quarterly budget review best practices" },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            "400": { description: "Invalid request payload", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/transcribe-correct": {
-        post: {
-          tags: ["Core & Pipeline"],
-          summary: "Proofread & Correct Transcript",
-          description: "Analyzes phonetic transcription errors and returns proofreading corrections and word alignments.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["text"],
-                  properties: {
-                    text: { type: "string", example: "Let us schedule a zoom meet in with the engineering lead." },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Proofreading result",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      corrections: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            original: { type: "string", example: "meet in" },
-                            corrected: { type: "string", example: "meeting" },
-                          },
-                        },
-                      },
-                      words: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            word: { type: "string", example: "meeting" },
-                            start: { type: "number", example: 1.2 },
-                            end: { type: "number", example: 1.6 },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            "400": { description: "Invalid request payload", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/live": {
-        post: {
-          tags: ["Core & Pipeline"],
-          summary: "Real-Time Pipeline (NDJSON Stream)",
-          description: "Streams proofread, summary, and classification updates incrementally using newline-delimited JSON (application/x-ndjson).",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["text"],
-                  properties: {
-                    text: { type: "string", example: "Incremental text chunk recorded..." },
-                    currentLocalTime: { type: "string", format: "date-time" },
-                    liveSummary: { type: "string" },
-                    withPlan: { type: "boolean", default: true },
-                    sessionId: { type: "string" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "NDJSON stream of stage events",
-              content: {
-                "application/x-ndjson": {
-                  schema: {
-                    type: "string",
-                    description: "Newline-delimited JSON stream yielding stage payloads: { stage: 'proof'|'summary'|'plan', ... }",
-                  },
-                },
-              },
-            },
-            "400": { description: "Invalid request payload", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/transcribe-audio": {
-        post: {
-          tags: ["Core & Pipeline"],
-          summary: "Transcribe Base64 Audio Chunk",
-          description: "Accepts a short base64-encoded audio chunk (8-10s) and returns verbatim transcription text using Gemini.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["audio"],
-                  properties: {
-                    audio: { type: "string", description: "Base64 encoded audio string", example: "GkXfo59ChoEBQveBAULygQ..." },
-                    mimeType: { type: "string", example: "audio/webm" },
-                    source: { type: "string", enum: ["mic", "tab"], example: "mic" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Transcribed text",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      text: { type: "string", example: "Speaker 1: Hi everyone\n\nSpeaker 2: Good morning" },
-                      source: { type: "string", enum: ["mic", "tab"], example: "mic" },
-                      provider: { type: "string", enum: ["gemini", "google_cloud_stt"], example: "google_cloud_stt" },
-                      speakerCount: { type: "number", example: 2 },
-                      turns: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            speaker: { type: "string", example: "Speaker 1" },
-                            text: { type: "string", example: "Hi everyone" },
-                            startMs: { type: "number", example: 0 },
-                            endMs: { type: "number", example: 800 },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            "400": { description: "Invalid request payload", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/stt/status": {
-        get: {
-          tags: ["Core & Pipeline"],
-          summary: "Get Google Cloud STT & Diarization Readiness",
-          description: "Returns availability, authentication status, and configuration for Google Cloud Speech-to-Text V2 speaker diarization.",
-          responses: {
-            "200": {
-              description: "STT status and capabilities",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      available: { type: "boolean", example: true },
-                      authenticated: { type: "boolean", example: true },
-                      projectId: { type: "string", example: "agentclinicep04" },
-                      defaultMinSpeakers: { type: "number", example: 1 },
-                      defaultMaxSpeakers: { type: "number", example: 2 },
-                      supportedModels: { type: "array", items: { type: "string" }, example: ["chirp_2", "latest_long", "default"] },
-                      error: { type: "string" },
-                    },
-                  },
-                },
-              },
-            },
-            "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/memory/ingest": {
-        post: {
-          tags: ["Memory & Context"],
-          summary: "Ingest Session/Transcript to Memory Bank",
-          description: "Ingests transcript text and plan metadata into Vertex AI Memory Bank for persistent context retrieval.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["text"],
-                  properties: {
-                    text: { type: "string", example: "Luis prefers feature branches and atomic commits." },
-                    sessionId: { type: "string", example: "session-101" },
-                    userId: { type: "string", example: "user-luis" },
-                    plan: { type: "object" },
-                    timestamp: { type: "string", format: "date-time" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Ingestion confirmation",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      memoryId: { type: "string", example: "mem-98765" },
-                    },
-                  },
-                },
-              },
-            },
-            "400": { description: "Invalid request payload", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Internal server error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/memory/retrieve": {
-        get: {
-          tags: ["Memory & Context"],
-          summary: "Retrieve Memories & Synthesize Answer (GET)",
-          description: "Queries Vertex AI Memory Bank and returns matching memories along with a direct synthesized answer.",
-          parameters: [
-            { name: "query", in: "query", required: true, schema: { type: "string" }, description: "Search query" },
-            { name: "userId", in: "query", required: false, schema: { type: "string" }, description: "Optional user ID" },
-          ],
-          responses: {
-            "200": { description: "Retrieved memories and synthesized answer", content: { "application/json": { schema: { $ref: "#/components/schemas/MemoryRetrieveResponse" } } } },
-            "400": { description: "Query required", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Retrieval error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-        post: {
-          tags: ["Memory & Context"],
-          summary: "Retrieve Memories & Synthesize Answer (POST)",
-          description: "Queries Vertex AI Memory Bank and returns matching memories along with a direct synthesized answer.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["query"],
-                  properties: {
-                    query: { type: "string", example: "What workflow preferences does Luis have?" },
-                    userId: { type: "string", example: "user-luis" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": { description: "Retrieved memories and synthesized answer", content: { "application/json": { schema: { $ref: "#/components/schemas/MemoryRetrieveResponse" } } } },
-            "400": { description: "Query required", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Retrieval error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/memory/search": {
-        get: {
-          tags: ["Memory & Context"],
-          summary: "Search Memory Bank (Alias to /retrieve)",
-          parameters: [
-            { name: "query", in: "query", required: true, schema: { type: "string" } },
-            { name: "userId", in: "query", required: false, schema: { type: "string" } },
-          ],
-          responses: {
-            "200": { description: "Retrieved memories and synthesized answer", content: { "application/json": { schema: { $ref: "#/components/schemas/MemoryRetrieveResponse" } } } },
-          },
-        },
-        post: {
-          tags: ["Memory & Context"],
-          summary: "Search Memory Bank (Alias to /retrieve)",
-          requestBody: {
-            required: true,
-            content: { "application/json": { schema: { type: "object", required: ["query"], properties: { query: { type: "string" }, userId: { type: "string" } } } } },
-          },
-          responses: {
-            "200": { description: "Retrieved memories and synthesized answer", content: { "application/json": { schema: { $ref: "#/components/schemas/MemoryRetrieveResponse" } } } },
-          },
-        },
-      },
-      "/api/memory/sync": {
-        post: {
-          tags: ["Memory & Context"],
-          summary: "Synchronize Local Session Files to Memory Bank",
-          description: "Scans local session JSON logs on disk and syncs un-indexed records into Vertex AI Memory Bank.",
-          responses: {
-            "200": {
-              description: "Sync operation results",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      syncedCount: { type: "number", example: 5 },
-                    },
-                  },
-                },
-              },
-            },
-            "500": { description: "Sync error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/tokens/stats": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Get Token Usage & Context Compaction Metrics",
-          description: "Computes compaction ratios, context savings, and token efficiency metrics for input text.",
-          parameters: [
-            { name: "text", in: "query", schema: { type: "string" }, description: "Raw transcript text" },
-            { name: "summary", in: "query", schema: { type: "string" }, description: "Summary text" },
-          ],
-          responses: {
-            "200": {
-              description: "Token metrics",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      compaction: { type: "object" },
-                      archive: { type: "object" },
-                      efficiency: { type: "object" },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/tokens/telemetry/timeseries": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Query Token Telemetry Time-Series",
-          description: "Returns aggregated time-series buckets (prompt, candidate, thinking, audio tokens, cost, latency) across all models and agents.",
-          parameters: [
-            { name: "from", in: "query", schema: { type: "number" }, description: "Start timestamp in ms" },
-            { name: "to", in: "query", schema: { type: "number" }, description: "End timestamp in ms" },
-            { name: "interval", in: "query", schema: { type: "string", enum: ["1s", "10s", "1m", "5m", "1h"], default: "1m" }, description: "Bucket interval" },
-            { name: "agent", in: "query", schema: { type: "string" }, description: "Filter by agent label" },
-            { name: "model", in: "query", schema: { type: "string" }, description: "Filter by model name" },
-            { name: "sessionId", in: "query", schema: { type: "string" }, description: "Filter by session ID" },
-            { name: "diarization", in: "query", schema: { type: "boolean" }, description: "Filter by whether diarization was active" },
-            { name: "provider", in: "query", schema: { type: "string" }, description: "Filter by provider (gemini, google_cloud_stt)" },
-            { name: "source", in: "query", schema: { type: "string" }, description: "Filter by audio/pipeline source (mic, tab, pipeline)" },
-          ],
-          responses: {
-            "200": {
-              description: "Time-series points array",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      interval: { type: "string", example: "1m" },
-                      points: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            timestamp: { type: "number" },
-                            timeLabel: { type: "string" },
-                            promptTokens: { type: "number" },
-                            candidatesTokens: { type: "number" },
-                            thoughtsTokens: { type: "number" },
-                            audioTokens: { type: "number" },
-                            totalTokens: { type: "number" },
-                            requestCount: { type: "number" },
-                            avgDurationMs: { type: "number" },
-                            costUsd: { type: "number" },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/tokens/telemetry/aggregate": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Get Aggregated Token Telemetry Statistics",
-          description: "Returns summary token usage, total cost, and breakdowns by sub-agent, model, modality, and pipeline stage.",
-          parameters: [
-            { name: "from", in: "query", schema: { type: "number" }, description: "Start timestamp in ms" },
-            { name: "to", in: "query", schema: { type: "number" }, description: "End timestamp in ms" },
-            { name: "sessionId", in: "query", schema: { type: "string" }, description: "Filter by session ID" },
-            { name: "diarization", in: "query", schema: { type: "boolean" }, description: "Filter by whether diarization was active" },
-            { name: "provider", in: "query", schema: { type: "string" }, description: "Filter by provider" },
-            { name: "source", in: "query", schema: { type: "string" }, description: "Filter by source" },
-          ],
-          responses: {
-            "200": {
-              description: "Aggregate summary and breakdowns",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      totalTokens: { type: "number" },
-                      totalPromptTokens: { type: "number" },
-                      totalCandidatesTokens: { type: "number" },
-                      totalThoughtsTokens: { type: "number" },
-                      totalAudioTokens: { type: "number" },
-                      totalCostUsd: { type: "number" },
-                      requestCount: { type: "number" },
-                      avgLatencyMs: { type: "number" },
-                      byAgent: { type: "object" },
-                      byModel: { type: "object" },
-                      byModality: { type: "object" },
-                      byStage: { type: "object" },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/tokens/telemetry/stream": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Stream Real-Time Token Telemetry (SSE)",
-          description: "Server-Sent Events stream emitting live TokenMetricRecord objects as model invocations complete.",
-          responses: {
-            "200": {
-              description: "text/event-stream real-time events",
-              content: {
-                "text/event-stream": {
-                  schema: { type: "string" },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/memory/stats": {
-        get: {
-          tags: ["Memory & Context"],
-          summary: "Get Memory Archive Statistics",
-          description: "Returns memory efficiency, token usage, and archive storage statistics.",
-          responses: {
-            "200": {
-              description: "Memory stats",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      archive: { type: "object" },
-                      efficiency: { type: "object" },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/memory/events": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Query Memory & ADK Events History",
-          description: "Query recorded execution events with multi-dimensional filtering.",
-          parameters: [
-            { name: "type", in: "query", schema: { type: "string" }, description: "Event type filter" },
-            { name: "author", in: "query", schema: { type: "string" }, description: "Author filter" },
-            { name: "status", in: "query", schema: { type: "string" }, description: "Status filter" },
-            { name: "search", in: "query", schema: { type: "string" }, description: "Search query string" },
-            { name: "sessionId", in: "query", schema: { type: "string" }, description: "Session ID filter" },
-            { name: "fromDisk", in: "query", schema: { type: "string" }, description: "Load from disk ('true'/'false')" },
-            { name: "limit", in: "query", schema: { type: "integer" }, description: "Max event count" },
-          ],
-          responses: {
-            "200": {
-              description: "Event query results",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      count: { type: "integer", example: 12 },
-                      events: { type: "array", items: { type: "object" } },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/adk/events": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Query ADK Events History (Alias to /api/memory/events)",
-          parameters: [
-            { name: "type", in: "query", schema: { type: "string" } },
-            { name: "author", in: "query", schema: { type: "string" } },
-            { name: "status", in: "query", schema: { type: "string" } },
-            { name: "search", in: "query", schema: { type: "string" } },
-            { name: "sessionId", in: "query", schema: { type: "string" } },
-            { name: "fromDisk", in: "query", schema: { type: "string" } },
-            { name: "limit", in: "query", schema: { type: "integer" } },
-          ],
-          responses: {
-            "200": { description: "Event query results", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, count: { type: "integer" }, events: { type: "array", items: { type: "object" } } } } } } },
-          },
-        },
-      },
-      "/api/memory/events/clear": {
-        post: {
-          tags: ["ADK & Telemetry"],
-          summary: "Clear Event History",
-          description: "Clears in-memory recorded event history and optionally deletes persisted disk logs.",
-          requestBody: {
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  properties: {
-                    clearDisk: { type: "boolean", example: true },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Clear operation result",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      ok: { type: "boolean", example: true },
-                      clearedDisk: { type: "boolean", example: true },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/adk/events/clear": {
-        post: {
-          tags: ["ADK & Telemetry"],
-          summary: "Clear Event History (Alias)",
-          responses: { "200": { description: "Clear operation result" } },
-        },
-      },
-      "/api/memory/events/stream": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Real-time Event Stream (SSE)",
-          description: "Establishes a Server-Sent Events (SSE) connection streaming live ADK & Memory events and heartbeats.",
-          responses: {
-            "200": {
-              description: "Event stream",
-              content: {
-                "text/event-stream": {
-                  schema: {
-                    type: "string",
-                    description: "Server-Sent Event stream emitting initial 'init' payload and real-time 'event' messages.",
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      "/api/adk/events/stream": {
-        get: {
-          tags: ["ADK & Telemetry"],
-          summary: "Real-time Event Stream (SSE) (Alias)",
-          responses: { "200": { description: "Event stream" } },
-        },
-      },
-      "/api/search": {
-        post: {
-          tags: ["Integrations & Tools"],
-          summary: "Grounded Web Search",
-          description: "Executes a web search agent and returns condensed and detailed answer tiers with grounding sources.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["query"],
-                  properties: {
-                    query: { type: "string", example: "What are the latest updates in TypeScript 5.8?" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Grounded search response",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      query: { type: "string", example: "What are the latest updates in TypeScript 5.8?" },
-                      condensed: { type: "string", example: "TypeScript 5.8 introduces optimized return type checks and performance gains." },
-                      inDepth: { type: "string", example: "TypeScript 5.8 includes granular type checking improvements..." },
-                      sources: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            uri: { type: "string", example: "https://devblogs.microsoft.com/typescript/announcing-typescript-5-8/" },
-                            title: { type: "string", example: "Announcing TypeScript 5.8" },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            "400": { description: "Query required", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Search error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-      "/api/execute": {
-        post: {
-          tags: ["Integrations & Tools"],
-          summary: "Execute Reviewed Tool Action",
-          description: "Executes an approved Google Workspace action (Calendar, Tasks, Drive) or reverts/deletes a created resource.",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["kind"],
-                  properties: {
-                    kind: { type: "string", example: "create_calendar_event" },
-                    item: {
-                      type: "object",
-                      example: { title: "Team Sync", start: "2026-08-20T10:00:00Z", end: "2026-08-20T11:00:00Z" },
-                    },
-                    accessToken: { type: "string", description: "Google OAuth access token or 'sandbox'", example: "sandbox" },
-                    action: { type: "string", enum: ["execute", "delete"], example: "execute" },
-                    id: { type: "string", description: "Target resource ID when action is 'delete'" },
-                  },
-                },
-              },
-            },
-          },
-          responses: {
-            "200": {
-              description: "Execution result",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      id: { type: "string", example: "mock-create_calendar_event-1723749000" },
-                      ok: { type: "boolean", example: true },
-                    },
-                  },
-                },
-              },
-            },
-            "400": { description: "Invalid action or parameters", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-            "500": { description: "Execution error", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
-          },
-        },
-      },
-    },
-    components: {
-      schemas: {
-        ErrorResponse: {
-          type: "object",
-          required: ["error"],
-          properties: {
-            error: { type: "string", example: "Text prompt is required and must be a string." },
-          },
-        },
-        MemoryRetrieveResponse: {
-          type: "object",
-          properties: {
-            ok: { type: "boolean", example: true },
-            answer: { type: "string", nullable: true, example: "Luis prefers feature branches." },
-            memories: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  text: { type: "string" },
-                  timestamp: { type: "string" },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
+    servers: [{ url: "http://127.0.0.1:3000", description: "Local development" }],
+    tags: [CORE, MEMORY, ADK, TOOLS].map(name => ({ name, description: name })),
+    paths,
   };
 }
 
-// --- EXPRESS ROUTES REGISTRATION ---
-
 export function registerOpenApiRoutes(app: Express) {
-  // 1. Raw OpenAPI 3.0 Spec JSON
+  const spec = getOpenApiSpec(); // static: the schemas never change at runtime
   app.get("/api/openapi.json", (_req: Request, res: Response) => {
-    res.setHeader("Content-Type", "application/json");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.json(getOpenApiSpec());
+    res.json(spec);
   });
 
-  // 2. Interactive Documentation UI (Scalar UI primary, optional Swagger UI query switch)
-  app.get("/docs", (req: Request, res: Response) => {
-    const uiMode = req.query.ui === "swagger" ? "swagger" : "scalar";
-
-    if (uiMode === "swagger") {
-      res.setHeader("Content-Type", "text/html");
-      res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Scribant Agent API Reference — Swagger UI</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
-  <style>
-    body { margin: 0; padding: 0; background: #0f172a; }
-    .swagger-ui { filter: invert(88%) hue-rotate(180deg); }
-  </style>
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.onload = () => {
-      SwaggerUIBundle({
-        url: '/api/openapi.json',
-        dom_id: '#swagger-ui',
-        deepLinking: true,
-        presets: [SwaggerUIBundle.presets.apis],
-      });
-    };
-  </script>
-</body>
-</html>`);
-      return;
-    }
-
-    // Default: Scalar UI (Modern, clean API reference)
-    res.setHeader("Content-Type", "text/html");
+  app.get("/docs", (_req: Request, res: Response) => {
     res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1249,11 +380,13 @@ export function registerOpenApiRoutes(app: Express) {
   });
 }
 
-// Self-check runner when executed directly via CLI
+// Self-check: every /api route server.ts registers is documented, and nothing documented is missing.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const spec = getOpenApiSpec();
-  if (!spec.openapi || !spec.info?.title || Object.keys(spec.paths).length === 0) {
-    throw new Error("[openapi] Invalid spec generated");
-  }
+  const served = [...readFileSync(new URL("./server.ts", import.meta.url), "utf8")
+    .matchAll(/app\.(get|post)\("(\/api\/[^"]+)"/g)].map(m => `${m[1]} ${m[2]}`).sort();
+  const documented = Object.keys(ROUTES).sort();
+  if (JSON.stringify(served) !== JSON.stringify(documented))
+    throw new Error(`[openapi] routes and spec differ:\n served ${served}\n documented ${documented}`);
+  getOpenApiSpec(); // every schema converts
   console.log("openapi self-check ✓");
 }

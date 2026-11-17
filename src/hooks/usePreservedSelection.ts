@@ -2,22 +2,12 @@ import { useLayoutEffect, useRef, useCallback, type RefObject } from "react";
 import { planSelectionRestore } from "../utils/selection";
 
 /**
- * Keeps the caret/selection of a CONTROLLED textarea stable when its value is rewritten by
- * something other than the user — speech appends, tab-audio chunks, proofread splices.
- *
- * Deliberately hooks the STATE, not any one writer: the transcript has three writers today
- * (and a fourth on the diarization branches), and `rec.onresult` is the most-rewritten block
- * in AudioRecorder. Watching the value covers every writer, present and future, without
- * putting a line of code in any of them.
- *
- * Returns markLocalEdit(), which the textarea's onChange must call so the user's own typing
- * is left alone.
- *
- * ponytail: this is a DOM-layer rescue for a data-model problem — `transcript` is one flat
- * string with no ownership, so concurrent writers can't be reconciled, only survived. Note the
- * app already holds the opposite policy for one writer (AudioRecorder's proofread effect bails
- * on editingRef rather than writing through). The real fix is the tagged-segment model the
- * diarization work is building; when that lands, this hook should be deleted, not ported.
+ * Keeps a controlled textarea's caret/selection stable when something other than the user
+ * rewrites its value (speech appends, tab chunks, proofread splices). Watches the value, not
+ * the writers, so every writer is covered. The textarea's onChange must call the returned
+ * markLocalEdit() so the user's own typing is left alone.
+ * ponytail: a DOM rescue for a data-model problem (one flat transcript string, no ownership).
+ * Delete it, don't port it, once the transcript is tagged segments.
  */
 export function usePreservedSelection(
   ref: RefObject<HTMLTextAreaElement | null>,
@@ -29,9 +19,7 @@ export function usePreservedSelection(
   const preRef = useRef<{ start: number; end: number } | null>(null);
   const skip = opts?.skip;
 
-  const markLocalEdit = useCallback(() => {
-    localRef.current = true;
-  }, []);
+  const markLocalEdit = useCallback(() => { localRef.current = true; }, []);
 
   // RENDER PHASE capture — this is the whole trick, and it cannot move into the effect below.
   // Assigning a new `value` to a textarea collapses its caret to the end of the text, so by

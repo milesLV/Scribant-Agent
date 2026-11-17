@@ -17,24 +17,14 @@ interface Options {
   sessionId: string;
 }
 
-// Captures a shared Chrome tab's audio and transcribes it server-side. The transport itself lives
-// in useLiveCapture, shared with the mic path; what's left here is only the getDisplayMedia
-// acquisition, which has no mic equivalent.
-//
-// Note that the tab and the mic are two independent recognitions, so a speaker label from one is
-// unrelated to a label from the other. Merging them would need the two MediaStreams mixed into one
-// before capture — a real option for the "room mic plus video call" setup, but it would also
-// collapse the mic/tab source tagging the transcript relies on.
+// Shared-tab capture: getDisplayMedia acquisition only; the transport is useLiveCapture (shared
+// with the mic). Tab and mic are separate recognitions, so their speaker labels are unrelated —
+// mixing the streams would fix that but lose the mic/tab source tagging.
 export function useTabAudioCapture({ onChunk, onError, sessionId }: Options) {
   const [isSharing, setIsSharing] = useState(false);
   const stopRef = useRef<(() => void) | null>(null);
 
-  const capture = useLiveCapture({
-    source: "tab",
-    sourceTag: "tab",
-    onChunk,
-    onNotice: onError,
-  });
+  const capture = useLiveCapture({ source: "tab", sourceTag: "tab", onChunk, onNotice: onError });
 
   const stop = useCallback(() => {
     capture.stop();

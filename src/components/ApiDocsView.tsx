@@ -19,7 +19,6 @@ interface OpenApiSpec {
     version: string;
     description: string;
   };
-  tags?: { name: string; description: string }[];
   paths: Record<string, Record<string, EndpointOperation>>;
 }
 
@@ -34,24 +33,34 @@ interface EndpointOperation {
     description?: string;
     schema?: { type?: string; default?: any };
   }[];
-  requestBody?: {
-    required?: boolean;
-    content?: {
-      "application/json"?: {
-        schema?: Record<string, any>;
-      };
-      "application/x-ndjson"?: {
-        schema?: Record<string, any>;
-      };
-    };
-  };
-  responses?: Record<
-    string,
-    {
-      description?: string;
-      content?: Record<string, { schema?: Record<string, any> }>;
-    }
-  >;
+  requestBody?: { content?: { "application/json"?: { schema?: Record<string, any> } } };
+}
+
+const H4 = "text-[11px] font-bold text-stone-700 uppercase tracking-wider font-mono";
+
+// A titled spec table: header labels plus one row of cells per entry.
+function SpecTable({ title, head, rows }: { title: string; head: string[]; rows: [string, React.ReactNode[]][] }) {
+  return (
+    <div className="space-y-2 pt-2">
+      <h4 className={H4}>{title}</h4>
+      <div className="bg-white border border-stone-200 rounded-xl overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-stone-50 border-b border-stone-200 text-[10px] text-stone-500 font-mono uppercase">
+              {head.map(h => <th key={h} className="p-2.5 font-bold">{h}</th>)}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-stone-100 text-xs">
+            {rows.map(([key, cells]) => (
+              <tr key={key} className="hover:bg-stone-50/50">
+                {cells.map((c, i) => <td key={i} className="p-2.5">{c}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 export default function ApiDocsView() {
@@ -71,16 +80,9 @@ export default function ApiDocsView() {
       })
       .then((data: OpenApiSpec) => {
         setSpec(data);
-        // Expand top endpoints by default
-        const initialExpanded: Record<string, boolean> = {};
-        Object.entries(data.paths || {}).forEach(([path, methods], idx) => {
-          Object.keys(methods).forEach((method) => {
-            if (idx < 5) {
-              initialExpanded[`${method.toUpperCase()}:${path}`] = true;
-            }
-          });
-        });
-        setExpandedEndpoints(initialExpanded);
+        // Expand the first five paths by default.
+        setExpandedEndpoints(Object.fromEntries(Object.entries(data.paths || {}).slice(0, 5)
+          .flatMap(([path, methods]) => Object.keys(methods).map(m => [`${m.toUpperCase()}:${path}`, true]))));
         setLoading(false);
       })
       .catch((err) => {
@@ -90,50 +92,20 @@ export default function ApiDocsView() {
       });
   }, []);
 
-  const toggleEndpoint = (key: string) => {
-    setExpandedEndpoints((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  // Flatten endpoints list
-  const allEndpoints = useMemo(() => {
-    if (!spec?.paths) return [];
-    const items: {
-      path: string;
-      method: string;
-      operation: EndpointOperation;
-      tag: string;
-      key: string;
-    }[] = [];
+  const allEndpoints = useMemo(() =>
+    Object.entries(spec?.paths || {}).flatMap(([path, methods]) =>
+      Object.entries(methods).map(([method, operation]) => ({
+        path, operation, method: method.toUpperCase(), tag: operation.tags?.[0] || "General", key: `${method.toUpperCase()}:${path}`,
+      }))), [spec]);
 
-    Object.entries(spec.paths).forEach(([path, methods]) => {
-      Object.entries(methods).forEach(([method, op]) => {
-        const tag = op.tags?.[0] || "General";
-        items.push({
-          path,
-          method: method.toUpperCase(),
-          operation: op,
-          tag,
-          key: `${method.toUpperCase()}:${path}`,
-        });
-      });
-    });
-    return items;
-  }, [spec]);
+  const tags = useMemo(() => ["All", ...new Set(allEndpoints.map(e => e.tag))], [allEndpoints]);
 
-  // Extract all available tags
-  const tags = useMemo(() => {
-    const set = new Set<string>();
-    allEndpoints.forEach((e) => set.add(e.tag));
-    return ["All", ...Array.from(set)];
-  }, [allEndpoints]);
-
-  // Filtered endpoints
   const filteredEndpoints = useMemo(() => {
     return allEndpoints.filter((item) => {
       const matchesTag = selectedTag === "All" || item.tag === selectedTag;
@@ -149,13 +121,9 @@ export default function ApiDocsView() {
     });
   }, [allEndpoints, selectedTag, searchQuery]);
 
-  // Group by Tag
   const groupedEndpoints = useMemo(() => {
     const groups: Record<string, typeof filteredEndpoints> = {};
-    filteredEndpoints.forEach((e) => {
-      if (!groups[e.tag]) groups[e.tag] = [];
-      groups[e.tag].push(e);
-    });
+    for (const e of filteredEndpoints) (groups[e.tag] ||= []).push(e);
     return groups;
   }, [filteredEndpoints]);
 
@@ -198,26 +166,19 @@ export default function ApiDocsView() {
 
           {/* Quick links to raw spec & standalone page */}
           <div className="flex items-center gap-2 shrink-0">
-            <a
-              href="/api/openapi.json"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-stone-600 hover:text-stone-900 bg-stone-100 hover:bg-stone-200/70 rounded-xl border border-stone-200/80 transition-all"
-            >
-              <Terminal className="w-3.5 h-3.5 text-stone-500" />
-              <span>Raw JSON Spec</span>
-              <ExternalLink className="w-3 h-3 text-stone-400" />
-            </a>
-            <a
-              href="/docs?ui=swagger"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-stone-600 hover:text-stone-900 bg-stone-100 hover:bg-stone-200/70 rounded-xl border border-stone-200/80 transition-all"
-            >
-              <Server className="w-3.5 h-3.5 text-stone-500" />
-              <span>Swagger UI</span>
-              <ExternalLink className="w-3 h-3 text-stone-400" />
-            </a>
+            {([["/api/openapi.json", Terminal, "Raw JSON Spec"], ["/docs", Server, "Interactive Docs"]] as const).map(([href, Icon, label]) => (
+              <a
+                key={href}
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-stone-600 hover:text-stone-900 bg-stone-100 hover:bg-stone-200/70 rounded-xl border border-stone-200/80 transition-all"
+              >
+                <Icon className="w-3.5 h-3.5 text-stone-500" />
+                <span>{label}</span>
+                <ExternalLink className="w-3 h-3 text-stone-400" />
+              </a>
+            ))}
           </div>
         </div>
 
@@ -310,7 +271,7 @@ export default function ApiDocsView() {
                   >
                     {/* Header Bar */}
                     <button
-                      onClick={() => toggleEndpoint(ep.key)}
+                      onClick={() => setExpandedEndpoints(prev => ({ ...prev, [ep.key]: !prev[ep.key] }))}
                       className="w-full text-left p-4 flex items-center justify-between gap-3 hover:bg-stone-50/70 transition-colors cursor-pointer"
                     >
                       <div className="flex flex-wrap items-center gap-3">
@@ -347,97 +308,35 @@ export default function ApiDocsView() {
                           </p>
                         )}
 
-                        {/* Query / Path Parameters */}
-                        {ep.operation.parameters && ep.operation.parameters.length > 0 && (
-                          <div className="space-y-2 pt-2">
-                            <h4 className="text-[11px] font-bold text-stone-700 uppercase tracking-wider font-mono">
-                              Parameters
-                            </h4>
-                            <div className="bg-white border border-stone-200 rounded-xl overflow-x-auto">
-                              <table className="w-full text-left border-collapse">
-                                <thead>
-                                  <tr className="bg-stone-50 border-b border-stone-200 text-[10px] text-stone-500 font-mono uppercase">
-                                    <th className="p-2.5 font-bold">Parameter</th>
-                                    <th className="p-2.5 font-bold">In</th>
-                                    <th className="p-2.5 font-bold">Type</th>
-                                    <th className="p-2.5 font-bold">Description</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-stone-100 text-xs">
-                                  {ep.operation.parameters.map((param) => (
-                                    <tr key={param.name} className="hover:bg-stone-50/50">
-                                      <td className="p-2.5 font-mono font-bold text-stone-800">
-                                        {param.name}
-                                        {param.required && (
-                                          <span className="ml-1 text-[10px] text-red-600 font-sans font-bold">
-                                            *required
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="p-2.5 font-mono text-stone-500">{param.in}</td>
-                                      <td className="p-2.5 font-mono text-amber-700">
-                                        {param.schema?.type || "string"}
-                                      </td>
-                                      <td className="p-2.5 text-stone-600">{param.description || "—"}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
+                        {!!ep.operation.parameters?.length && (
+                          <SpecTable title="Parameters" head={["Parameter", "In", "Type", "Description"]}
+                            rows={ep.operation.parameters.map(param => [param.name, [
+                              <span className="font-mono font-bold text-stone-800">
+                                {param.name}
+                                {param.required && <span className="ml-1 text-[10px] text-red-600 font-sans font-bold">*required</span>}
+                              </span>,
+                              <span className="font-mono text-stone-500">{param.in}</span>,
+                              <span className="font-mono text-amber-700">{param.schema?.type || "string"}</span>,
+                              <span className="text-stone-600">{param.description || "—"}</span>,
+                            ]])} />
                         )}
 
-                        {/* JSON Request Body Properties */}
                         {Object.keys(reqProps).length > 0 && (
-                          <div className="space-y-2 pt-2">
-                            <h4 className="text-[11px] font-bold text-stone-700 uppercase tracking-wider font-mono">
-                              Request Body (JSON)
-                            </h4>
-                            <div className="bg-white border border-stone-200 rounded-xl overflow-x-auto">
-                              <table className="w-full text-left border-collapse">
-                                <thead>
-                                  <tr className="bg-stone-50 border-b border-stone-200 text-[10px] text-stone-500 font-mono uppercase">
-                                    <th className="p-2.5 font-bold">Field</th>
-                                    <th className="p-2.5 font-bold">Type</th>
-                                    <th className="p-2.5 font-bold">Required</th>
-                                    <th className="p-2.5 font-bold">Description</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-stone-100 text-xs">
-                                  {Object.entries(reqProps).map(([propName, propDef]: [string, any]) => (
-                                    <tr key={propName} className="hover:bg-stone-50/50">
-                                      <td className="p-2.5 font-mono font-bold text-stone-800">
-                                        {propName}
-                                      </td>
-                                      <td className="p-2.5 font-mono text-amber-700">
-                                        {propDef.type || "string"}
-                                      </td>
-                                      <td className="p-2.5 font-sans">
-                                        {requiredFields.has(propName) ? (
-                                          <span className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-800 rounded">
-                                            Required
-                                          </span>
-                                        ) : (
-                                          <span className="text-stone-400 text-[10px]">Optional</span>
-                                        )}
-                                      </td>
-                                      <td className="p-2.5 text-stone-600">
-                                        {propDef.description || "—"}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
+                          <SpecTable title="Request Body (JSON)" head={["Field", "Type", "Required", "Description"]}
+                            rows={Object.entries(reqProps).map(([propName, propDef]: [string, any]) => [propName, [
+                              <span className="font-mono font-bold text-stone-800">{propName}</span>,
+                              <span className="font-mono text-amber-700">{propDef.type || "string"}</span>,
+                              requiredFields.has(propName)
+                                ? <span className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-800 rounded">Required</span>
+                                : <span className="text-stone-400 text-[10px]">Optional</span>,
+                              <span className="text-stone-600">{propDef.description || "—"}</span>,
+                            ]])} />
                         )}
 
                         {/* cURL Snippet */}
                         <div className="space-y-1.5 pt-2">
                           <div className="flex items-center justify-between">
-                            <h4 className="text-[11px] font-bold text-stone-700 uppercase tracking-wider font-mono">
-                              cURL Command
-                            </h4>
+                            <h4 className={H4}>cURL Command</h4>
                             <button
                               onClick={() => copyToClipboard(sampleCurl, `curl:${ep.key}`)}
                               className="flex items-center gap-1 text-[11px] font-semibold text-stone-500 hover:text-stone-800 cursor-pointer"

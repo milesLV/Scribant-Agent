@@ -113,12 +113,12 @@ export function buildOrchestrator(stages: Set<Stage>): SequentialAgent {
 export interface OrchestratorResult {
   proof?: { text: string; corrected: string; corrections: any[]; words: any[] };
   plan?: any;
+  errors: Partial<Record<Stage, string>>; // stages that ran out of retries, with the reason
 }
 
 // Runs the orchestrator and reports each stage the moment it lands (that streaming is what /api/live
-// is built on). Retry policy is askAgent's: back off, then retry. A stage
-// that runs out of road reports its own error and the REST of the pipeline continues — a 429 on the
-// classifier must not cost the user their proofread.
+// is built on). Retry policy is nextAttempt's. A stage that runs out of road reports its own error
+// and the REST of the pipeline continues — a 429 on the classifier must not cost the proofread.
 export async function runOrchestrator(opts: {
   stages: Set<Stage>;
   text: string;
@@ -140,6 +140,7 @@ export async function runOrchestrator(opts: {
   if (!stages.has("proof")) state.corrected = text;
 
   const done = new Set<Stage>();
+  const errors: Partial<Record<Stage, string>> = {};
   const attempts: Record<string, number> = { proof: 0, summary: 0, plan: 0 };
   const emit = (stage: Stage, payload: any) => { done.add(stage); onStage?.(stage, payload); };
 
@@ -149,12 +150,7 @@ export async function runOrchestrator(opts: {
     const remaining = new Set([...stages].filter(s => !done.has(s)));
     if (!remaining.size) break;
 
-    const runner = new Runner({
-      appName: "scribant",
-      agent: buildOrchestrator(remaining),
-      sessionService,
-      memoryService: getMemoryService(),
-    });
+    const runner = new Runner({ appName: "scribant", agent: buildOrchestrator(remaining), sessionService, memoryService: getMemoryService() });
 
     // Drain the whole run even after an error: a failing sub-agent's PARALLEL sibling may still be
     // in flight, and abandoning the generator there would throw away a summary that succeeded — and
@@ -168,20 +164,11 @@ export async function runOrchestrator(opts: {
     })) {
       emitAdkEvent(ev);
       if (ev.usageMetadata) {
-        const author = ev.author || "orchestrator";
-        const stage = STAGE_OF[author] || "orchestrator";
+        const agent = ev.author || "orchestrator";
         recordTokenUsage({
-          model: MODEL,
-          agent: author,
-          stage,
-          modality: "text",
-          durationMs: Date.now() - iterStartTime,
-          usage: ev.usageMetadata,
-          diarizationEnabled: isDiarized,
-          provider: "gemini",
-          source: opts.source || "pipeline",
-          sessionId: opts.sessionId,
-          userId: opts.userId,
+          model: MODEL, agent, stage: STAGE_OF[agent] || "orchestrator", modality: "text", provider: "gemini",
+          durationMs: Date.now() - iterStartTime, usage: ev.usageMetadata, diarizationEnabled: isDiarized,
+          source: opts.source || "pipeline", sessionId: opts.sessionId, userId: opts.userId,
         });
       }
       if (ev.errorCode && String(ev.errorCode).toUpperCase() !== "STOP") {
@@ -210,37 +197,32 @@ export async function runOrchestrator(opts: {
     let sleepS = 0;
     for (const [stage, ev] of failures) {
       if (done.has(stage)) continue; // it errored but still delivered — nothing to retry
-      const { msg, isQuota, isOverload, stated } = classifyError(ev);
-      const plan = (isQuota || isOverload)
-        ? nextAttempt(++attempts[stage], stated)
-        : null;
+      const { msg, isQuota, isOverload, isAuth, stated } = classifyError(ev);
+      const wait = isQuota || isOverload ? nextAttempt(++attempts[stage], stated) : null;
 
-      if (!plan) {
+      if (wait == null) {
         // Out of road for this stage. Report it, make sure the rest can still run, keep going.
-        const message = `Model error ${ev.errorCode}: ${msg.slice(0, 200)}`;
+        const message = isAuth
+          ? "Vertex AI auth failed — run `gcloud auth application-default login` and restart the server."
+          : `Model error ${ev.errorCode}: ${msg.slice(0, 200)}`;
+        errors[stage] = message;
         console.error(`[orchestrator] ${stage} stage failed — ${message}`);
         onStage?.(stage, { error: message });
         done.add(stage);
-        if (stage === "proof") state.corrected = state.corrected ?? text; // degrade to raw text
+        if (stage === "proof") state.corrected ??= text; // degrade to raw text
         continue;
       }
 
-      sleepS = Math.max(sleepS, plan.sleepS);
-      console.warn(
-        `[orchestrator] ${ev.errorCode} on ${ev.author}` +
-        `${plan.sleepS ? `, waiting ${plan.sleepS}s` : ""} (stage ${stage}, attempt ${attempts[stage]})`
-      );
+      sleepS = Math.max(sleepS, wait);
+      console.warn(`[orchestrator] ${ev.errorCode} on ${ev.author}, waiting ${wait}s (stage ${stage}, attempt ${attempts[stage]})`);
     }
     if (sleepS) await sleep(sleepS * 1000);
   }
 
-  return { proof: state.proof, plan: state.plan };
+  return { proof: state.proof, plan: state.plan, errors };
 }
 
-// ponytail: self-check pins the tree shape per stage set and the deterministic steps' data flow.
-// The steps' logic itself is already pinned by the pure functions they call (transcriber,
-// server-utils, transcript). Run: tsx orchestrator.ts — no API key needed, no model is called.
-// import.meta.url is empty in the esbuild CJS bundle, so self-checks stay dev-only.
+// Self-check: tree shape per stage set + the deterministic steps' data flow. No model is called.
 if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (async () => {
   const shape = (stages: Stage[]) =>
     buildOrchestrator(new Set(stages)).subAgents.map(a =>
@@ -254,7 +236,7 @@ if (import.meta.url && process.argv[1] === fileURLToPath(import.meta.url)) (asyn
   ]);
   // A small tick skips the expensive classifier; one agent must NOT be wrapped in a ParallelAgent.
   assert.deepEqual(shape(["proof", "summary"]), ["proofreader", "correction_applier", "live_summarizer"]);
-  // Finalize (/api/analyze) and proofread-only (/api/transcribe-correct).
+  // /api/analyze (plan only) and /api/transcribe-correct (proof only).
   assert.deepEqual(shape(["plan"]), ["intent_classifier", "plan_resolver"]);
   assert.deepEqual(shape(["proof"]), ["proofreader", "correction_applier"]);
   // What a resume after a summary failure rebuilds: the proof stage must not run twice.

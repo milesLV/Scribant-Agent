@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import {
   Zap,
   Layers,
-  Database,
   Sparkles,
   BarChart3,
   Search,
@@ -13,7 +12,6 @@ import {
   DollarSign,
   Radio,
   Mic,
-  FileText,
   Activity,
   Calendar,
   Filter,
@@ -24,54 +22,126 @@ import {
   TokenMetricRecord,
   TimeSeriesPoint,
   TokenAggregateStats,
+  AggregateDimensionStats,
   TimeRangePreset,
   TimeRangeConfig,
 } from "../types";
 
-export const TIME_RANGE_PRESETS: Record<Exclude<TimeRangePreset, "custom">, TimeRangeConfig> = {
-  "10m": {
-    preset: "10m",
-    label: "10m",
-    durationMs: 10 * 60 * 1000,
-    defaultInterval: "10s",
-    supportedIntervals: ["1s", "10s", "30s", "1m"],
-  },
-  "30m": {
-    preset: "30m",
-    label: "30m",
-    durationMs: 30 * 60 * 1000,
-    defaultInterval: "1m",
-    supportedIntervals: ["10s", "30s", "1m", "5m"],
-  },
-  "1h": {
-    preset: "1h",
-    label: "1h",
-    durationMs: 60 * 60 * 1000,
-    defaultInterval: "1m",
-    supportedIntervals: ["1m", "5m", "15m"],
-  },
-  "4h": {
-    preset: "4h",
-    label: "4h",
-    durationMs: 4 * 60 * 60 * 1000,
-    defaultInterval: "5m",
-    supportedIntervals: ["1m", "5m", "15m", "30m", "1h"],
-  },
-  "24h": {
-    preset: "24h",
-    label: "24h",
-    durationMs: 24 * 60 * 60 * 1000,
-    defaultInterval: "30m",
-    supportedIntervals: ["5m", "15m", "30m", "1h", "4h"],
-  },
-  "7d": {
-    preset: "7d",
-    label: "7d",
-    durationMs: 7 * 24 * 60 * 60 * 1000,
-    defaultInterval: "4h",
-    supportedIntervals: ["1h", "4h", "1d"],
-  },
-};
+const MIN = 60_000;
+const presetRows: [Exclude<TimeRangePreset, "custom">, number, string, string[]][] = [
+  ["10m", 10 * MIN, "10s", ["1s", "10s", "30s", "1m"]],
+  ["30m", 30 * MIN, "1m", ["10s", "30s", "1m", "5m"]],
+  ["1h", 60 * MIN, "1m", ["1m", "5m", "15m"]],
+  ["4h", 240 * MIN, "5m", ["1m", "5m", "15m", "30m", "1h"]],
+  ["24h", 1440 * MIN, "30m", ["5m", "15m", "30m", "1h", "4h"]],
+  ["7d", 10080 * MIN, "4h", ["1h", "4h", "1d"]],
+];
+const TIME_RANGE_PRESETS = Object.fromEntries(presetRows.map(([preset, durationMs, defaultInterval, supportedIntervals]) =>
+  [preset, { preset, label: preset, durationMs, defaultInterval, supportedIntervals }])) as Record<Exclude<TimeRangePreset, "custom">, TimeRangeConfig>;
+
+// One KPI card in the header row. Accent classes are passed whole so Tailwind can see them.
+function Kpi({ icon: Icon, title, badge, accent, value, unit, children }: {
+  icon: typeof Zap; title: string; badge: string; accent: { icon: string; badge: string };
+  value: React.ReactNode; unit: string; children: React.ReactNode;
+}) {
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3.5 shadow-xs flex flex-col justify-between space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-mono font-semibold uppercase text-stone-500 flex items-center gap-1.5">
+          <Icon className={`w-3.5 h-3.5 ${accent.icon}`} />
+          {title}
+        </span>
+        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${accent.badge}`}>{badge}</span>
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className="text-2xl font-bold font-mono text-stone-900">{value}</span>
+        <span className="text-xs font-mono text-stone-500">{unit}</span>
+      </div>
+      <div className="text-[11px] text-stone-500 flex items-center justify-between border-t border-stone-100 pt-1.5 font-mono">{children}</div>
+    </div>
+  );
+}
+const AMBER = { icon: "text-amber-600", badge: "bg-amber-50 text-amber-800 border-amber-200" };
+const BLUE = { icon: "text-blue-600", badge: "bg-blue-50 text-blue-800 border-blue-200" };
+const EMERALD = { icon: "text-emerald-600", badge: "bg-emerald-50 text-emerald-800 border-emerald-200" };
+
+// One option in a segmented control. Colour classes are passed whole so Tailwind can see them.
+function Seg({ on, onClick, onClass = "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200", offClass = "text-stone-600 hover:text-stone-900", extra = "", children }: {
+  on: boolean; onClick: () => void; onClass?: string; offClass?: string; extra?: string; children: React.ReactNode;
+}) {
+  return (
+    <button type="button" onClick={onClick}
+      className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${extra} ${on ? onClass : offClass}`}>
+      {children}
+    </button>
+  );
+}
+
+// Stacked-bar segments, top to bottom; also the chart legend.
+const SEGMENTS = [
+  ["thoughtsTokens", "bg-purple-500", "Thoughts (Reasoning)"],
+  ["candidatesTokens", "bg-emerald-500", "Candidates (Output)"],
+  ["audioTokens", "bg-blue-500", "Audio (STT)"],
+  ["promptTokens", "bg-amber-500", "Prompt (Input)"],
+] as const;
+
+const RECEIPT_COLS = ["Timestamp", "Agent / Stage", "Features / Tags", "Modality", "Model", ">Prompt", ">Output", ">Thinking", ">Total", ">Latency", ">Cost"];
+
+// One "by X" aggregate card. Colour classes are passed whole so Tailwind can see them.
+function Breakdown({ title, Icon, data, label, tone }: {
+  title: string; Icon: typeof Zap; data?: Record<string, AggregateDimensionStats>; label: (k: string) => string;
+  tone: { box: string; head: string; icon: string; row: string; tok: string };
+}) {
+  if (!data || !Object.keys(data).length) return null;
+  return (
+    <div className={`p-3 rounded-xl space-y-2 border ${tone.box}`}>
+      <span className={`text-[11px] font-mono font-bold uppercase flex items-center gap-1 ${tone.head}`}>
+        <Icon className={`w-3 h-3 ${tone.icon}`} />
+        {title}
+      </span>
+      <div className="space-y-2">
+        {Object.entries(data).map(([k, d]) => (
+          <div key={k} className={`p-2.5 bg-white rounded-lg border flex justify-between items-center font-mono text-xs ${tone.row}`}>
+            <div>
+              <span className="font-bold capitalize text-stone-900">{label(k)}</span>
+              <span className="text-[10px] text-stone-500 block">{d.requests} requests • ${d.costUsd.toFixed(5)}</span>
+            </div>
+            <div className="text-right">
+              <span className={`font-bold ${tone.tok}`}>{d.tokens.toLocaleString()} tok</span>
+              <span className="text-[10px] text-stone-500 block">{d.percent}%</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// One stage of the compaction pipeline: a token count, an optional savings badge, and the text.
+function Pane({ title, tokens, tokClass, badge, text, empty }: {
+  title: string; tokens: number; tokClass: string; badge?: [string, string]; text: string; empty: string;
+}) {
+  return (
+    <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+      <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
+        <span>{title}</span>
+        <div className="flex items-center gap-1">
+          {badge && <span className={`text-[10px] px-1.5 py-0.2 rounded border font-semibold ${badge[1]}`}>{badge[0]}</span>}
+          <span className={`font-bold ${tokClass}`}>{tokens} tokens</span>
+        </div>
+      </div>
+      <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
+        {text || <span className="text-stone-400 italic">{empty}</span>}
+      </div>
+    </div>
+  );
+}
+
+const TABS = [
+  ["timeseries", BarChart3, "Time-Series Telemetry"],
+  ["subagents", Cpu, "Sub-Agent Attribution"],
+  ["compaction", Layers, "Context Compaction & Memory"],
+] as const;
 
 interface TokenVisualizerProps {
   events: AdkEvent[];
@@ -103,10 +173,7 @@ export default function TokenVisualizer({
   const [providerFilter, setProviderFilter] = useState<"all" | "gemini" | "google_cloud_stt">("all");
   const [customFrom, setCustomFrom] = useState<string>("");
   const [customTo, setCustomTo] = useState<string>("");
-  const [showCustomPicker, setShowCustomPicker] = useState<boolean>(false);
   const [hoveredPoint, setHoveredPoint] = useState<TimeSeriesPoint | null>(null);
-
-  const sseRef = useRef<EventSource | null>(null);
 
   const getTimeBounds = () => {
     const now = Date.now();
@@ -119,39 +186,24 @@ export default function TokenVisualizer({
     return { from: now - (preset?.durationMs || 1800000), to: now };
   };
 
-  // Build filter query string
-  const buildQuerySuffix = () => {
-    let s = "";
-    if (diarizationFilter === "diarized") s += "&diarization=true";
-    if (diarizationFilter === "non_diarized") s += "&diarization=false";
-    if (providerFilter !== "all") s += `&provider=${encodeURIComponent(providerFilter)}`;
-    return s;
+  // Time-series + aggregate for the current range and filters.
+  const refreshTelemetry = () => {
+    const { from, to } = getTimeBounds();
+    const filters = (diarizationFilter === "all" ? "" : `&diarization=${diarizationFilter === "diarized"}`)
+      + (providerFilter === "all" ? "" : `&provider=${encodeURIComponent(providerFilter)}`);
+    const getJson = (url: string) => fetch(url).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
+    return Promise.all([
+      getJson(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}${filters}`).then(d => setTimeSeries(d.points || [])),
+      getJson(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}${filters}`).then(setAggregate),
+    ]);
   };
 
-  // Fetch standard token & compaction stats with time boundaries
   const fetchTokenStats = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const { from, to } = getTimeBounds();
-      const querySuffix = buildQuerySuffix();
-      const [statsRes, tsRes, aggRes] = await Promise.all([
-        fetch(`/api/tokens/stats?text=${encodeURIComponent(rawTranscript)}&summary=${encodeURIComponent(liveSummary)}`),
-        fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}${querySuffix}`),
-        fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}${querySuffix}`),
-      ]);
-
-      if (statsRes.ok) {
-        const data = await statsRes.json();
-        setStats(data);
-      }
-      if (tsRes.ok) {
-        const tsData = await tsRes.json();
-        setTimeSeries(tsData.points || []);
-      }
-      if (aggRes.ok) {
-        const aggData = await aggRes.json();
-        setAggregate(aggData);
-      }
+      const statsReq = fetch(`/api/tokens/stats?text=${encodeURIComponent(rawTranscript)}&summary=${encodeURIComponent(liveSummary)}`)
+        .then(r => r.ok && r.json().then(setStats));
+      await Promise.all([statsReq, refreshTelemetry()]);
     } catch (e) {
       console.warn("Failed to fetch token telemetry:", e);
     } finally {
@@ -165,67 +217,24 @@ export default function TokenVisualizer({
 
   const handleSelectPreset = (p: TimeRangePreset) => {
     setTimeRange(p);
-    if (p === "custom") {
-      setShowCustomPicker(true);
-      if (!customFrom) {
-        const dFrom = new Date(Date.now() - 3600000);
-        setCustomFrom(dFrom.toISOString().slice(0, 16));
-      }
-      if (!customTo) {
-        const dTo = new Date();
-        setCustomTo(dTo.toISOString().slice(0, 16));
-      }
-    } else {
-      setShowCustomPicker(false);
-      const cfg = TIME_RANGE_PRESETS[p];
-      if (cfg) {
-        setInterval(cfg.defaultInterval);
-      }
-    }
+    if (p !== "custom") return setInterval(TIME_RANGE_PRESETS[p].defaultInterval);
+    if (!customFrom) setCustomFrom(new Date(Date.now() - 3600000).toISOString().slice(0, 16));
+    if (!customTo) setCustomTo(new Date().toISOString().slice(0, 16));
   };
 
-  // Connect to SSE token telemetry stream
+  // Live receipts. EventSource reconnects on its own after a drop.
   useEffect(() => {
-    let es: EventSource | null = null;
-    const connectSSE = () => {
+    const es = new EventSource("/api/tokens/telemetry/stream");
+    es.onmessage = (ev) => {
       try {
-        es = new EventSource("/api/tokens/telemetry/stream");
-        sseRef.current = es;
-
-        es.onmessage = (ev) => {
-          try {
-            const record = JSON.parse(ev.data) as TokenMetricRecord;
-            setLiveRecords((prev) => [record, ...prev.slice(0, 49)]);
-            // Refresh time-series and aggregate stats on new record
-            const { from, to } = getTimeBounds();
-            const querySuffix = buildQuerySuffix();
-            fetch(`/api/tokens/telemetry/timeseries?from=${from}&to=${to}&interval=${interval}${querySuffix}`)
-              .then((r) => r.json())
-              .then((d) => setTimeSeries(d.points || []))
-              .catch(() => {});
-            fetch(`/api/tokens/telemetry/aggregate?from=${from}&to=${to}${querySuffix}`)
-              .then((r) => r.json())
-              .then((d) => setAggregate(d))
-              .catch(() => {});
-          } catch (err) {
-            console.warn("Failed to parse token SSE:", err);
-          }
-        };
-
-        es.onerror = () => {
-          es?.close();
-          setTimeout(connectSSE, 4000);
-        };
+        setLiveRecords((prev) => [JSON.parse(ev.data) as TokenMetricRecord, ...prev.slice(0, 49)]);
+        refreshTelemetry().catch(() => {});
       } catch (err) {
-        console.warn("Token SSE error:", err);
+        console.warn("Failed to parse token SSE:", err);
       }
     };
-
-    connectSSE();
-    return () => {
-      es?.close();
-    };
-  }, [timeRange, interval, customFrom, customTo]);
+    return () => es.close();
+  }, [timeRange, interval, customFrom, customTo, diarizationFilter, providerFilter]);
 
   // Test interactive memory recall
   const handleTestMemoryRecall = async () => {
@@ -237,10 +246,7 @@ export default function TokenVisualizer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: queryInput.trim() }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setTestResult(data);
-      }
+      if (res.ok) setTestResult(await res.json());
     } catch (e) {
       console.warn("Memory recall test failed:", e);
     } finally {
@@ -260,13 +266,8 @@ export default function TokenVisualizer({
   });
 
   const latestMemories: { text: string; author: string; timestamp?: string }[] =
-    latestRetrieveEvent?.actions?.stateDelta?.memories ||
-    latestRetrieveEvent?.stateDelta?.memories ||
-    [];
-
-  const displayedMemories = testResult?.memories?.length
-    ? testResult.memories
-    : latestMemories;
+    latestRetrieveEvent?.actions?.stateDelta?.memories || latestRetrieveEvent?.stateDelta?.memories || [];
+  const displayedMemories = testResult?.memories?.length ? testResult.memories : latestMemories;
 
   const rawTokens = stats?.compaction?.rawTokens ?? Math.ceil(rawTranscript.length / 3.8);
   const summaryTokens = stats?.compaction?.compactedTokens ?? Math.ceil(liveSummary.length / 3.8);
@@ -282,25 +283,21 @@ export default function TokenVisualizer({
   const deltaSavingsRatio = rawTokens > deltaTokens && rawTokens > 0
     ? Number((((rawTokens - deltaTokens) / rawTokens) * 100).toFixed(1))
     : 0;
-  const deltaTokensSaved = Math.max(0, rawTokens - deltaTokens);
 
   // Memory Bank Token Efficiency Calculations
   const archiveTokens = stats?.archive?.totalArchiveTokens || 14850;
   const archiveSessionCount = stats?.archive?.sessionCount || 12;
   const injectedMemoryTokens = testResult?.efficiency?.injectedMemoryTokens || (displayedMemories.length > 0 ? 85 : 0);
   const legacyPromptTokens = archiveTokens + 320;
-  const memoryBankPromptTokens = (injectedMemoryTokens > 0 ? injectedMemoryTokens : 85) + 320;
+  const shownMemoryTokens = injectedMemoryTokens > 0 ? injectedMemoryTokens : 85;
+  const memoryBankPromptTokens = shownMemoryTokens + 320;
   const memSavedTokens = Math.max(0, legacyPromptTokens - memoryBankPromptTokens);
   const memSavingsPercent = legacyPromptTokens > 0
     ? Number(((memSavedTokens / legacyPromptTokens) * 100).toFixed(1))
     : 97.4;
   const memMultiplier = (legacyPromptTokens / memoryBankPromptTokens).toFixed(1) + "x";
 
-  // Maximum tokens across time-series buckets for chart scale
-  const maxBucketTokens = Math.max(
-    ...timeSeries.map((p) => p.totalTokens),
-    100
-  );
+  const maxBucketTokens = Math.max(...timeSeries.map((p) => p.totalTokens), 100); // chart scale
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-stone-50 text-stone-900 p-4 space-y-4 overflow-y-auto font-sans">
@@ -308,95 +305,23 @@ export default function TokenVisualizer({
       {/* Top 4 KPI Metrics Header */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
         
-        {/* Card 1: Total Model Tokens */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3.5 shadow-xs flex flex-col justify-between space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-500 flex items-center gap-1.5">
-              <Zap className="w-3.5 h-3.5 text-amber-600" />
-              Total Model Tokens
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
-              Live Billing
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-stone-900">
-              {(aggregate?.totalTokens || 0).toLocaleString()}
-            </span>
-            <span className="text-xs font-mono text-stone-500">tok</span>
-          </div>
-          <div className="text-[11px] text-stone-500 flex items-center justify-between border-t border-stone-100 pt-1.5 font-mono">
-            <span>In: {(aggregate?.totalPromptTokens || 0).toLocaleString()}</span>
-            <span>Out: {(aggregate?.totalCandidatesTokens || 0).toLocaleString()}</span>
-          </div>
-        </div>
-
-        {/* Card 2: Audio Modality Tokens */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3.5 shadow-xs flex flex-col justify-between space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-500 flex items-center gap-1.5">
-              <Mic className="w-3.5 h-3.5 text-blue-600" />
-              Audio Ingested
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-800 border border-blue-200">
-              STT Encoder
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-stone-900">
-              {(aggregate?.totalAudioTokens || 0).toLocaleString()}
-            </span>
-            <span className="text-xs font-mono text-stone-500">audio tok</span>
-          </div>
-          <div className="text-[11px] text-stone-500 flex items-center justify-between border-t border-stone-100 pt-1.5 font-mono">
-            <span>Reasoning Out: {(aggregate?.totalThoughtsTokens || 0).toLocaleString()}</span>
-          </div>
-        </div>
-
-        {/* Card 3: Invocations & Latency */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3.5 shadow-xs flex flex-col justify-between space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-500 flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5 text-emerald-600" />
-              Requests & Latency
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
-              Performance
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-stone-900">
-              {aggregate?.requestCount || 0}
-            </span>
-            <span className="text-xs font-mono text-stone-500">reqs • {aggregate?.avgLatencyMs || 0}ms avg</span>
-          </div>
-          <div className="text-[11px] text-stone-500 flex items-center justify-between border-t border-stone-100 pt-1.5 font-mono">
-            <span>Model: {stats?.archive?.sessionCount ? `${stats.archive.sessionCount} sessions` : "gemini-3.7-flash"}</span>
-          </div>
-        </div>
-
-        {/* Card 4: Estimated API Cost */}
-        <div className="bg-white border border-stone-200 rounded-xl p-3.5 shadow-xs flex flex-col justify-between space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono font-semibold uppercase text-stone-500 flex items-center gap-1.5">
-              <DollarSign className="w-3.5 h-3.5 text-amber-600" />
-              Estimated Cost
-            </span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
-              Standard Rates
-            </span>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold font-mono text-stone-900">
-              ${(aggregate?.totalCostUsd || 0).toFixed(5)}
-            </span>
-            <span className="text-xs font-mono text-stone-500">USD</span>
-          </div>
-          <div className="text-[11px] text-stone-500 flex items-center justify-between border-t border-stone-100 pt-1.5 font-mono">
-            <span>Compaction: {compactionRatio}% saved</span>
-          </div>
-        </div>
-
+        <Kpi icon={Zap} title="Total Model Tokens" badge="Live Billing" accent={AMBER}
+          value={(aggregate?.totalTokens || 0).toLocaleString()} unit="tok">
+          <span>In: {(aggregate?.totalPromptTokens || 0).toLocaleString()}</span>
+          <span>Out: {(aggregate?.totalCandidatesTokens || 0).toLocaleString()}</span>
+        </Kpi>
+        <Kpi icon={Mic} title="Audio Ingested" badge="STT Encoder" accent={BLUE}
+          value={(aggregate?.totalAudioTokens || 0).toLocaleString()} unit="audio tok">
+          <span>Reasoning Out: {(aggregate?.totalThoughtsTokens || 0).toLocaleString()}</span>
+        </Kpi>
+        <Kpi icon={Clock} title="Requests & Latency" badge="Performance" accent={EMERALD}
+          value={aggregate?.requestCount || 0} unit={`reqs • ${aggregate?.avgLatencyMs || 0}ms avg`}>
+          <span>Model: {stats?.archive?.sessionCount ? `${stats.archive.sessionCount} sessions` : "gemini-3.7-flash"}</span>
+        </Kpi>
+        <Kpi icon={DollarSign} title="Estimated Cost" badge="Standard Rates" accent={AMBER}
+          value={`$${(aggregate?.totalCostUsd || 0).toFixed(5)}`} unit="USD">
+          <span>Compaction: {compactionRatio}% saved</span>
+        </Kpi>
       </div>
 
       {/* Sub-Navigation Tabs. The tab row owns its own line; the time-series toolbar sits on a
@@ -404,42 +329,21 @@ export default function TokenVisualizer({
           competing with it for the same row. */}
       <div className="space-y-[13px] border-b border-stone-200 pb-2">
         <div className="flex flex-wrap items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setActiveTab("timeseries")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium font-mono transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeTab === "timeseries"
-                ? "bg-amber-600 text-white font-semibold shadow-xs"
-                : "bg-white text-stone-600 hover:bg-stone-100 border border-stone-200"
-            }`}
-          >
-            <BarChart3 className="w-3.5 h-3.5" />
-            Time-Series Telemetry
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("subagents")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium font-mono transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeTab === "subagents"
-                ? "bg-amber-600 text-white font-semibold shadow-xs"
-                : "bg-white text-stone-600 hover:bg-stone-100 border border-stone-200"
-            }`}
-          >
-            <Cpu className="w-3.5 h-3.5" />
-            Sub-Agent Attribution
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("compaction")}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium font-mono transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeTab === "compaction"
-                ? "bg-amber-600 text-white font-semibold shadow-xs"
-                : "bg-white text-stone-600 hover:bg-stone-100 border border-stone-200"
-            }`}
-          >
-            <Layers className="w-3.5 h-3.5" />
-            Context Compaction & Memory
-          </button>
+          {TABS.map(([id, Icon, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setActiveTab(id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium font-mono transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeTab === id
+                  ? "bg-amber-600 text-white font-semibold shadow-xs"
+                  : "bg-white text-stone-600 hover:bg-stone-100 border border-stone-200"
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {label}
+            </button>
+          ))}
         </div>
 
         {activeTab === "timeseries" && (
@@ -475,77 +379,17 @@ export default function TokenVisualizer({
                 {/* Diarization Filter */}
                 <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
                   <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Diarization:</span>
-                  <button
-                    type="button"
-                    onClick={() => setDiarizationFilter("all")}
-                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                      diarizationFilter === "all"
-                        ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
-                        : "text-stone-600 hover:text-stone-900"
-                    }`}
-                  >
-                    All
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDiarizationFilter("diarized")}
-                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                      diarizationFilter === "diarized"
-                        ? "bg-emerald-600 text-white font-bold shadow-2xs"
-                        : "text-emerald-750 hover:text-emerald-900"
-                    }`}
-                  >
-                    Diarized Only
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDiarizationFilter("non_diarized")}
-                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                      diarizationFilter === "non_diarized"
-                        ? "bg-stone-800 text-white font-bold shadow-2xs"
-                        : "text-stone-600 hover:text-stone-900"
-                    }`}
-                  >
-                    Non-Diarized
-                  </button>
+                  <Seg on={diarizationFilter === "all"} onClick={() => setDiarizationFilter("all")}>All</Seg>
+                  <Seg on={diarizationFilter === "diarized"} onClick={() => setDiarizationFilter("diarized")} onClass="bg-emerald-600 text-white font-bold shadow-2xs" offClass="text-emerald-750 hover:text-emerald-900">Diarized Only</Seg>
+                  <Seg on={diarizationFilter === "non_diarized"} onClick={() => setDiarizationFilter("non_diarized")} onClass="bg-stone-800 text-white font-bold shadow-2xs">Non-Diarized</Seg>
                 </div>
 
                 {/* Provider Filter */}
                 <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
                   <span className="text-[10px] font-mono text-stone-500 pl-1.5 pr-1 font-semibold">Provider:</span>
-                  <button
-                    type="button"
-                    onClick={() => setProviderFilter("all")}
-                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                      providerFilter === "all"
-                        ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
-                        : "text-stone-600 hover:text-stone-900"
-                    }`}
-                  >
-                    All
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setProviderFilter("gemini")}
-                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                      providerFilter === "gemini"
-                        ? "bg-amber-600 text-white font-bold shadow-2xs"
-                        : "text-amber-800 hover:text-amber-900"
-                    }`}
-                  >
-                    Gemini
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setProviderFilter("google_cloud_stt")}
-                    className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                      providerFilter === "google_cloud_stt"
-                        ? "bg-indigo-600 text-white font-bold shadow-2xs"
-                        : "text-indigo-750 hover:text-indigo-900"
-                    }`}
-                  >
-                    Cloud STT
-                  </button>
+                  <Seg on={providerFilter === "all"} onClick={() => setProviderFilter("all")}>All</Seg>
+                  <Seg on={providerFilter === "gemini"} onClick={() => setProviderFilter("gemini")} onClass="bg-amber-600 text-white font-bold shadow-2xs" offClass="text-amber-800 hover:text-amber-900">Gemini</Seg>
+                  <Seg on={providerFilter === "google_cloud_stt"} onClick={() => setProviderFilter("google_cloud_stt")} onClass="bg-indigo-600 text-white font-bold shadow-2xs" offClass="text-indigo-750 hover:text-indigo-900">Cloud STT</Seg>
                   </div>
                 </div>
             </div>
@@ -553,31 +397,9 @@ export default function TokenVisualizer({
             {/* Time Range Preset Buttons */}
             <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200">
               {(["10m", "30m", "1h", "4h", "24h", "7d"] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => handleSelectPreset(p)}
-                  className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all ${
-                    timeRange === p
-                      ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
-                      : "text-stone-600 hover:text-stone-900"
-                  }`}
-                >
-                  {TIME_RANGE_PRESETS[p].label}
-                </button>
+                <Seg key={p} on={timeRange === p} onClick={() => handleSelectPreset(p)}>{TIME_RANGE_PRESETS[p].label}</Seg>
               ))}
-              <button
-                type="button"
-                onClick={() => handleSelectPreset("custom")}
-                className={`px-2 py-1 text-[11px] font-mono rounded cursor-pointer transition-all flex items-center gap-1 ${
-                  timeRange === "custom"
-                    ? "bg-white text-stone-900 font-bold shadow-2xs border border-stone-200"
-                    : "text-stone-600 hover:text-stone-900"
-                }`}
-              >
-                <Calendar className="w-3 h-3" />
-                Custom
-              </button>
+              <Seg on={timeRange === "custom"} onClick={() => handleSelectPreset("custom")} extra="flex items-center gap-1"><Calendar className="w-3 h-3" /> Custom</Seg>
             </div>
 
             {/* Interval Resolution Selector */}
@@ -651,15 +473,7 @@ export default function TokenVisualizer({
                     onChange={(e) => setInterval(e.target.value)}
                     className="px-2 py-1 bg-stone-50 border border-stone-200 rounded text-xs text-stone-800 font-mono focus:outline-none focus:border-amber-500 cursor-pointer"
                   >
-                    <option value="10s">10s</option>
-                    <option value="30s">30s</option>
-                    <option value="1m">1m</option>
-                    <option value="5m">5m</option>
-                    <option value="15m">15m</option>
-                    <option value="30m">30m</option>
-                    <option value="1h">1h</option>
-                    <option value="4h">4h</option>
-                    <option value="1d">1d</option>
+                    {["10s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"].map(v => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </div>
                 <button
@@ -696,22 +510,12 @@ export default function TokenVisualizer({
                 </div>
               ) : (
                 <div className="flex items-center gap-3 text-[11px] font-mono text-stone-500 overflow-x-auto">
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" />
-                    Prompt (Input)
-                  </span>
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
-                    Candidates (Output)
-                  </span>
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-blue-500 inline-block" />
-                    Audio (STT)
-                  </span>
-                  <span className="flex items-center gap-1 shrink-0">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-purple-500 inline-block" />
-                    Thoughts (Reasoning)
-                  </span>
+                  {[...SEGMENTS].reverse().map(([, color, label]) => (
+                    <span key={label} className="flex items-center gap-1 shrink-0">
+                      <span className={`w-2.5 h-2.5 rounded-sm inline-block ${color}`} />
+                      {label}
+                    </span>
+                  ))}
                 </div>
               )}
             </div>
@@ -769,30 +573,9 @@ export default function TokenVisualizer({
                           }`}
                           style={{ height: total > 0 ? `${heightPercent}%` : "3px" }}
                         >
-                          {pt.thoughtsTokens > 0 && (
-                            <div
-                              className="bg-purple-500 w-full"
-                              style={{ height: `${(pt.thoughtsTokens / (total || 1)) * 100}%` }}
-                            />
-                          )}
-                          {pt.candidatesTokens > 0 && (
-                            <div
-                              className="bg-emerald-500 w-full"
-                              style={{ height: `${(pt.candidatesTokens / (total || 1)) * 100}%` }}
-                            />
-                          )}
-                          {pt.audioTokens > 0 && (
-                            <div
-                              className="bg-blue-500 w-full"
-                              style={{ height: `${(pt.audioTokens / (total || 1)) * 100}%` }}
-                            />
-                          )}
-                          {pt.promptTokens > 0 && (
-                            <div
-                              className="bg-amber-500 w-full"
-                              style={{ height: `${(pt.promptTokens / (total || 1)) * 100}%` }}
-                            />
-                          )}
+                          {SEGMENTS.map(([key, color]) => pt[key] > 0 && (
+                            <div key={key} className={`${color} w-full`} style={{ height: `${(pt[key] / total) * 100}%` }} />
+                          ))}
                         </div>
                       </div>
 
@@ -827,17 +610,9 @@ export default function TokenVisualizer({
               <table className="w-full text-left text-xs font-mono">
                 <thead>
                   <tr className="border-b border-stone-200 text-stone-500 text-[10.5px]">
-                    <th className="pb-2 font-medium">Timestamp</th>
-                    <th className="pb-2 font-medium">Agent / Stage</th>
-                    <th className="pb-2 font-medium">Features / Tags</th>
-                    <th className="pb-2 font-medium">Modality</th>
-                    <th className="pb-2 font-medium">Model</th>
-                    <th className="pb-2 font-medium text-right">Prompt</th>
-                    <th className="pb-2 font-medium text-right">Output</th>
-                    <th className="pb-2 font-medium text-right">Thinking</th>
-                    <th className="pb-2 font-medium text-right">Total</th>
-                    <th className="pb-2 font-medium text-right">Latency</th>
-                    <th className="pb-2 font-medium text-right">Cost</th>
+                    {RECEIPT_COLS.map(c => c.startsWith(">")
+                      ? <th key={c} className="pb-2 font-medium text-right">{c.slice(1)}</th>
+                      : <th key={c} className="pb-2 font-medium">{c}</th>)}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-stone-100">
@@ -1011,57 +786,12 @@ export default function TokenVisualizer({
 
             {/* Diarization & Provider Breakdown Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {/* Diarization Breakdown */}
-              {aggregate?.byDiarization && Object.keys(aggregate.byDiarization).length > 0 && (
-                <div className="p-3 bg-emerald-50/50 border border-emerald-200/80 rounded-xl space-y-2">
-                  <span className="text-[11px] font-mono font-bold uppercase text-emerald-850 flex items-center gap-1">
-                    <Radio className="w-3 h-3 text-emerald-700" />
-                    Diarization Mode Breakdown
-                  </span>
-                  <div className="space-y-2">
-                    {Object.entries(aggregate.byDiarization).map(([mode, data]) => (
-                      <div key={mode} className="p-2.5 bg-white rounded-lg border border-emerald-100 flex justify-between items-center font-mono text-xs">
-                        <div>
-                          <span className="font-bold capitalize text-stone-900">
-                            {mode === "diarized" ? "🎙️ Diarized (Multi-Speaker)" : "👤 Non-Diarized (Single Stream)"}
-                          </span>
-                          <span className="text-[10px] text-stone-500 block">{data.requests} requests • ${data.costUsd.toFixed(5)}</span>
-                        </div>
-                        <div className="text-right">
-                          <span className="font-bold text-emerald-700">{data.tokens.toLocaleString()} tok</span>
-                          <span className="text-[10px] text-stone-500 block">{data.percent}%</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Provider Breakdown */}
-              {aggregate?.byProvider && Object.keys(aggregate.byProvider).length > 0 && (
-                <div className="p-3 bg-indigo-50/50 border border-indigo-200/80 rounded-xl space-y-2">
-                  <span className="text-[11px] font-mono font-bold uppercase text-indigo-850 flex items-center gap-1">
-                    <Cpu className="w-3 h-3 text-indigo-700" />
-                    Model Provider Breakdown
-                  </span>
-                  <div className="space-y-2">
-                    {Object.entries(aggregate.byProvider).map(([prov, data]) => (
-                      <div key={prov} className="p-2.5 bg-white rounded-lg border border-indigo-100 flex justify-between items-center font-mono text-xs">
-                        <div>
-                          <span className="font-bold capitalize text-stone-900">
-                            {prov === "google_cloud_stt" ? "Google Cloud STT V2" : "Gemini Models"}
-                          </span>
-                          <span className="text-[10px] text-stone-500 block">{data.requests} requests • ${data.costUsd.toFixed(5)}</span>
-                        </div>
-                        <div className="text-right">
-                          <span className="font-bold text-indigo-700">{data.tokens.toLocaleString()} tok</span>
-                          <span className="text-[10px] text-stone-500 block">{data.percent}%</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <Breakdown title="Diarization Mode Breakdown" Icon={Radio} data={aggregate?.byDiarization}
+                label={k => k === "diarized" ? "🎙️ Diarized (Multi-Speaker)" : "👤 Non-Diarized (Single Stream)"}
+                tone={{ box: "bg-emerald-50/50 border-emerald-200/80", head: "text-emerald-850", icon: "text-emerald-700", row: "border-emerald-100", tok: "text-emerald-700" }} />
+              <Breakdown title="Model Provider Breakdown" Icon={Cpu} data={aggregate?.byProvider}
+                label={k => k === "google_cloud_stt" ? "Google Cloud STT V2" : "Gemini Models"}
+                tone={{ box: "bg-indigo-50/50 border-indigo-200/80", head: "text-indigo-850", icon: "text-indigo-700", row: "border-indigo-100", tok: "text-indigo-700" }} />
             </div>
 
           </div>
@@ -1094,44 +824,11 @@ export default function TokenVisualizer({
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-              {/* 1. Raw Speech Input */}
-              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
-                  <span>1. Full Raw Speech</span>
-                  <span className="text-amber-700 font-bold">{rawTokens} tokens</span>
-                </div>
-                <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
-                  {rawTranscript || <span className="text-stone-400 italic">No raw transcript yet...</span>}
-                </div>
-              </div>
-
-              {/* 2. Compacted Macro Summary */}
-              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
-                  <span>2. Compacted Summary</span>
-                  <div className="flex items-center gap-1">
-                    <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200 font-semibold">-{compactionRatio}%</span>
-                    <span className="text-emerald-700 font-bold">{summaryTokens} tokens</span>
-                  </div>
-                </div>
-                <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
-                  {liveSummary || <span className="text-stone-400 italic">No active live summary yet...</span>}
-                </div>
-              </div>
-
-              {/* 3. Active Rolling Delta Window */}
-              <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-mono text-stone-600 border-b border-stone-200/80 pb-1">
-                  <span>3. Active Delta Window</span>
-                  <div className="flex items-center gap-1">
-                    <span className="text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200 font-semibold">-{deltaSavingsRatio}% vs raw</span>
-                    <span className="text-blue-700 font-bold">{deltaTokens} tokens</span>
-                  </div>
-                </div>
-                <div className="text-xs font-mono text-stone-800 bg-white p-2.5 rounded border border-stone-200 max-h-28 overflow-y-auto whitespace-pre-wrap">
-                  {deltaText || <span className="text-stone-400 italic">No delta window yet...</span>}
-                </div>
-              </div>
+              <Pane title="1. Full Raw Speech" tokens={rawTokens} tokClass="text-amber-700" text={rawTranscript} empty="No raw transcript yet..." />
+              <Pane title="2. Compacted Summary" tokens={summaryTokens} tokClass="text-emerald-700" text={liveSummary} empty="No active live summary yet..."
+                badge={[`-${compactionRatio}%`, "text-emerald-700 bg-emerald-50 border-emerald-200"]} />
+              <Pane title="3. Active Delta Window" tokens={deltaTokens} tokClass="text-blue-700" text={deltaText} empty="No delta window yet..."
+                badge={[`-${deltaSavingsRatio}% vs raw`, "text-blue-700 bg-blue-50 border-blue-200"]} />
             </div>
 
             {/* Bottom Compaction & Complexity Bar */}
@@ -1221,7 +918,7 @@ export default function TokenVisualizer({
             </div>
 
             <p className="text-xs text-stone-600 leading-relaxed">
-              Instead of dumping all historical sessions into the prompt (causing $O(N)$ prompt bloat and high latency), <b>Vertex AI Memory Bank</b> performs semantic vector retrieval—injecting only the ~{injectedMemoryTokens > 0 ? injectedMemoryTokens : 85} tokens needed for the active query.
+              Instead of dumping all historical sessions into the prompt (causing $O(N)$ prompt bloat and high latency), <b>Vertex AI Memory Bank</b> performs semantic vector retrieval—injecting only the ~{shownMemoryTokens} tokens needed for the active query.
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
@@ -1255,7 +952,7 @@ export default function TokenVisualizer({
                 <div className="space-y-1.5 text-xs font-mono text-stone-600">
                   <div className="flex justify-between text-[11px]">
                     <span>Targeted Vector Memory:</span>
-                    <span className="font-bold text-emerald-700">~{injectedMemoryTokens > 0 ? injectedMemoryTokens : 85} tok (1-2 records)</span>
+                    <span className="font-bold text-emerald-700">~{shownMemoryTokens} tok (1-2 records)</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
                     <span>Base Prompt & Schema:</span>

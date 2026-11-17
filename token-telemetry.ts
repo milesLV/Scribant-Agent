@@ -2,60 +2,31 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-export type AgentLabel =
-  | "audio_transcriber"
-  | "proofreader"
-  | "live_summarizer"
-  | "intent_classifier"
-  | "memory_answerer"
-  | "system"
-  | string;
-
-export type StageLabel =
-  | "stt"
-  | "proofread"
-  | "summary"
-  | "plan"
-  | "memory_recall"
-  | "standalone_analyze"
-  | string;
-
 export type ModalityLabel = "audio" | "text" | "multimodal";
 
-export interface ModalityTokenDetail {
-  modality?: "TEXT" | "AUDIO" | "IMAGE" | string;
-  tokenCount?: number;
-  [key: string]: any;
-}
-
+// Gemini usageMetadata as ADK hands it over.
 export interface RawUsageMetadata {
   promptTokenCount?: number;
   candidatesTokenCount?: number;
   totalTokenCount?: number;
   thoughtsTokenCount?: number;
   cachedContentTokenCount?: number;
-  promptTokensDetails?: ModalityTokenDetail[];
-  candidatesTokensDetails?: ModalityTokenDetail[];
-  trafficType?: string;
+  promptTokensDetails?: { modality?: string; tokenCount?: number }[];
   [key: string]: any;
 }
 
 export interface TokenMetricRecord {
   id: string;
-  timestamp: string; // ISO string
-  timestampMs: number; // Epoch ms
-
-  // Labels & Dimensions
+  timestamp: string;
+  timestampMs: number;
   model: string;
-  agent: AgentLabel;
-  stage: StageLabel;
+  agent: string;
+  stage: string;
   modality: ModalityLabel;
   userId: string;
   sessionId: string;
   status: "success" | "error";
   errorCode?: string;
-
-  // Authoritative Token Counts
   promptTokens: number;
   candidatesTokens: number;
   thoughtsTokens: number;
@@ -63,21 +34,17 @@ export interface TokenMetricRecord {
   totalTokens: number;
   audioInputTokens: number;
   textInputTokens: number;
-
-  // Latency & Economics
   durationMs: number;
   costEstimateUsd: number;
-
-  // Invocation Metadata & Telemetry Tags
   diarizationEnabled?: boolean;
-  provider?: "gemini" | "google_cloud_stt" | string;
-  source?: "mic" | "tab" | "upload" | "pipeline" | string;
+  provider?: string;
+  source?: string;
   metadata?: Record<string, any>;
 }
 
 export interface TimeSeriesPoint {
-  timestamp: number; // Bucket start timestamp in ms
-  timeLabel: string; // HH:MM format
+  timestamp: number; // bucket start, epoch ms
+  timeLabel: string;
   promptTokens: number;
   candidatesTokens: number;
   thoughtsTokens: number;
@@ -113,10 +80,9 @@ export interface TokenAggregateStats {
   byProvider: Record<string, AggregateDimensionStats>;
 }
 
-export interface TimeSeriesQueryOptions {
-  from?: number; // Epoch ms
-  to?: number; // Epoch ms
-  interval?: "1s" | "10s" | "30s" | "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "24h" | "7d" | string;
+interface RecordFilter {
+  from?: number;
+  to?: number;
   agent?: string;
   model?: string;
   sessionId?: string;
@@ -128,160 +94,44 @@ export interface TimeSeriesQueryOptions {
   rootDiskDir?: string;
 }
 
-// Official Google Gemini API Pricing Table (USD per 1 Million Tokens)
-// Based on Google AI Developer (ai.google.dev) official pricing schedules
-export interface ModelPricingTier {
-  textInput: number; // USD per 1M tokens
-  audioInput: number; // USD per 1M tokens (32 tokens/sec encoding)
-  cachedInput: number; // USD per 1M tokens (context caching)
-  candidatesOutput: number; // USD per 1M tokens
-  thoughtsOutput: number; // USD per 1M tokens (billed at candidate output rate)
-}
-
-export const MODEL_PRICING_REGISTRY: Record<string, ModelPricingTier> = {
-  // Gemini 3.7 Flash (Active intro tier)
-  "gemini-3.7-flash": {
-    textInput: 0.75,
-    audioInput: 0.75,
-    cachedInput: 0.1875,
-    candidatesOutput: 3.75,
-    thoughtsOutput: 3.75,
-  },
-  // Gemini 3.6 Flash / 3.5 Flash (Standard tier)
-  "gemini-3.6-flash": {
-    textInput: 1.5,
-    audioInput: 1.5,
-    cachedInput: 0.375,
-    candidatesOutput: 7.5,
-    thoughtsOutput: 7.5,
-  },
-  "gemini-3.5-flash": {
-    textInput: 1.5,
-    audioInput: 1.5,
-    cachedInput: 0.375,
-    candidatesOutput: 9.0,
-    thoughtsOutput: 9.0,
-  },
-  // Gemini 3.1 Flash-Lite
-  "gemini-3.1-flash-lite": {
-    textInput: 0.25,
-    audioInput: 0.5,
-    cachedInput: 0.0625,
-    candidatesOutput: 1.5,
-    thoughtsOutput: 1.5,
-  },
-  // Gemini 2.5 Flash
-  "gemini-2.5-flash": {
-    textInput: 0.3,
-    audioInput: 0.7,
-    cachedInput: 0.075,
-    candidatesOutput: 2.5,
-    thoughtsOutput: 2.5,
-  },
+// USD per 1M tokens: [text in, audio in, cached in, output (thoughts bill at the output rate)].
+// ponytail: hand-copied price sheet; matched by substring of the model name, first hit wins.
+const PRICING: Record<string, [number, number, number, number]> = {
+  "gemini-3.7-flash": [0.75, 0.75, 0.1875, 3.75],
+  "gemini-3.6-flash": [1.5, 1.5, 0.375, 7.5],
+  "gemini-3.5-flash": [1.5, 1.5, 0.375, 9.0],
+  "gemini-3.1-flash-lite": [0.25, 0.5, 0.0625, 1.5],
+  "gemini-2.5-flash": [0.3, 0.7, 0.075, 2.5],
 };
 
-export const DEFAULT_PRICING_TIER: ModelPricingTier = MODEL_PRICING_REGISTRY["gemini-3.7-flash"];
-
-export function getPricingTierForModel(modelName?: string): ModelPricingTier {
-  if (!modelName) return DEFAULT_PRICING_TIER;
-  const normalized = modelName.toLowerCase().trim();
-  for (const [key, tier] of Object.entries(MODEL_PRICING_REGISTRY)) {
-    if (normalized.includes(key)) return tier;
-  }
-  return DEFAULT_PRICING_TIER;
+function estimateCostUsd(r: Pick<TokenMetricRecord, "textInputTokens" | "audioInputTokens" | "cachedTokens" | "candidatesTokens" | "thoughtsTokens">, model: string): number {
+  const name = model.toLowerCase();
+  const [text, audio, cached, out] = Object.entries(PRICING).find(([k]) => name.includes(k))?.[1] ?? PRICING["gemini-3.7-flash"];
+  const usd = r.textInputTokens * text + r.audioInputTokens * audio + r.cachedTokens * cached + (r.candidatesTokens + r.thoughtsTokens) * out;
+  return Number((usd / 1_000_000).toFixed(8));
 }
 
-export function estimateCostUsd(
-  record: {
-    textInputTokens: number;
-    audioInputTokens: number;
-    cachedTokens: number;
-    candidatesTokens: number;
-    thoughtsTokens: number;
-  },
-  modelName?: string
-): number {
-  const tier = getPricingTierForModel(modelName);
-  const textCost = (record.textInputTokens / 1_000_000) * tier.textInput;
-  const audioCost = (record.audioInputTokens / 1_000_000) * tier.audioInput;
-  const cachedCost = (record.cachedTokens / 1_000_000) * tier.cachedInput;
-  const outCost = (record.candidatesTokens / 1_000_000) * tier.candidatesOutput;
-  const thoughtCost = (record.thoughtsTokens / 1_000_000) * tier.thoughtsOutput;
-
-  return Number((textCost + audioCost + cachedCost + outCost + thoughtCost).toFixed(8));
-}
-
-export function parseModalityTokens(usage?: RawUsageMetadata): {
-  audioTokens: number;
-  textTokens: number;
-} {
-  if (!usage?.promptTokensDetails || !Array.isArray(usage.promptTokensDetails)) {
-    const total = usage?.promptTokenCount || 0;
-    return { audioTokens: 0, textTokens: total };
-  }
-
-  let audio = 0;
-  let text = 0;
-
-  for (const detail of usage.promptTokensDetails) {
-    if (detail.modality === "AUDIO") {
-      audio += detail.tokenCount || 0;
-    } else if (detail.modality === "TEXT") {
-      text += detail.tokenCount || 0;
-    } else {
-      text += detail.tokenCount || 0;
-    }
-  }
-
-  return { audioTokens: audio, textTokens: text };
-}
-
-// Global in-memory ring buffer (up to 10,000 recent records)
 const MAX_MEMORY_RECORDS = 10000;
 const memoryBuffer: TokenMetricRecord[] = [];
 
-// SSE Event subscribers
 type StreamListener = (record: TokenMetricRecord) => void;
 const streamListeners = new Set<StreamListener>();
 
 export function subscribeTokenStream(listener: StreamListener): () => void {
   streamListeners.add(listener);
-  return () => {
-    streamListeners.delete(listener);
-  };
+  return () => { streamListeners.delete(listener); };
 }
 
-export function getTelemetryDiskPath(
-  date: Date,
-  root = path.join(process.cwd(), "data", "telemetry", "tokens")
-): string {
-  const yyyy = String(date.getUTCFullYear());
-  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(date.getUTCDate()).padStart(2, "0");
-  const hh = String(date.getUTCHours()).padStart(2, "0");
-  return path.join(root, yyyy, mm, dd, hh, "tokens.jsonl");
-}
+const DISK_ROOT = path.join(process.cwd(), "data", "telemetry", "tokens");
 
-export function appendTokenRecordToDisk(
-  record: TokenMetricRecord,
-  root = path.join(process.cwd(), "data", "telemetry", "tokens")
-): void {
-  try {
-    const filePath = getTelemetryDiskPath(new Date(record.timestampMs), root);
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.appendFileSync(filePath, JSON.stringify(record) + "\n", "utf8");
-  } catch (err) {
-    console.warn("[TokenTelemetry] Failed to persist token record to disk:", err);
-  }
-}
+// data/telemetry/tokens/YYYY/MM/DD/HH/tokens.jsonl, UTC.
+const diskPath = (date: Date, root = DISK_ROOT) =>
+  path.join(root, ...date.toISOString().slice(0, 13).split(/[-T]/), "tokens.jsonl");
 
 export function recordTokenUsage(params: {
   model?: string;
-  agent?: AgentLabel;
-  stage?: StageLabel;
+  agent?: string;
+  stage?: string;
   modality?: ModalityLabel;
   userId?: string;
   sessionId?: string;
@@ -292,38 +142,29 @@ export function recordTokenUsage(params: {
   promptTokensFallback?: number;
   candidatesTokensFallback?: number;
   diarizationEnabled?: boolean;
-  provider?: "gemini" | "google_cloud_stt" | string;
-  source?: "mic" | "tab" | "upload" | "pipeline" | string;
+  provider?: string;
+  source?: string;
   metadata?: Record<string, any>;
   rootDiskDir?: string;
 }): TokenMetricRecord {
   const now = Date.now();
   const usage = params.usage || {};
-  const { audioTokens, textTokens } = parseModalityTokens(usage);
+  const details = usage.promptTokensDetails;
+  const audioTokens = Array.isArray(details) ? details.reduce((n, d) => n + (d.modality === "AUDIO" ? d.tokenCount || 0 : 0), 0) : 0;
+  const textTokens = Array.isArray(details) ? details.reduce((n, d) => n + (d.modality !== "AUDIO" ? d.tokenCount || 0 : 0), 0) : usage.promptTokenCount || 0;
 
   const promptTokens = usage.promptTokenCount ?? params.promptTokensFallback ?? 0;
   const candidatesTokens = usage.candidatesTokenCount ?? params.candidatesTokensFallback ?? 0;
   const thoughtsTokens = usage.thoughtsTokenCount ?? 0;
   const cachedTokens = usage.cachedContentTokenCount ?? 0;
-  const totalTokens = usage.totalTokenCount ?? (promptTokens + candidatesTokens + thoughtsTokens);
-
-  const modelName = params.model || process.env.GEMINI_MODEL || "gemini-3.7-flash";
-  const cost = estimateCostUsd(
-    {
-      textInputTokens: textTokens,
-      audioInputTokens: audioTokens,
-      cachedTokens,
-      candidatesTokens,
-      thoughtsTokens,
-    },
-    modelName
-  );
+  const model = params.model || process.env.GEMINI_MODEL || "gemini-3.7-flash";
+  const counts = { textInputTokens: textTokens, audioInputTokens: audioTokens, cachedTokens, candidatesTokens, thoughtsTokens };
 
   const record: TokenMetricRecord = {
     id: `tok-${now}-${crypto.randomBytes(4).toString("hex")}`,
     timestamp: new Date(now).toISOString(),
     timestampMs: now,
-    model: params.model || process.env.GEMINI_MODEL || "gemini-3.7-flash",
+    model,
     agent: params.agent || "system",
     stage: params.stage || "standalone",
     modality: params.modality || (audioTokens > 0 ? "audio" : "text"),
@@ -335,351 +176,158 @@ export function recordTokenUsage(params: {
     candidatesTokens,
     thoughtsTokens,
     cachedTokens,
-    totalTokens,
-    audioInputTokens: audioTokens,
-    textInputTokens: textTokens,
+    totalTokens: usage.totalTokenCount ?? promptTokens + candidatesTokens + thoughtsTokens,
+    ...counts,
     durationMs: Math.max(0, params.durationMs || 0),
-    costEstimateUsd: cost,
+    costEstimateUsd: estimateCostUsd(counts, model),
     diarizationEnabled: params.diarizationEnabled,
     provider: params.provider || (params.agent === "google_cloud_stt" ? "google_cloud_stt" : "gemini"),
     source: params.source,
     metadata: params.metadata,
   };
 
-  // 1. In-memory circular buffer
   memoryBuffer.push(record);
-  if (memoryBuffer.length > MAX_MEMORY_RECORDS) {
-    memoryBuffer.shift();
+  if (memoryBuffer.length > MAX_MEMORY_RECORDS) memoryBuffer.shift();
+
+  try {
+    const file = diskPath(new Date(now), params.rootDiskDir);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify(record) + "\n", "utf8");
+  } catch (err) {
+    console.warn("[TokenTelemetry] Failed to persist token record to disk:", err);
   }
 
-  // 2. Persist to disk
-  appendTokenRecordToDisk(record, params.rootDiskDir);
-
-  // 3. Broadcast to active SSE listeners
   for (const listener of streamListeners) {
-    try {
-      listener(record);
-    } catch {
-      // Ignore listener error
-    }
+    try { listener(record); } catch { /* one bad subscriber must not break recording */ }
   }
-
   return record;
 }
 
-export function readDiskRecordsInRange(
-  from: number,
-  to: number,
-  root = path.join(process.cwd(), "data", "telemetry", "tokens")
-): TokenMetricRecord[] {
-  if (!fs.existsSync(root)) return [];
-  const records: TokenMetricRecord[] = [];
-  const seenIds = new Set<string>();
-
-  // Iterate hour by hour from 'from' to 'to'
-  const ONE_HOUR = 3600000;
-  const startHour = Math.floor(from / ONE_HOUR) * ONE_HOUR;
-  const endHour = Math.floor(to / ONE_HOUR) * ONE_HOUR;
-
-  for (let t = startHour; t <= endHour; t += ONE_HOUR) {
-    const filePath = getTelemetryDiskPath(new Date(t), root);
-    if (fs.existsSync(filePath)) {
+// Hour partitions overlapping [from, to]. Unparseable lines are skipped.
+export function readDiskRecordsInRange(from: number, to: number, root = DISK_ROOT): TokenMetricRecord[] {
+  const HOUR = 3_600_000;
+  const out: TokenMetricRecord[] = [];
+  for (let t = Math.floor(from / HOUR) * HOUR; t <= to; t += HOUR) {
+    const file = diskPath(new Date(t), root);
+    if (!fs.existsSync(file)) continue;
+    for (const line of fs.readFileSync(file, "utf8").split("\n")) {
       try {
-        const content = fs.readFileSync(filePath, "utf8");
-        const lines = content.split("\n");
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const rec = JSON.parse(line) as TokenMetricRecord;
-            if (rec.id && !seenIds.has(rec.id) && rec.timestampMs >= from && rec.timestampMs <= to) {
-              seenIds.add(rec.id);
-              records.push(rec);
-            }
-          } catch {}
-        }
-      } catch (err) {
-        console.warn("[TokenTelemetry] Failed to read disk partition:", filePath, err);
-      }
+        const rec = line.trim() && (JSON.parse(line) as TokenMetricRecord);
+        if (rec && rec.timestampMs >= from && rec.timestampMs <= to) out.push(rec);
+      } catch { /* torn write */ }
     }
   }
-
-  return records;
+  return out;
 }
 
-export function getCombinedRecords(
-  from: number,
-  to: number,
-  recordsSource: TokenMetricRecord[] = memoryBuffer,
-  rootDiskDir?: string
-): TokenMetricRecord[] {
-  const diskRecords = readDiskRecordsInRange(from, to, rootDiskDir);
-  const seenIds = new Set<string>();
-  const combined: TokenMetricRecord[] = [];
-
-  // Add disk records first
-  for (const r of diskRecords) {
-    if (r.id && !seenIds.has(r.id)) {
-      seenIds.add(r.id);
-      combined.push(r);
-    }
-  }
-
-  // Add in-memory records
-  for (const r of recordsSource) {
-    if (r.timestampMs >= from && r.timestampMs <= to && (!r.id || !seenIds.has(r.id))) {
-      if (r.id) seenIds.add(r.id);
-      combined.push(r);
-    }
-  }
-
-  return combined;
+// Disk + in-memory records in range, deduped by id (recent records are in both), then filtered.
+function selectRecords(o: RecordFilter, from: number, to: number, source: TokenMetricRecord[]): TokenMetricRecord[] {
+  const seen = new Set<string>();
+  return [...readDiskRecordsInRange(from, to, o.rootDiskDir), ...source].filter(r => {
+    if (r.id) { if (seen.has(r.id)) return false; seen.add(r.id); }
+    return r.timestampMs >= from && r.timestampMs <= to
+      && (!o.agent || r.agent === o.agent)
+      && (!o.model || r.model === o.model)
+      && (!o.sessionId || r.sessionId === o.sessionId)
+      && (o.diarizationEnabled === undefined || Boolean(r.diarizationEnabled) === o.diarizationEnabled)
+      && (!o.provider || (r.provider || "gemini") === o.provider)
+      && (!o.source || r.source === o.source)
+      && (!o.modality || r.modality === o.modality)
+      && (!o.stage || r.stage === o.stage);
+  });
 }
 
-export function parseIntervalMs(interval: string): number {
-  switch (interval) {
-    case "1s":
-      return 1000;
-    case "10s":
-      return 10000;
-    case "30s":
-      return 30000;
-    case "1m":
-      return 60000;
-    case "5m":
-      return 300000;
-    case "15m":
-      return 900000;
-    case "30m":
-      return 1800000;
-    case "1h":
-      return 3600000;
-    case "4h":
-      return 14400000;
-    case "1d":
-    case "24h":
-      return 86400000;
-    case "7d":
-      return 604800000;
-    default:
-      return 60000;
-  }
-}
+const INTERVAL_MS: Record<string, number> = {
+  "1s": 1e3, "10s": 1e4, "30s": 3e4, "1m": 6e4, "5m": 3e5, "15m": 9e5, "30m": 18e5,
+  "1h": 36e5, "4h": 144e5, "1d": 864e5, "24h": 864e5, "7d": 6048e5,
+};
 
-export function formatTimeLabel(epochMs: number, interval: string): string {
+function formatTimeLabel(epochMs: number, interval: string): string {
   const d = new Date(epochMs);
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const min = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-
-  if (interval === "1s" || interval === "10s" || interval === "30s") {
-    return `${hh}:${min}:${ss}`;
-  }
-  if (interval === "1d" || interval === "24h" || interval === "7d") {
-    return `${mm}/${dd}`;
-  }
-  if (interval === "4h" || interval === "1h" || interval === "30m") {
-    return `${mm}/${dd} ${hh}:${min}`;
-  }
-  return `${hh}:${min}`;
+  const p = (n: number) => String(n).padStart(2, "0");
+  const date = `${p(d.getMonth() + 1)}/${p(d.getDate())}`;
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  if (/s$/.test(interval)) return `${time}:${p(d.getSeconds())}`;
+  if (/d$|24h/.test(interval)) return date;
+  if (/^(4h|1h|30m)$/.test(interval)) return `${date} ${time}`;
+  return time;
 }
 
 export function queryTokenTimeSeries(
-  options: TimeSeriesQueryOptions = {},
+  options: RecordFilter & { interval?: string } = {},
   recordsSource: TokenMetricRecord[] = memoryBuffer
 ): { ok: true; interval: string; points: TimeSeriesPoint[] } {
-  const now = Date.now();
   const interval = options.interval || "1m";
-  const intervalMs = parseIntervalMs(interval);
-  const to = options.to || now;
-  const from = options.from || to - 30 * intervalMs; // Default 30 intervals back
+  const intervalMs = INTERVAL_MS[interval] ?? 6e4;
+  const to = options.to || Date.now();
+  const from = options.from || to - 30 * intervalMs;
 
-  // Get combined records from disk and memory
-  const allRecords = getCombinedRecords(from, to, recordsSource, options.rootDiskDir);
-
-  // Filter records
-  const filtered = allRecords.filter((r) => {
-    if (r.timestampMs < from || r.timestampMs > to) return false;
-    if (options.agent && r.agent !== options.agent) return false;
-    if (options.model && r.model !== options.model) return false;
-    if (options.sessionId && r.sessionId !== options.sessionId) return false;
-    if (options.diarizationEnabled !== undefined && Boolean(r.diarizationEnabled) !== options.diarizationEnabled) return false;
-    if (options.provider && (r.provider || "gemini") !== options.provider) return false;
-    if (options.source && r.source !== options.source) return false;
-    if (options.modality && r.modality !== options.modality) return false;
-    if (options.stage && r.stage !== options.stage) return false;
-    return true;
-  });
-
-  // Group into time buckets
-  const buckets = new Map<
-    number,
-    {
-      promptTokens: number;
-      candidatesTokens: number;
-      thoughtsTokens: number;
-      audioTokens: number;
-      totalTokens: number;
-      requestCount: number;
-      durationSum: number;
-      costSum: number;
-    }
-  >();
-
-  // Pre-seed all bucket intervals in range so chart is continuous
-  const startBucket = Math.floor(from / intervalMs) * intervalMs;
-  for (let t = startBucket; t <= to; t += intervalMs) {
-    buckets.set(t, {
-      promptTokens: 0,
-      candidatesTokens: 0,
-      thoughtsTokens: 0,
-      audioTokens: 0,
-      totalTokens: 0,
-      requestCount: 0,
-      durationSum: 0,
-      costSum: 0,
-    });
+  // Pre-seed every bucket in range so the chart has no gaps.
+  const buckets = new Map<number, TimeSeriesPoint & { durationSum: number }>();
+  for (let t = Math.floor(from / intervalMs) * intervalMs; t <= to; t += intervalMs) {
+    buckets.set(t, { timestamp: t, timeLabel: formatTimeLabel(t, interval), promptTokens: 0, candidatesTokens: 0, thoughtsTokens: 0, audioTokens: 0, totalTokens: 0, requestCount: 0, avgDurationMs: 0, costUsd: 0, durationSum: 0 });
   }
-
-  for (const r of filtered) {
-    const bucketTime = Math.floor(r.timestampMs / intervalMs) * intervalMs;
-    const bucket = buckets.get(bucketTime);
-    if (bucket) {
-      bucket.promptTokens += r.promptTokens;
-      bucket.candidatesTokens += r.candidatesTokens;
-      bucket.thoughtsTokens += r.thoughtsTokens;
-      bucket.audioTokens += r.audioInputTokens;
-      bucket.totalTokens += r.totalTokens;
-      bucket.requestCount += 1;
-      bucket.durationSum += r.durationMs;
-      bucket.costSum += r.costEstimateUsd;
-    }
+  for (const r of selectRecords(options, from, to, recordsSource)) {
+    const b = buckets.get(Math.floor(r.timestampMs / intervalMs) * intervalMs);
+    if (!b) continue;
+    b.promptTokens += r.promptTokens;
+    b.candidatesTokens += r.candidatesTokens;
+    b.thoughtsTokens += r.thoughtsTokens;
+    b.audioTokens += r.audioInputTokens;
+    b.totalTokens += r.totalTokens;
+    b.requestCount++;
+    b.durationSum += r.durationMs;
+    b.costUsd += r.costEstimateUsd;
   }
-
-  const points: TimeSeriesPoint[] = Array.from(buckets.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([ts, b]) => ({
-      timestamp: ts,
-      timeLabel: formatTimeLabel(ts, interval),
-      promptTokens: b.promptTokens,
-      candidatesTokens: b.candidatesTokens,
-      thoughtsTokens: b.thoughtsTokens,
-      audioTokens: b.audioTokens,
-      totalTokens: b.totalTokens,
-      requestCount: b.requestCount,
-      avgDurationMs: b.requestCount > 0 ? Math.round(b.durationSum / b.requestCount) : 0,
-      costUsd: Number(b.costSum.toFixed(6)),
-    }));
-
+  const points = [...buckets.values()].map(({ durationSum, ...b }) => ({
+    ...b,
+    avgDurationMs: b.requestCount ? Math.round(durationSum / b.requestCount) : 0,
+    costUsd: Number(b.costUsd.toFixed(6)),
+  }));
   return { ok: true, interval, points };
 }
 
 export function queryTokenAggregate(
-  options: {
-    from?: number;
-    to?: number;
-    sessionId?: string;
-    diarizationEnabled?: boolean;
-    provider?: string;
-    source?: string;
-    rootDiskDir?: string;
-  } = {},
+  options: Pick<RecordFilter, "from" | "to" | "sessionId" | "diarizationEnabled" | "provider" | "source" | "rootDiskDir"> = {},
   recordsSource: TokenMetricRecord[] = memoryBuffer
 ): TokenAggregateStats {
-  const now = Date.now();
-  const to = options.to || now;
-  const from = options.from || 0; // Default all history in buffer
+  const to = options.to || Date.now();
+  const records = selectRecords(options, options.from || 0, to, recordsSource);
+  const sum = (f: (r: TokenMetricRecord) => number) => records.reduce((n, r) => n + f(r), 0);
+  const totalTokens = sum(r => r.totalTokens);
 
-  const allRecords = getCombinedRecords(from, to, recordsSource, options.rootDiskDir);
-
-  const filtered = allRecords.filter((r) => {
-    if (r.timestampMs < from || r.timestampMs > to) return false;
-    if (options.sessionId && r.sessionId !== options.sessionId) return false;
-    if (options.diarizationEnabled !== undefined && Boolean(r.diarizationEnabled) !== options.diarizationEnabled) return false;
-    if (options.provider && (r.provider || "gemini") !== options.provider) return false;
-    if (options.source && r.source !== options.source) return false;
-    return true;
-  });
-
-  let totalTokens = 0;
-  let totalPromptTokens = 0;
-  let totalCandidatesTokens = 0;
-  let totalThoughtsTokens = 0;
-  let totalAudioTokens = 0;
-  let totalCostUsd = 0;
-  let totalDurationMs = 0;
-
-  const agentMap = new Map<string, { tokens: number; requests: number; cost: number }>();
-  const modelMap = new Map<string, { tokens: number; requests: number; cost: number }>();
-  const modalityMap = new Map<string, { tokens: number; requests: number; cost: number }>();
-  const stageMap = new Map<string, { tokens: number; requests: number; cost: number }>();
-  const diarizationMap = new Map<string, { tokens: number; requests: number; cost: number }>();
-  const providerMap = new Map<string, { tokens: number; requests: number; cost: number }>();
-
-  const accumulate = (
-    map: Map<string, { tokens: number; requests: number; cost: number }>,
-    key: string,
-    r: TokenMetricRecord
-  ) => {
-    const curr = map.get(key) || { tokens: 0, requests: 0, cost: 0 };
-    curr.tokens += r.totalTokens;
-    curr.requests += 1;
-    curr.cost += r.costEstimateUsd;
-    map.set(key, curr);
-  };
-
-  for (const r of filtered) {
-    totalTokens += r.totalTokens;
-    totalPromptTokens += r.promptTokens;
-    totalCandidatesTokens += r.candidatesTokens;
-    totalThoughtsTokens += r.thoughtsTokens;
-    totalAudioTokens += r.audioInputTokens;
-    totalCostUsd += r.costEstimateUsd;
-    totalDurationMs += r.durationMs;
-
-    accumulate(agentMap, r.agent, r);
-    accumulate(modelMap, r.model, r);
-    accumulate(modalityMap, r.modality, r);
-    accumulate(stageMap, r.stage, r);
-    accumulate(diarizationMap, r.diarizationEnabled ? "diarized" : "non_diarized", r);
-    accumulate(providerMap, r.provider || (r.agent === "google_cloud_stt" ? "google_cloud_stt" : "gemini"), r);
-  }
-
-  const buildDimStats = (map: Map<string, { tokens: number; requests: number; cost: number }>) => {
-    const res: Record<string, AggregateDimensionStats> = {};
-    for (const [k, v] of map.entries()) {
-      res[k] = {
-        tokens: v.tokens,
-        percent: totalTokens > 0 ? Number(((v.tokens / totalTokens) * 100).toFixed(1)) : 0,
-        requests: v.requests,
-        costUsd: Number(v.cost.toFixed(6)),
-      };
+  const by = (key: (r: TokenMetricRecord) => string) => {
+    const acc: Record<string, AggregateDimensionStats> = {};
+    for (const r of records) {
+      const a = (acc[key(r)] ??= { tokens: 0, percent: 0, requests: 0, costUsd: 0 });
+      a.tokens += r.totalTokens;
+      a.requests++;
+      a.costUsd += r.costEstimateUsd;
     }
-    return res;
+    for (const a of Object.values(acc)) {
+      a.percent = totalTokens > 0 ? Number(((a.tokens / totalTokens) * 100).toFixed(1)) : 0;
+      a.costUsd = Number(a.costUsd.toFixed(6));
+    }
+    return acc;
   };
 
   return {
     ok: true,
     totalTokens,
-    totalPromptTokens,
-    totalCandidatesTokens,
-    totalThoughtsTokens,
-    totalAudioTokens,
-    totalCostUsd: Number(totalCostUsd.toFixed(6)),
-    requestCount: filtered.length,
-    avgLatencyMs: filtered.length > 0 ? Math.round(totalDurationMs / filtered.length) : 0,
-    byAgent: buildDimStats(agentMap),
-    byModel: buildDimStats(modelMap),
-    byModality: buildDimStats(modalityMap),
-    byStage: buildDimStats(stageMap),
-    byDiarization: buildDimStats(diarizationMap),
-    byProvider: buildDimStats(providerMap),
+    totalPromptTokens: sum(r => r.promptTokens),
+    totalCandidatesTokens: sum(r => r.candidatesTokens),
+    totalThoughtsTokens: sum(r => r.thoughtsTokens),
+    totalAudioTokens: sum(r => r.audioInputTokens),
+    totalCostUsd: Number(sum(r => r.costEstimateUsd).toFixed(6)),
+    requestCount: records.length,
+    avgLatencyMs: records.length ? Math.round(sum(r => r.durationMs) / records.length) : 0,
+    byAgent: by(r => r.agent),
+    byModel: by(r => r.model),
+    byModality: by(r => r.modality),
+    byStage: by(r => r.stage),
+    byDiarization: by(r => (r.diarizationEnabled ? "diarized" : "non_diarized")),
+    byProvider: by(r => r.provider || (r.agent === "google_cloud_stt" ? "google_cloud_stt" : "gemini")),
   };
-}
-
-export function clearMemoryBuffer(): void {
-  memoryBuffer.length = 0;
 }
 
 export function getMemoryBufferSnapshot(): TokenMetricRecord[] {
@@ -687,7 +335,7 @@ export function getMemoryBufferSnapshot(): TokenMetricRecord[] {
 }
 
 // Self-check suite
-if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === `file://${process.argv[1]}`) {
   console.log("Running token-telemetry self-check...");
   const assert = (cond: any, msg: string) => {
     if (!cond) throw new Error("Assertion failed: " + msg);
@@ -695,7 +343,6 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
 
   const testRoot = path.join(process.cwd(), "data", "test-telemetry-" + Date.now());
   try {
-    clearMemoryBuffer();
 
     // 1. Test record creation with modality breakdown and diarization metadata
     const rec1 = recordTokenUsage({
@@ -801,8 +448,6 @@ if (import.meta.url && import.meta.url === `file://${process.argv[1]}`) {
 
     console.log("token-telemetry self-check ✓");
   } finally {
-    if (fs.existsSync(testRoot)) {
-      fs.rmSync(testRoot, { recursive: true, force: true });
-    }
+    fs.rmSync(testRoot, { recursive: true, force: true });
   }
 }

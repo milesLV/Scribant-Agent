@@ -92,7 +92,7 @@ GOOGLE_GENAI_USE_VERTEXAI=true
 
 # Vertex AI Memory Bank (Optional - falls back to in-memory/local JSON if omitted)
 GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_CLOUD_LOCATION=global
 VERTEX_MEMORY_BANK_ID=your-memory-bank-id
 
 # Application Identification

@@ -3,7 +3,7 @@ import { CalendarEvent, TaskItem, DriveDocItem } from "../types";
 // bundle — only the shape of its action-name keys does.
 import type { WORKSPACE_ACTIONS } from "../../workspace-tools";
 
-// In-memory or localStorage cache for sandbox state so it persists across runs
+// Signed-out sandbox state, persisted in localStorage.
 const SANDBOX_STATE_KEY = "scribant_sandbox";
 
 interface SandboxState {
@@ -42,137 +42,80 @@ function sandboxAdd(prefix: string, push: (state: SandboxState, id: string) => v
   return id;
 }
 
-// ==========================================
-// GOOGLE CALENDAR SERVICE
-// ==========================================
-
 // The client asks for exactly what an agent would call, so /api/execute needs no vocabulary of its
-// own to translate — this is the registry's own key set, not a hand-copied list that could drift.
+// own — this is the registry's own key set, not a hand-copied list that could drift.
 type ExecKind = keyof typeof WORKSPACE_ACTIONS;
 
-// Real mode executes server-side: the item + OAuth token go to /api/execute. Sandbox stays local.
-async function executeOnServer(kind: ExecKind, item: object, token: string): Promise<string> {
-  const res = await fetch("/api/execute", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind, item, accessToken: token })
-  });
+async function postExecute(body: object, failure: string): Promise<string> {
+  const res = await fetch("/api/execute", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Execution failed (HTTP ${res.status}).`);
+  if (!res.ok) throw new Error(data.error || `${failure} (HTTP ${res.status}).`);
   return data.id;
 }
 
-export async function createCalendarEvent(token: string | null, event: Omit<CalendarEvent, "status">): Promise<string> {
-  const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  const timeZone = event.timeZone || browserTimeZone;
-  if (!token) {
-    const id = sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, timeZone, status: "scheduled", eventId: id }));
-    executeOnServer("create_calendar_event", { title: event.title, description: event.description, start: event.start, end: event.end, allDay: event.allDay, timeZone }, "sandbox").catch(() => {});
-    return id;
-  }
-  const { title, description, start, end, allDay } = event;
-  return executeOnServer("create_calendar_event", { title, description, start, end, allDay, timeZone }, token);
+// Real mode executes server-side with the OAuth token. Sandbox mutates local state and still fires
+// the server's sandbox call (fire-and-forget) so it shows up in telemetry.
+async function dispatch(token: string | null, body: { kind: ExecKind } & Record<string, unknown>, sandbox: () => string, failure = "Execution failed"): Promise<string> {
+  if (token) return postExecute({ ...body, accessToken: token }, failure);
+  const id = sandbox();
+  postExecute({ ...body, accessToken: "sandbox" }, failure).catch(() => {});
+  return id;
 }
 
-// Edit the event already on the calendar. The live planner keeps refining one appointment as the
-// speaker adds a time or a place, and re-creating it would leave the earlier version behind.
-export async function updateCalendarEvent(token: string | null, eventId: string, event: Omit<CalendarEvent, "status">): Promise<string> {
-  const timeZone = event.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  const { title, description, start, end, allDay } = event;
-  if (!token) {
-    const state = getSandboxState();
-    state.events = state.events.map(e => (e.eventId === eventId ? { ...e, ...event, timeZone } : e));
-    saveSandboxState(state);
-    executeOnServer("update_calendar_event", { id: eventId, title, description, start, end, allDay, timeZone }, "sandbox").catch(() => {});
+const editSandbox = (edit: (state: SandboxState) => void) => { const s = getSandboxState(); edit(s); saveSandboxState(s); };
+const zoneOf = (event: { timeZone?: string }) => event.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+export function createCalendarEvent(token: string | null, event: Omit<CalendarEvent, "status">): Promise<string> {
+  const { title, description, start, end, allDay } = event, timeZone = zoneOf(event);
+  return dispatch(token, { kind: "create_calendar_event", item: { title, description, start, end, allDay, timeZone } },
+    () => sandboxAdd("mock-evt", (s, id) => s.events.push({ ...event, timeZone, status: "scheduled", eventId: id })));
+}
+
+// Edit in place: the live planner keeps refining one appointment, and re-creating would leave the old one.
+export function updateCalendarEvent(token: string | null, eventId: string, event: Omit<CalendarEvent, "status">): Promise<string> {
+  const { title, description, start, end, allDay } = event, timeZone = zoneOf(event);
+  return dispatch(token, { kind: "update_calendar_event", item: { id: eventId, title, description, start, end, allDay, timeZone } }, () => {
+    editSandbox(s => { s.events = s.events.map(e => (e.eventId === eventId ? { ...e, ...event, timeZone } : e)); });
     return eventId;
-  }
-  return executeOnServer("update_calendar_event", { id: eventId, title, description, start, end, allDay, timeZone }, token);
+  });
 }
 
-// ==========================================
-// GOOGLE TASKS SERVICE
-// ==========================================
-
-export async function createGoogleTask(token: string | null, task: Omit<TaskItem, "status">): Promise<string> {
-  if (!token) {
-    const id = sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id }));
-    executeOnServer("create_task", { title: task.title, notes: task.notes, dueDate: task.dueDate }, "sandbox").catch(() => {});
-    return id;
-  }
+export function createGoogleTask(token: string | null, task: Omit<TaskItem, "status">): Promise<string> {
   const { title, notes, dueDate } = task;
-  return executeOnServer("create_task", { title, notes, dueDate }, token);
+  return dispatch(token, { kind: "create_task", item: { title, notes, dueDate } },
+    () => sandboxAdd("mock-task", (s, id) => s.tasks.push({ ...task, status: "created", taskId: id })));
 }
 
-export async function updateGoogleTask(token: string | null, taskId: string, task: Omit<TaskItem, "status">): Promise<string> {
+export function updateGoogleTask(token: string | null, taskId: string, task: Omit<TaskItem, "status">): Promise<string> {
   const { title, notes, dueDate } = task;
-  if (!token) {
-    const state = getSandboxState();
-    state.tasks = state.tasks.map(t => (t.taskId === taskId ? { ...t, ...task } : t));
-    saveSandboxState(state);
-    executeOnServer("update_task", { id: taskId, title, notes, dueDate }, "sandbox").catch(() => {});
+  return dispatch(token, { kind: "update_task", item: { id: taskId, title, notes, dueDate } }, () => {
+    editSandbox(s => { s.tasks = s.tasks.map(t => (t.taskId === taskId ? { ...t, ...task } : t)); });
     return taskId;
-  }
-  return executeOnServer("update_task", { id: taskId, title, notes, dueDate }, token);
+  });
 }
-
-// ==========================================
-// GOOGLE DRIVE SERVICE
-// ==========================================
 
 // Reuse the folder when this session already has one, so repeated saves land in one place.
 export async function createDriveFolder(token: string | null, folderName: string): Promise<string> {
-  if (!token) {
-    const existing = getSandboxState().folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
-    if (existing) return existing.id;
-    const id = sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName }));
-    executeOnServer("create_drive_folder", { folderName }, "sandbox").catch(() => {});
-    return id;
-  }
-  return executeOnServer("create_drive_folder", { folderName }, token);
+  const existing = !token && getSandboxState().folders.find(f => f.name.toLowerCase() === folderName.toLowerCase());
+  if (existing) return existing.id;
+  return dispatch(token, { kind: "create_drive_folder", item: { folderName } },
+    () => sandboxAdd("mock-fld", (s, id) => s.folders.push({ id, name: folderName })));
 }
 
-export async function uploadDriveFile(
-  token: string | null,
-  fileName: string,
-  content: string,
-  folderId?: string
-): Promise<string> {
-  if (!token) {
-    const id = sandboxAdd("mock-doc", (s, id) => s.docs.push({ name: fileName, fileId: id, folderId }));
-    executeOnServer("create_drive_doc", { fileName, content, folderId }, "sandbox").catch(() => {});
-    return id;
-  }
-  return executeOnServer("create_drive_doc", { fileName, content, folderId }, token);
+export function uploadDriveFile(token: string | null, fileName: string, content: string, folderId?: string): Promise<string> {
+  return dispatch(token, { kind: "create_drive_doc", item: { fileName, content, folderId } },
+    () => sandboxAdd("mock-doc", (s, id) => s.docs.push({ name: fileName, fileId: id, folderId })));
 }
 
-// Undo a create: real mode deletes via /api/execute by the exact id the create returned; sandbox
-// drops the matching entry from local state.
-export async function deleteCreatedItem(
-  token: string | null,
-  kind: "create_calendar_event" | "create_task",
-  id: string,
-): Promise<void> {
-  if (!token) {
-    const [list, idKey] = kind === "create_calendar_event" ? ["events", "eventId"] as const : ["tasks", "taskId"] as const;
-    const state = getSandboxState();
-    state[list] = (state[list] as any[]).filter(x => x[idKey] !== id);
-    saveSandboxState(state);
-    fetch("/api/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, action: "delete", id, accessToken: "sandbox" }),
-    }).catch(() => {});
-    return;
-  }
-  const res = await fetch("/api/execute", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind, action: "delete", id, accessToken: token })
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Undo failed (HTTP ${res.status}).`);
-  }
+// Undo a create by the exact id the create returned.
+export async function deleteCreatedItem(token: string | null, kind: "create_calendar_event" | "create_task", id: string): Promise<void> {
+  await dispatch(token, { kind, action: "delete", id }, () => {
+    editSandbox(s => {
+      if (kind === "create_calendar_event") s.events = s.events.filter(e => e.eventId !== id);
+      else s.tasks = s.tasks.filter(t => t.taskId !== id);
+    });
+    return id;
+  }, "Undo failed");
 }
 
 export function resetSandboxState() {

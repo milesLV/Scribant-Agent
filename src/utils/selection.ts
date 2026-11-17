@@ -36,16 +36,9 @@ export function remapOffset(prev: string, next: string, offset: number): number 
 export type SelectionPlan = { start: number; end: number } | null;
 
 /**
- * The whole decision of usePreservedSelection, as a pure function so it can be self-checked
- * without a DOM. The hook is only responsible for capturing `pre` and writing the result.
- *
- * `pre` is the selection as it was BEFORE the new value reached the DOM. It has to be captured
- * during render: assigning `.value` to a textarea collapses the caret to the end, so by the time
- * a layout effect runs the original position is already gone. `null` means there was nothing
- * worth preserving (no element, not focused, or disabled).
- *
- * Order matters and is asserted in the self-check: `local` must win over everything, because a
- * keystroke has already been placed correctly by the browser and any remap would fight it.
+ * usePreservedSelection's decision as a pure, DOM-free function. `pre` is the selection captured
+ * before the new value reached the DOM (null = nothing to preserve). `local` wins over everything:
+ * the browser already placed a keystroke's caret correctly, and a remap would fight it.
  */
 export function planSelectionRestore(input: {
   prev: string;
